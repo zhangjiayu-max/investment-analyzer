@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse
 
 from config import ROOT, IMAGES_DIR, UPLOADS_DIR
+from infra.blocking import run_blocking
 from infra.state import (
     analyze_progress as _analyze_progress,
     analyze_cancel as _analyze_cancel,
@@ -452,6 +453,10 @@ async def download_document(article_id: int):
 
 @router.get("/api/linked-articles/{article_id}/content")
 async def get_document_content(article_id: int):
+    return await run_blocking(get_document_content_sync, article_id)
+
+
+def get_document_content_sync(article_id: int):
     article = get_linked_article(article_id)
     if not article or not article.get("file_path"):
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -504,6 +509,10 @@ async def delete_linked_article_api(article_id: int):
 
 @router.post("/api/linked-articles/{article_id}/embed")
 async def embed_document(article_id: int):
+    return await run_blocking(embed_document_sync, article_id)
+
+
+def embed_document_sync(article_id: int):
     """对单篇文档做 embedding 并存入向量库。"""
     article = get_linked_article(article_id)
     if not article or not article.get("file_path"):
@@ -525,7 +534,7 @@ async def embed_document(article_id: int):
         elif file_type == "pdf":
             from PyPDF2 import PdfReader
             reader = PdfReader(str(file_path))
-            pages = [p.extract_text() for p in reader.pages if p.extract_text()]
+            pages = [text for page in reader.pages if (text := page.extract_text())]
             content = "\n\n".join(pages)
         elif file_type == "docx":
             from docx import Document
@@ -991,6 +1000,10 @@ async def _crawl_one_author_article(article_id: int, url: str):
 
 
 async def _embed_linked_doc(article_id: int, file_type: str, raw_content: bytes, title: str):
+    return await run_blocking(_embed_linked_doc_sync, article_id, file_type, raw_content, title)
+
+
+def _embed_linked_doc_sync(article_id: int, file_type: str, raw_content: bytes, title: str):
     """后台任务：提取文档文本并 embedding。"""
     update_linked_article_embed_status(article_id, "embedding")
     try:
@@ -1001,7 +1014,7 @@ async def _embed_linked_doc(article_id: int, file_type: str, raw_content: bytes,
             from PyPDF2 import PdfReader
             import io
             reader = PdfReader(io.BytesIO(raw_content))
-            pages = [p.extract_text() for p in reader.pages if p.extract_text()]
+            pages = [text for page in reader.pages if (text := page.extract_text())]
             text = "\n\n".join(pages)
         elif file_type == "docx":
             from docx import Document

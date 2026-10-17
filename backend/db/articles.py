@@ -289,14 +289,30 @@ def get_author_article(article_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def delete_author_article(article_id: int) -> bool:
-    """删除作者文章。"""
+def _delete_indexed_article(table, article_id, content_type):
+    """源记录/分块/FTS同事务，向量清理失败时检索仍由源记录过滤兜底。"""
     conn = _get_conn()
-    cur = conn.execute("DELETE FROM author_articles WHERE id = ?", (article_id,))
-    conn.commit()
-    deleted = cur.rowcount > 0
-    conn.close()
+    try:
+        with conn:
+            if content_type == 'linked_doc':
+                conn.execute('DELETE FROM document_chunks WHERE article_id=?', (article_id,))
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_fts'").fetchone()
+            if exists:
+                conn.execute('DELETE FROM knowledge_fts WHERE content_type=? AND reference_id=?',
+                             (content_type,str(article_id)))
+            cur = conn.execute(f'DELETE FROM {table} WHERE id=?', (article_id,))
+        deleted = cur.rowcount > 0
+    finally:
+        conn.close()
+    # 允许重复删除重试外部索引，源表不存在时也继续清理。
+    from services.rag import delete_chroma_by_filter
+    delete_chroma_by_filter(content_type, reference_id=str(article_id))
     return deleted
+
+
+def delete_author_article(article_id: int) -> bool:
+    """删除作者文章及对应检索索引。"""
+    return _delete_indexed_article('author_articles', article_id, 'author_article')
 
 
 def count_author_articles() -> dict:
@@ -356,13 +372,8 @@ def update_linked_article_file(article_id: int, file_path: str):
 
 
 def delete_linked_article(article_id: int) -> bool:
-    """删除文档记录。"""
-    conn = _get_conn()
-    cur = conn.execute("DELETE FROM linked_articles WHERE id = ?", (article_id,))
-    conn.commit()
-    deleted = cur.rowcount > 0
-    conn.close()
-    return deleted
+    """删除文档、分块及检索索引。"""
+    return _delete_indexed_article('linked_articles', article_id, 'linked_doc')
 
 
 def update_linked_article_embed_status(article_id: int, status: str, chunks_count: int = 0):

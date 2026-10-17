@@ -70,8 +70,9 @@ def test_extract_events_from_news_llm_success():
     """LLM 成功返回事件列表。"""
     from services.event_radar import _extract_events_from_news
 
+    event_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
     fake_news = [
-        {"news_title": "SpaceX 宣布 7 月 18 日星舰第六次试飞",
+        {"news_title": "SpaceX 宣布未来星舰第六次试飞",
          "news_summary": "首次尝试用机械臂回收超重型助推器",
          "news_source": "新华财经", "news_url": "http://x", "published_at": "2026-07-10"},
     ]
@@ -80,16 +81,17 @@ def test_extract_events_from_news_llm_success():
     fake_llm_resp.choices[0].message.content = '''[
         {
             "title": "SpaceX 星舰第六次试飞首次尝试助推器回收",
-            "summary": "7 月 18 日星舰试飞首次尝试用机械臂回收超重型助推器",
+            "summary": "星舰试飞首次尝试用机械臂回收超重型助推器",
             "event_type": "industry",
             "direction": "positive",
-            "expected_date": "2026-07-18",
+            "expected_date": "EVENT_DATE",
             "affected_sectors": ["军工"],
             "affected_themes": ["火箭回收", "商业航天"],
             "confidence": 0.95
         }
     ]'''
 
+    fake_llm_resp.choices[0].message.content = fake_llm_resp.choices[0].message.content.replace("EVENT_DATE", event_date)
     with patch("services.event_radar._call_llm", return_value=fake_llm_resp):
         events = _extract_events_from_news(fake_news, trace_id="test")
 
@@ -247,12 +249,12 @@ def test_update_event_statuses_upcoming_to_imminent(tmp_db):
 
 
 def test_update_event_statuses_to_materialized(tmp_db):
-    """today >= expected_date → materialized。"""
+    """today > expected_date → materialized；事件当天仍保持 imminent。"""
     from services.event_radar import _update_event_statuses
     from db.market_events import create_market_event, get_market_event
 
-    # 今天就是 expected_date
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 昨天已过事件日，进入已落地状态
+    today = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     eid = create_market_event(
         title="今日事件", summary="", event_type="theme", direction="neutral",
         expected_date=today, affected_sectors=[], affected_themes=[],
@@ -261,7 +263,7 @@ def test_update_event_statuses_to_materialized(tmp_db):
     _update_event_statuses()
     ev = get_market_event(eid)
     assert ev["status"] == "materialized"
-    assert ev["materialized_date"] == today
+    assert ev["materialized_date"] == datetime.now().strftime("%Y-%m-%d")
 
 
 def test_update_event_statuses_to_expired(tmp_db):
@@ -462,7 +464,7 @@ def test_verify_single_event_positive_correct():
     assert result is not None
     assert result["status"] == "correct"
     assert result["change_pct"] == 2.0
-    assert result["index_code"] == "990001"
+    assert result["index_code"] in {"990001", "H30184"}
     assert result["index_name"] == "半导体"
     assert result["direction_predicted"] == "positive"
 

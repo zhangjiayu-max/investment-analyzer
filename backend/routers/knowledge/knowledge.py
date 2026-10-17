@@ -1,5 +1,8 @@
 """投资知识库路由 — /api/knowledge/*"""
 
+import asyncio
+import sys
+from pathlib import Path
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -52,46 +55,51 @@ async def delete_knowledge_item(knowledge_id: int):
 
 
 @router.post("/cleanup-orphans")
-async def cleanup_orphan_records():
+async def cleanup_orphan_records(dry_run: bool = False):
     """清理 FTS 索引中的孤儿记录（knowledge_base 中已删除但 FTS 中仍存在的记录）。"""
-    result = cleanup_orphan_fts_records()
+    result = cleanup_orphan_fts_records(dry_run=dry_run)
     return {"ok": True, **result}
 
 
-@router.post("/import")
+OBSIDIAN_SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'sync_obsidian.py'
+_OBSIDIAN_SLOTS = asyncio.Semaphore(1)
+
+
+async def _run_obsidian(mode, vault_path=None, timeout=120):
+    if not OBSIDIAN_SCRIPT.is_file():
+        raise HTTPException(503, 'Obsidian 同步脚本不存在')
+    command = [sys.executable, str(OBSIDIAN_SCRIPT), mode]
+    if vault_path:
+        command += ['--vault', vault_path]
+    async with _OBSIDIAN_SLOTS:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            process.kill()
+            await process.communicate()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(504, f'同步超时（{timeout}s）')
+        return stdout, stderr, process.returncode
+
+
+@router.post('/import')
 async def import_obsidian(vault_path: str = None):
-    """触发 Obsidian vault 同步到知识库。"""
-    import subprocess, sys
-    script = str(__import__('pathlib').Path(__file__).resolve().parent.parent / "scripts" / "sync_obsidian.py")
-    cmd = [sys.executable, script, "--sync"]
-    if vault_path:
-        cmd += ["--vault", vault_path]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return {
-            "ok": result.returncode == 0,
-            "output": result.stdout[-2000:] if result.stdout else "",
-            "error": result.stderr[-500:] if result.stderr else "",
-        }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "同步超时（120s）")
-    except Exception as e:
-        raise HTTPException(500, f"同步失败: {e}")
+    """异步子进程执行同步；失败不返回假成功。"""
+    stdout, stderr, returncode = await _run_obsidian('--sync', vault_path)
+    if returncode:
+        raise HTTPException(502, stderr.decode(errors='replace')[-500:] or '同步失败')
+    return {'ok':True, 'output':stdout.decode(errors='replace')[-2000:], 'error':''}
 
 
-@router.get("/obsidian/status")
+@router.get('/obsidian/status')
 async def obsidian_status(vault_path: str = None):
-    """查看 Obsidian 同步状态。"""
-    import subprocess, sys
-    script = str(__import__('pathlib').Path(__file__).resolve().parent.parent / "scripts" / "sync_obsidian.py")
-    cmd = [sys.executable, script, "--stats"]
-    if vault_path:
-        cmd += ["--vault", vault_path]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return {"ok": True, "output": result.stdout}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    stdout, stderr, returncode = await _run_obsidian('--stats', vault_path, timeout=30)
+    if returncode:
+        raise HTTPException(502, stderr.decode(errors='replace')[-500:] or '状态读取失败')
+    return {'ok':True, 'output':stdout.decode(errors='replace')}
 
 
 # ── 知识反馈回流 API ──

@@ -4,6 +4,7 @@ import {
   listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, scanPortfolioAlerts,
   dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation, acknowledgeAlert,
 } from '../../api'
+import { usePageRefresh } from '../../composables/usePageRefresh'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import Skeleton from '../ui/Skeleton.vue'
@@ -390,14 +391,7 @@ async function ignoreAllInfoAlerts() {
   }
 }
 
-onMounted(() => {
-  loadAlerts()
-  loadDailyAdvice()
-})
-onActivated(() => {
-  loadAlerts()
-  loadDailyAdvice()
-})
+usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
 </script>
 
 <template>

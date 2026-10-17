@@ -3,31 +3,32 @@
 import uuid
 import time
 import logging
-import threading
+from contextvars import ContextVar
 
 logger = logging.getLogger(__name__)
 
-# 线程本地存储保存当前请求上下文
-_request_ctx = threading.local()
+# asyncio 任务之间隔离，to_thread/copy_context 可传播给阻塞工作。
+_request_id = ContextVar("request_id", default="unknown")
+_request_start = ContextVar("request_start", default=None)
 
 
 def get_request_id() -> str:
     """获取当前请求的 request_id。"""
-    return getattr(_request_ctx, "request_id", "unknown")
+    return _request_id.get()
 
 
 def set_request_id(request_id: str):
     """设置当前请求的 request_id。"""
-    _request_ctx.request_id = request_id
+    return _request_id.set(request_id)
 
 
 def get_request_start() -> float:
     """获取当前请求的开始时间。"""
-    return getattr(_request_ctx, "start_time", time.time())
+    return _request_start.get() or time.time()
 
 
 def set_request_start(t: float):
-    _request_ctx.start_time = t
+    return _request_start.set(t)
 
 
 def generate_request_id() -> str:
@@ -44,18 +45,21 @@ class RequestTracingMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             request_id = generate_request_id()
-            set_request_id(request_id)
-            set_request_start(time.time())
+            id_token = set_request_id(request_id)
+            start_token = set_request_start(time.time())
 
             # 注入到响应头
             async def send_with_header(message):
                 if message["type"] == "http.response.start":
-                    headers = dict(message.get("headers", {}))
-                    headers[b"x-request-id"] = request_id.encode()
-                    message["headers"] = list(headers.items())
+                    headers = [(k,v) for k,v in message.get("headers", []) if k.lower() != b"x-request-id"]
+                    message["headers"] = headers + [(b"x-request-id", request_id.encode())]
                 await send(message)
 
-            await self.app(scope, receive, send_with_header)
+            try:
+                await self.app(scope, receive, send_with_header)
+            finally:
+                _request_start.reset(start_token)
+                _request_id.reset(id_token)
         else:
             await self.app(scope, receive, send)
 

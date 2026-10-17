@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { isDark, toggleDark } from '../../composables/useTheme'
 import { getTokenUsageBudget, getKycQuestionnaire } from '../../api'
-import { navItems } from '../../navigation'
+import { navItems, getVisibleNavItems, isDevMode, setDevMode } from '../../navigation'
 import Icon from '../ui/Icon.vue'
 import KycWizard from '../family/KycWizard.vue'
 import NotificationCenter from './NotificationCenter.vue'
@@ -12,6 +12,15 @@ const props = defineProps({
   showKyc: { type: Boolean, default: false },
 })
 const emit = defineEmits(['navigate', 'close-kyc'])
+
+// ── 开发者模式（功能精简：默认隐藏 hidden/devOnly 页面）──
+const devMode = ref(isDevMode())
+const visibleNavItems = computed(() => getVisibleNavItems(devMode.value))
+
+function toggleDevMode() {
+  devMode.value = !devMode.value
+  setDevMode(devMode.value)
+}
 
 // ── Token 预算指示器 ──────────────────────────────
 const tokenUsed = ref(0)
@@ -73,7 +82,7 @@ function navigate(key) {
 
 // Auto-expand group when a child is active
 const activeGroup = computed(() => {
-  for (const item of navItems) {
+  for (const item of visibleNavItems.value) {
     if (item.children?.some(c => c.key === props.activePage)) {
       return item.key
     }
@@ -95,7 +104,7 @@ const activeGroup = computed(() => {
 
     <!-- Navigation -->
     <nav class="sidebar-nav">
-      <template v-for="item in navItems" :key="item.key">
+      <template v-for="item in visibleNavItems" :key="item.key">
         <!-- Flat item (no children) -->
         <button
           v-if="!item.children"
@@ -163,6 +172,10 @@ const activeGroup = computed(() => {
       <button @click="localShowKyc = true" class="nav-item kyc-entry" title="完善投资画像，让 AI 更懂你">
         <Icon name="evolution" size="18" class="nav-icon" />
         <span class="nav-label">我的投资画像</span>
+      </button>
+      <button @click="toggleDevMode()" :class="['nav-item', 'dev-mode-toggle', { active: devMode }]" title="开发者模式：显示全部功能（系统治理、诊断、实验页等）">
+        <Icon name="config" size="18" class="nav-icon" />
+        <span class="nav-label">开发者模式</span>
       </button>
       <button @click="toggleDark()" class="nav-item theme-toggle" :title="isDark ? '切换到亮色模式' : '切换到暗色模式'">
         <Icon :name="isDark ? 'sun' : 'moon'" size="18" class="nav-icon" />
@@ -440,6 +453,10 @@ const activeGroup = computed(() => {
 }
 
 .theme-toggle { color: var(--color-text-muted); }
+
+.dev-mode-toggle { color: var(--color-text-muted); }
+.dev-mode-toggle.active { color: var(--color-primary); background: var(--color-primary-bg); }
+.dev-mode-toggle.active .nav-icon { color: var(--color-primary); }
 
 .kyc-entry { color: var(--color-primary); }
 .kyc-entry .nav-icon { color: var(--color-primary); }

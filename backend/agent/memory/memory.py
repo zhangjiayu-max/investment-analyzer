@@ -78,7 +78,7 @@ def compress_history_semantic(history: list, max_tokens: int = 3000, conversatio
         try:
             from db import get_conversation_summary
             cached = get_conversation_summary(conversation_id)
-            if cached and cached.get("up_to_message_id", 0) >= len(old_messages):
+            if cached and cached.get("up_to_message_id", 0) == max((m.get("id", 0) for m in old_messages), default=0) and all(m.get("id") for m in old_messages):
                 cached_summary = cached["summary"]
         except Exception:
             pass
@@ -93,7 +93,8 @@ def compress_history_semantic(history: list, max_tokens: int = 3000, conversatio
         if conversation_id:
             try:
                 from db import save_conversation_summary
-                save_conversation_summary(conversation_id, len(old_messages), summary)
+                if all(m.get("id") for m in old_messages):
+                    save_conversation_summary(conversation_id, max(m["id"] for m in old_messages), summary)
             except Exception:
                 pass
 
@@ -351,7 +352,7 @@ def get_conversation_summary(conversation_id: int) -> str:
         # 尝试保存摘要供后续使用
         try:
             from db.conversations import save_conversation_summary
-            save_conversation_summary(conversation_id, len(messages), summary)
+            save_conversation_summary(conversation_id, max(m["id"] for m in messages), summary)
         except Exception:
             pass
 
@@ -581,7 +582,7 @@ def update_conversation_summary(conversation_id: int) -> bool:
         if not summary:
             return False
 
-        save_conversation_summary(conversation_id, len(messages), summary)
+        save_conversation_summary(conversation_id, max(m["id"] for m in messages), summary)
         logger.info(f"[memory] 对话 {conversation_id} 摘要已更新")
         return True
     except Exception as e:

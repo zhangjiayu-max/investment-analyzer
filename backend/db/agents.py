@@ -1001,6 +1001,17 @@ def _init_wealth_specialists(conn):
             (json.dumps(ks, ensure_ascii=False), agent_key)
         )
 
+    # R1（2026-10-15）：消除 market_analyst 重复 key
+    # 历史遗留：agents 表存在两条 agent_key='market_analyst' 记录（id=2564「择时分析师」preset=1
+    # 与 id=21831「市场分析师」preset=0），load_specialist_agents() 用 dict 存储导致同名 key
+    # 后者覆盖前者，实际生效为「市场分析师」。此处把「择时分析师」改 key 为 market_timer，
+    # 保留为独立可路由专家（不删除历史数据），消除歧义。
+    # 幂等：仅当存在 name='择时分析师' 且 agent_key='market_analyst' 的记录时才改。
+    conn.execute("""
+        UPDATE agents SET agent_key = 'market_timer', is_preset = 0
+        WHERE name = '择时分析师' AND agent_key = 'market_analyst'
+    """)
+
 
 # ── Agent CRUD ──────────────────────────────────────
 
@@ -1250,7 +1261,7 @@ def update_agent_run_status(run_id: int, status: str, result: str = None,
         updates.append("started_at = datetime('now','localtime')")
 
     params.append(run_id)
-    conn.execute(f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?", params)
+    conn.execute(f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ? AND status != 'cancelled'", params)
     conn.commit()
     conn.close()
 

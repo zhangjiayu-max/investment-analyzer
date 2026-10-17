@@ -1,6 +1,6 @@
 """持仓管理相关的 Pydantic 模型。"""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateHoldingRequest(BaseModel):
@@ -52,12 +52,14 @@ class CreateTransactionRequest(BaseModel):
 
 
 class ConfirmTransactionRequest(BaseModel):
-    confirmed_price: float
-    confirmed_shares: float | None = None
-    confirmed_amount: float | None = None
-    target_fund_code: str | None = None     # 转换时：目标基金代码
-    target_fund_name: str | None = None     # 转换时：目标基金名称
-    fee: float = 0                          # 手续费（申购费/赎回费）
+    confirmed_price: float = Field(gt=0, allow_inf_nan=False)
+    confirmed_shares: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    confirmed_amount: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    target_fund_code: str | None = None
+    target_fund_name: str | None = None
+    target_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    target_shares: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    fee: float = Field(default=0, ge=0, allow_inf_nan=False)
 
 
 class SellPreviewRequest(BaseModel):

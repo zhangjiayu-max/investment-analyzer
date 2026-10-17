@@ -1,6 +1,7 @@
 """投资分析助手 — FastAPI 后端"""
 
 import asyncio
+from infra.blocking import run_blocking
 import json
 import logging
 
@@ -63,10 +64,9 @@ app = FastAPI(title="投资分析助手", version="0.4.0")
 _quote_bar_cache = {"hot_keywords": None, "expires_at": None}
 
 
-app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000").split(",") if x.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,7 +78,11 @@ app.add_middleware(RequestTracingMiddleware)
 # API 标准化：响应包装中间件 + 全局异常处理器
 from api.middleware import register_exception_handlers, ResponseWrapperMiddleware
 app.add_middleware(ResponseWrapperMiddleware)
+# 后注册在外层：先包装业务 JSON，再压缩，避免浏览器 gzip 响应绕过协议。
+app.add_middleware(GZipMiddleware, minimum_size=500)
 register_exception_handlers(app)
+from infra.api_auth import ApiAuthMiddleware
+app.add_middleware(ApiAuthMiddleware, token=os.getenv("API_AUTH_TOKEN", ""))
 
 # ── 路由注册 ─────────────────────────────────────
 
@@ -311,7 +315,7 @@ async def _async_fetch_index_history(index_codes: list):
     from services.index_history_fetcher import fetch_index_history
     for code in index_codes:
         try:
-            result = fetch_index_history(code, years=10)
+            result = await run_blocking(fetch_index_history, code, years=10)
             if result.get("saved", 0) > 0:
                 logging.info(f"指数 {code} 回填 {result['saved']} 条")
         except Exception as e:
@@ -406,7 +410,7 @@ async def startup():
     logging.info("FTS5 初始化完成")
 
     # 2. 异步初始化（后台执行，不阻塞启动）
-    async def _async_init():
+    def _blocking_init():
         """后台异步初始化 ChromaDB、Embedding 模型和种子数据。"""
         try:
             logging.info("后台初始化 ChromaDB...")
@@ -441,7 +445,7 @@ async def startup():
             logging.warning(f"记忆维护失败: {e}")
 
     # 后台执行异步初始化
-    asyncio.create_task(_async_init())
+    asyncio.create_task(run_blocking(_blocking_init))
     logging.info("后台初始化任务已启动")
 
     # 后台每日报告（LLM 调用，默认关闭）
@@ -1432,7 +1436,7 @@ async def _auto_daily_health_diagnosis():
 
             try:
                 from services.health.health_v2_service import get_health_v2_dashboard
-                result = get_health_v2_dashboard(force_refresh=True)
+                result = await run_blocking(get_health_v2_dashboard, force_refresh=True)
                 total_score = result.get("health_score", {}).get("total_score", 0)
                 actions_count = len(result.get("actions", []))
                 logging.info(
@@ -1743,17 +1747,17 @@ async def _auto_refresh_nav():
             logging.info("[auto-nav] 开始自动确认到期交易并刷新持仓净值...")
             from db.portfolio import auto_confirm_due_transactions, refresh_all_fund_prices
             try:
-                auto_result = auto_confirm_due_transactions()
+                auto_result = await run_blocking(auto_confirm_due_transactions)
                 logging.info(f"[auto-nav] 到期交易自动确认完成: {auto_result}")
             except Exception as ae:
                 logging.warning(f"[auto-nav] 自动确认交易异常: {ae}")
-            result = refresh_all_fund_prices()
+            result = await run_blocking(refresh_all_fund_prices)
             logging.info(f"[auto-nav] 净值刷新完成: {result}")
 
             # 净值刷新后自动保存持仓快照
             try:
                 from db.portfolio import save_portfolio_snapshot
-                save_portfolio_snapshot()
+                await run_blocking(save_portfolio_snapshot)
                 logging.info("[auto-nav] 持仓快照已保存")
             except Exception as se:
                 logging.warning(f"[auto-nav] 持仓快照保存异常: {se}")
@@ -1769,7 +1773,7 @@ async def _auto_refresh_nav():
             # 预警扫描后自动运行每日持仓提示引擎
             try:
                 from services.daily_position_advisor import run_daily_position_advice
-                advice_result = run_daily_position_advice(
+                advice_result = await run_blocking(run_daily_position_advice,
                     user_id="default",
                     trigger_type="auto_nav_refresh",
                     force=False,
@@ -2034,6 +2038,15 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get('/api/ready')
+async def readiness():
+    """只读检查核心SQLite表；向量依赖单独标为未初始化/可用。"""
+    from infra.readiness import check_readiness
+    from fastapi.responses import JSONResponse
+    report = await run_blocking(check_readiness)
+    return JSONResponse(report, status_code=200 if report['ready'] else 503)
+
+
 # ── P4-14 前端错误监控 + Web Vitals 采集端点 ──────────────────────────────────
 # 自建轻量上报，不引入 Sentry。前端用 sendBeacon / fetch keepalive 上报。
 @app.post("/api/monitor/errors")
@@ -2062,18 +2075,17 @@ async def report_frontend_vitals(body: dict = Body(...)):
 
 @app.get("/api/proxy-image")
 async def proxy_image(url: str):
-    """代理图片请求，绕过微信防盗链。"""
+    """代理允许的微信图片，逐跳验证并限制类型与大小。"""
+    from infra.image_proxy import fetch_image
     import httpx
-    headers = {
-        "Referer": "https://mp.weixin.qq.com/",
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/537.36",
-    }
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code != 200:
-            raise HTTPException(resp.status_code, "图片获取失败")
-        ct = resp.headers.get("content-type", "image/jpeg")
-        return StreamingResponse(iter([resp.content]), media_type=ct)
+    from fastapi.responses import Response
+    try:
+        content, content_type = await fetch_image(url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except httpx.HTTPError:
+        raise HTTPException(502, '图片获取失败')
+    return Response(content, media_type=content_type, headers={'X-Content-Type-Options':'nosniff'})
 
 
 
@@ -2398,4 +2410,4 @@ async def update_agent_tools_api(agent_key: str, tools: list[str] = Body(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

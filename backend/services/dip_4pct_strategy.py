@@ -12,6 +12,8 @@
 """
 import json
 import logging
+import math
+import sqlite3
 from datetime import datetime
 from typing import Optional
 
@@ -38,7 +40,8 @@ class DipStrategy4Pct:
         return get_config_bool("dip_4pct.enabled", False)
 
     def check_trigger(self, fund_code: str, current_price: float = None,
-                      valuation_percentile: float = None) -> dict:
+                      valuation_percentile: float = None,
+                      user_id: str = "default", account: str = None) -> dict:
         """检查是否触发4%定投。
 
         Args:
@@ -89,14 +92,21 @@ class DipStrategy4Pct:
             if current_price is None:
                 return {"triggered": False, "reason": "无法获取当前净值",
                         "plan": plan}
+        if not math.isfinite(current_price) or current_price <= 0:
+            return {"triggered": False, "reason": "当前净值无效", "plan": plan}
 
         # 4. 获取估值百分位（若未传）
         if valuation_percentile is None:
             valuation_percentile = self._fetch_valuation_percentile(
-                fund_code, plan.get("metric_type")
+                fund_code, plan.get("metric_type"), user_id, account
             )
 
         # 5. 估值前置检查
+        if (valuation_percentile is None or not math.isfinite(valuation_percentile)
+                or not 0 <= valuation_percentile <= 100):
+            return {"triggered": False, "reason": "缺少估值数据，无法判断低估前提",
+                    "plan": plan, "current_price": current_price,
+                    "valuation_percentile": None}
         if valuation_percentile is not None and valuation_percentile >= valuation_threshold:
             return {
                 "triggered": False,
@@ -107,7 +117,35 @@ class DipStrategy4Pct:
             }
 
         # 6. 查上一买入价（从transactions表）
-        prev_buy_price = self._get_last_buy_price(fund_code)
+        prev_buy_price = self._get_last_buy_price(fund_code, user_id=user_id, account=account)
+        if executed_count and prev_buy_price is None:
+            return {"triggered": False, "reason": "已有执行记录但缺少确认买入价，无法计算跌幅",
+                    "plan": plan}
+
+        # 同一份未执行建议复用原始快照，避免每次轮询重复触发/改价。
+        from db.dip_investment_plans import list_dip_triggers
+
+        def stored_trigger_result(trigger):
+            """成功创建与唯一键冲突均返回同一份已保存快照。"""
+            return {
+                "triggered": not trigger["executed"],
+                "reason": "定投建议已执行" if trigger["executed"] else "已有待执行定投建议",
+                "plan": plan,
+                "trigger_id": trigger["id"], "trigger_num": trigger["trigger_num"],
+                "prev_buy_price": trigger["prev_buy_price"],
+                "current_price": trigger["current_price"],
+                "actual_dip_pct": trigger["actual_dip_pct"],
+                "valuation_percentile": trigger["valuation_percentile"],
+                "suggested_amount": trigger["suggested_amount"],
+                "cumulative_invested": executed_count * single_amount,
+                "remaining_budget": max_amount - (executed_count + 1) * single_amount,
+                "next_trigger_price": trigger["current_price"] * (1 - dip_pct_threshold / 100),
+            }
+
+        pending = next((t for t in list_dip_triggers(plan_id=plan["id"])
+                        if t["trigger_num"] == executed_count + 1 and not t["executed"]), None)
+        if pending:
+            return stored_trigger_result(pending)
 
         # 7. 计算跌幅并判断是否触发
         if prev_buy_price is None:
@@ -165,23 +203,33 @@ class DipStrategy4Pct:
         if result["triggered"]:
             try:
                 from db.dip_investment_plans import create_dip_trigger
-                create_dip_trigger(
-                    plan_id=plan["id"],
-                    fund_code=fund_code,
-                    trigger_num=result["trigger_num"],
-                    trigger_date=datetime.now().strftime("%Y-%m-%d"),
-                    prev_buy_price=prev_buy_price or current_price,
-                    current_price=current_price,
-                    actual_dip_pct=result["actual_dip_pct"],
-                    valuation_percentile=valuation_percentile or 0,
-                    suggested_amount=result["suggested_amount"],
-                )
+                try:
+                    create_dip_trigger(
+                        plan_id=plan["id"],
+                        fund_code=fund_code,
+                        trigger_num=result["trigger_num"],
+                        trigger_date=datetime.now().strftime("%Y-%m-%d"),
+                        prev_buy_price=prev_buy_price or current_price,
+                        current_price=current_price,
+                        actual_dip_pct=result["actual_dip_pct"],
+                        valuation_percentile=valuation_percentile,
+                        suggested_amount=result["suggested_amount"],
+                    )
+                except sqlite3.IntegrityError:
+                    # 并发请求可能已写入同一(plan_id, trigger_num)，以唯一键获胜者为准。
+                    pass
+                saved = next((t for t in list_dip_triggers(plan_id=plan["id"])
+                              if t["trigger_num"] == result["trigger_num"]), None)
+                if saved is None:
+                    raise RuntimeError("触发记录未保存")
+                result = stored_trigger_result(saved)
                 logger.info(
                     f"[dip_4pct] 触发 {fund_code} 第{result['trigger_num']}次 "
                     f"prev={prev_buy_price} curr={current_price} dip={result['actual_dip_pct']:.2f}%"
                 )
             except Exception as e:
                 logger.warning(f"[dip_4pct] 记录触发失败: {e}")
+                return {"triggered": False, "reason": "无法保存定投建议，请稍后重试", "plan": plan}
 
         return result
 
@@ -226,15 +274,27 @@ class DipStrategy4Pct:
             "triggers": triggers,
         }
 
-    def _get_last_buy_price(self, fund_code: str) -> Optional[float]:
-        """从transactions表查最近一次买入价。"""
+    def _get_last_buy_price(self, fund_code: str, user_id: str = "default",
+                            account: str = None) -> Optional[float]:
+        """按基金、用户与账户查询最近一次真实确认买入价。"""
         try:
-            from db.portfolio import list_transactions
-            txns = list_transactions(fund_code=fund_code, limit=50)
-            for t in txns:
-                if t.get("type") == "buy" and t.get("price"):
-                    return float(t["price"])
-            return None
+            from db._conn import _get_conn
+            conn = _get_conn()
+            try:
+                sql = """SELECT t.price FROM portfolio_transactions t
+                    LEFT JOIN portfolio_holdings h ON h.id = t.holding_id
+                    WHERE t.fund_code = ? AND t.user_id = ?
+                      AND t.transaction_type IN ('buy', 'subscribe') AND t.status = 'confirmed'
+                      AND COALESCE(t.is_system, 0) = 0 AND COALESCE(t.is_hypothetical, 0) = 0
+                      AND t.price > 0 AND t.transaction_date <= ?"""
+                params = [fund_code, user_id, datetime.now().strftime("%Y-%m-%d")]
+                if account is not None:
+                    sql += " AND COALESCE(NULLIF(t.account, ''), h.account) = ?"
+                    params.append(account)
+                row = conn.execute(sql + " ORDER BY t.transaction_date DESC, t.id DESC LIMIT 1", params).fetchone()
+                return float(row["price"]) if row else None
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning(f"[dip_4pct] 查询买入记录失败 {fund_code}: {e}")
             return None
@@ -252,7 +312,8 @@ class DipStrategy4Pct:
             return None
 
     def _fetch_valuation_percentile(self, fund_code: str,
-                                     metric_type: str = None) -> Optional[float]:
+                                     metric_type: str = None, user_id: str = "default",
+                                     account: str = None) -> Optional[float]:
         """获取基金跟踪指数的估值百分位。
 
         复用已修复的 query_valuation 工具（支持后缀兼容+别名兜底）。
@@ -261,10 +322,16 @@ class DipStrategy4Pct:
             # 1. 从持仓表查基金跟踪的指数名称
             from db._conn import _get_conn
             conn = _get_conn()
-            row = conn.execute(
-                "SELECT index_name FROM holdings WHERE fund_code = ?", (fund_code,)
-            ).fetchone()
-            conn.close()
+            try:
+                sql = ("SELECT index_name FROM portfolio_holdings WHERE fund_code = ? AND user_id = ? "
+                       "AND index_name IS NOT NULL AND index_name != ''")
+                params = [fund_code, user_id]
+                if account is not None:
+                    sql += " AND account = ?"
+                    params.append(account)
+                row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+            finally:
+                conn.close()
             if not row or not row["index_name"]:
                 return None
 

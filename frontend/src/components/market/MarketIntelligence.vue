@@ -302,6 +302,7 @@
       </div>
     </div>
 
+    <div v-else-if="taskError && !loading" class="empty-state" role="alert">{{ taskError }}</div>
     <div v-else-if="!loading" class="empty-state">
       <p>点击「刷新分析」获取市场热点情报</p>
     </div>

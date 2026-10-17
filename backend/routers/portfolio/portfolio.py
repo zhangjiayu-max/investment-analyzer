@@ -977,9 +977,10 @@ async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
                              confirmed_amount=req.confirmed_amount,
                              target_fund_code=req.target_fund_code,
                              target_fund_name=req.target_fund_name,
-                             fee=fee)
+                             fee=fee, target_price=req.target_price,
+                             target_shares=req.target_shares)
     if not ok:
-        raise HTTPException(404, "交易记录不存在")
+        raise HTTPException(409, "确认失败：请检查交易状态、可用份额及转换目标净值")
     return {"ok": True, "fee": fee, "fee_basis": fee_basis}
 
 
@@ -994,23 +995,17 @@ async def auto_confirm_transaction_api(tx_id: int):
     if tx.get("status") != "pending":
         raise HTTPException(400, "只能自动确认 pending 状态的交易")
 
-    fund_code = tx["fund_code"]
-    expected_date = tx.get("expected_confirm_date") or tx.get("transaction_date")
-
-    # 优先查询历史净值
-    confirmed_price = get_nav_by_date(fund_code, expected_date)
-
-    # 没有历史净值则获取最新净值（并提示）
+    if tx.get('transaction_type') == 'convert':
+        raise HTTPException(400, "转换交易请手动填写目标基金和目标实际净值后确认")
+    from db.portfolio import _effective_trade_date, fetch_fund_nav_on_or_before
+    trade_date = _effective_trade_date(tx['transaction_date'], tx.get('transaction_time'))
+    from infra.blocking import run_blocking
+    nav_data = await run_blocking(fetch_fund_nav_on_or_before, tx['fund_code'], trade_date)
+    if not nav_data or nav_data.get('date') != trade_date:
+        raise HTTPException(422, f"尚无 {trade_date} 的实际成交净值，请稍后重试或手动核实")
+    confirmed_price = nav_data['nav']
+    expected_date = trade_date
     used_latest = False
-    if not confirmed_price:
-        holding_id = tx.get("holding_id")
-        if holding_id:
-            nav_data = refresh_holding_price(holding_id)
-            if nav_data:
-                confirmed_price = nav_data.get("nav")
-                used_latest = True
-        if not confirmed_price:
-            raise HTTPException(502, "无法获取基金净值，请稍后重试或手动填入")
 
     # 按费率自动计算手续费（开关 fee.auto_calc_enabled，默认 true）
     from services.fee_calculator import calc_fee_for_tx
@@ -1077,7 +1072,8 @@ async def delete_transaction_api(tx_id: int):
 @router.post("/api/portfolio/refresh")
 async def refresh_all_prices_api():
     """批量刷新所有持仓的最新净值，并缓存到 fund_nav_history。"""
-    results = refresh_all_fund_prices()
+    from infra.blocking import run_blocking
+    results = await run_blocking(refresh_all_fund_prices)
     failed = [r for r in results if "error" in r]
     return {
         "ok": True,
@@ -1103,7 +1099,8 @@ async def refresh_single_price_api(holding_id: int):
     holding = get_holding(holding_id)
     if not holding:
         raise HTTPException(404, "持仓不存在")
-    nav_data = refresh_holding_price(holding_id)
+    from infra.blocking import run_blocking
+    nav_data = await run_blocking(refresh_holding_price, holding_id)
     if not nav_data:
         raise HTTPException(502, "净值获取失败，请稍后重试")
     return {"ok": True, "fund_code": holding["fund_code"], "nav": nav_data}

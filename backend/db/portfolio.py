@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import re
 import sqlite3
 from datetime import datetime, date
@@ -731,16 +732,14 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
               actual_price, transaction_date, notes, status, submitted_shares, submitted_amount,
               transaction_time, expected_confirm_date, account))
         tx_id = cur.lastrowid
+        if holding_id and status in ('confirmed', 'settled'):
+            _recalculate_holding(holding_id, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
-
-    # 只有 confirmed 状态才更新持仓数据（事务外执行，可重试恢复）
-    if holding_id and status in ('confirmed', 'settled'):
-        _recalculate_holding(holding_id)
 
     # 审计日志
     _log_tx_audit(
@@ -806,16 +805,17 @@ def list_transactions(fund_code: str = None, holding_id: int = None,
     return [dict(r) for r in rows]
 
 
-def _recalculate_holding(holding_id: int):
-    """根据交易记录重新计算持仓数据。先处理买入再处理卖出，避免顺序问题。
+def _recalculate_holding(holding_id: int, conn=None):
+    """按成交日期逐笔重放；传入连接时由调用方统一提交或回滚。
 
     对于没有交易记录的持仓（直接导入/手动创建），保留原有数据不覆盖。
     """
-    conn = _get_conn()
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _get_conn()
     try:
         holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
         if not holding:
-            conn.close()
             return
         holding = dict(holding)
 
@@ -823,12 +823,11 @@ def _recalculate_holding(holding_id: int):
             SELECT * FROM portfolio_transactions
             WHERE holding_id = ? AND (status IN ('confirmed', 'settled') OR status IS NULL)
               AND (is_hypothetical IS NULL OR is_hypothetical = 0)
-            ORDER BY id ASC
+            ORDER BY transaction_date ASC, COALESCE(transaction_time, '00:00') ASC, id ASC
         """, (holding_id,)).fetchall()
 
         # 如果没有任何已确认的交易，说明持仓是直接创建的，不重新计算
         if not txs:
-            conn.close()
             return
 
         total_shares = 0.0
@@ -839,26 +838,15 @@ def _recalculate_holding(holding_id: int):
         base_shares = holding.get("base_shares") or 0
         base_total_cost = holding.get("base_total_cost")
         if has_base:
-            # 优先使用 base_shares（原始基准），避免被重算覆盖
-            total_shares = base_shares if base_shares > 0 else (holding.get("shares") or 0)
-            # 2026-08-03 修复：必须用 base_total_cost 作为稳定起点
-            # 旧逻辑用 holding.total_cost 当起点，但 total_cost 会被卖出持续扣减，
-            # 导致每次重算都从已扣减的值再扣一遍，total_cost 指数级衰减 → profit_rate 虚高
-            if base_total_cost is not None and base_total_cost > 0:
-                total_cost = float(base_total_cost)
-            else:
-                # 防御性降级：base_total_cost 缺失时用 total_cost，但记告警日志
-                # 这种情况会导致 bug 复现，需用户通过编辑接口补全 base_total_cost
-                logger.warning(
-                    f"[portfolio] holding_id={holding_id} fund_code={holding.get('fund_code')} "
-                    f"has_base_position=1 但 base_total_cost 缺失，降级使用 total_cost，"
-                    f"profit_rate 可能虚高，请通过编辑接口补全 base_total_cost"
-                )
-                total_cost = holding.get("total_cost") or 0
+            # 缺失基准不能用不断变化的当前成本代替，否则每次重放都会失真。
+            if holding.get("base_shares") is None or base_total_cost is None:
+                raise ValueError("基准持仓缺少 base_shares/base_total_cost，请先补全初始账务")
+            total_shares = float(base_shares)
+            total_cost = float(base_total_cost)
 
         current_price = holding.get("current_price") or 0
 
-        # 先处理所有买入
+        # 按时间逐笔处理，卖出只扣除当时持有份额的平均成本
         last_buy_price = None
         last_buy_date = None
         for tx in txs:
@@ -882,22 +870,16 @@ def _recalculate_holding(holding_id: int):
                     last_buy_price = tx_price
                     last_buy_date = tx.get("transaction_date") or ""
 
-        # 再处理所有卖出和转换（按平均成本扣减）
-        for tx in txs:
-            tx = dict(tx)
-            # 有基准持仓时跳过系统自动创建的交易
-            if has_base and tx.get("is_system"):
-                continue
-            shares = tx.get("shares", 0) or 0
-            if tx["transaction_type"] in ("sell", "convert") and shares > 0:
+            elif tx["transaction_type"] in ("sell", "convert") and shares > 0:
+                if shares > total_shares + 1e-6:
+                    raise ValueError(f"交易 {tx['id']} 在成交日的可用份额不足")
                 if total_shares > 0:
-                    avg_cost = total_cost / total_shares
-                    total_cost -= avg_cost * shares
+                    total_cost -= (total_cost / total_shares) * shares
                 total_shares -= shares
-            elif tx["transaction_type"] == "dividend":
-                amount = tx.get("amount", 0) or 0
-                if amount > 0:
-                    total_cost -= amount
+                if abs(total_shares) < 1e-6:
+                    total_shares = total_cost = 0.0
+            elif tx["transaction_type"] == "dividend" and amount > 0:
+                total_cost -= amount
 
         if total_shares < 0:
             total_shares = 0
@@ -932,9 +914,11 @@ def _recalculate_holding(holding_id: int):
               round(profit_rate, 4) if profit_rate is not None else None,
               last_buy_price, last_buy_date,
               holding_id))
-        conn.commit()
+        if owns_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if owns_conn:
+            conn.close()
 
 
 def _capture_valuation_snapshot(holding_id: int, transaction_date: str) -> str | None:
@@ -1039,138 +1023,140 @@ def _auto_update_decision_on_confirm(tx_id: int, user_id: str = "default"):
         conn.close()
 
 
+def _ensure_transaction_holding(conn, fund_code, fund_name, user_id, account, price):
+    """使用当前写事务查找或创建空持仓，不额外生成初始买入。"""
+    row = conn.execute(
+        "SELECT id FROM portfolio_holdings WHERE fund_code=? AND user_id=? AND account=?",
+        (fund_code, user_id, account),
+    ).fetchone()
+    if row:
+        return row['id']
+    category = classify_fund_category(fund_name or fund_code, fund_code=fund_code, conn=conn)
+    cur = conn.execute("""
+        INSERT INTO portfolio_holdings
+            (fund_code, fund_name, user_id, account, shares, total_cost, cost_price, current_price, fund_category)
+        VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)
+    """, (fund_code, fund_name or fund_code, user_id, account, price, price, category))
+    return cur.lastrowid
+
+
 def confirm_transaction(tx_id: int, confirmed_price: float,
                         confirmed_shares: float = None,
                         confirmed_amount: float = None,
                         target_fund_code: str = None,
                         target_fund_name: str = None,
-                        fee: float = 0) -> bool:
-    """确认交易：填入实际净值，计算实际份额/金额。
+                        fee: float = 0, target_price: float = None,
+                        target_shares: float = None) -> bool:
+    """原子确认：状态、持仓、卖出现金和转换目标全部成功后才提交。
 
-    买入：confirmed_shares = (submitted_amount - fee) / confirmed_price
-    卖出：confirmed_amount = submitted_shares * confirmed_price - fee
-    转换：卖出源基金份额 → 买入目标基金（target_fund_code 必填）
+    转换必须提供目标实际净值；目标份额按净转入金额计算或使用平台确认份额。
     """
+    values = [confirmed_price, fee, confirmed_shares, confirmed_amount, target_price, target_shares]
+    if any(v is not None and (not math.isfinite(v) or v < 0) for v in values):
+        return False
+    if confirmed_price <= 0:
+        return False
+    # 配置读取在写锁外，事务内不访问网络或新建连接。
+    default_account = get_config('portfolio.default_account', '花无缺')
     conn = _get_conn()
     try:
-        tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
-        if not tx:
-            conn.close()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM portfolio_transactions WHERE id=?", (tx_id,)).fetchone()
+        if not row or row['status'] != 'pending':
             return False
-        tx = dict(tx)
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        tx_type = tx["transaction_type"]
-        user_id = tx.get("user_id", "default")
-        holding_id = tx.get("holding_id")
-
-        # 状态守卫：只允许确认 pending 状态的交易，防止重复确认导致现金重复入账
-        if tx.get("status") != "pending":
-            logger.warning(f"交易 {tx_id} 状态为 {tx.get('status')}，非 pending，拒绝确认")
-            conn.close()
-            return False
-
-        # 卖出/转换份额校验：不允许超过持有份额
-        if tx_type in ("sell", "convert") and holding_id:
-            sub_shares_check = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
-            holding_check = conn.execute("SELECT shares FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
-            if holding_check and sub_shares_check > (holding_check["shares"] or 0):
-                logger.warning(f"交易 {tx_id} 卖出份额 {sub_shares_check} 超过持有 {holding_check['shares']}")
-                conn.close()
+        tx = dict(row)
+        tx_type = tx['transaction_type']
+        user_id = tx.get('user_id') or 'default'
+        holding_id = tx.get('holding_id')
+        source = None
+        if holding_id:
+            source = conn.execute("SELECT * FROM portfolio_holdings WHERE id=? AND user_id=?",
+                                  (holding_id, user_id)).fetchone()
+            if source is None or source['fund_code'] != tx['fund_code']:
                 return False
-
-        if tx_type == "buy":
-            # 买入确认：(金额 - 手续费) / 净值 = 份额
-            sub_amount = confirmed_amount or tx.get("submitted_amount") or tx.get("amount") or 0
-            if confirmed_price > 0:
-                net_amount = sub_amount - fee  # 扣除手续费后的净金额
-                actual_shares = round(net_amount / confirmed_price, 2)
-            else:
-                actual_shares = confirmed_shares or 0
-            actual_amount = sub_amount  # 记录总金额（含手续费）
-            actual_price = confirmed_price
-        elif tx_type == "sell":
-            # 卖出确认：份额 × 净值 - 手续费 = 实际到账
-            sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
-            gross_amount = round(sub_shares * confirmed_price, 2)
-            actual_amount = round(gross_amount - fee, 2)  # 扣除赎回费
-            actual_shares = sub_shares
-            actual_price = confirmed_price
-        elif tx_type == "convert":
-            # 转换确认：按份额卖出源基金，同时买入目标基金
-            sub_shares = confirmed_shares or tx.get("submitted_shares") or tx.get("shares") or 0
-            gross_amount = round(sub_shares * confirmed_price, 2)
-            actual_amount = round(gross_amount - fee, 2)  # 扣除转换费
-            actual_shares = sub_shares
-            actual_price = confirmed_price
+        account = (source['account'] if source else tx.get('account')) or default_account
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        actual_price = confirmed_price
+        if tx_type == 'buy':
+            actual_amount = (confirmed_amount if confirmed_amount is not None
+                             else tx.get('submitted_amount') or tx.get('amount') or 0)
+            if actual_amount <= fee:
+                return False
+            actual_shares = (confirmed_shares if confirmed_shares is not None
+                             else round((actual_amount - fee) / confirmed_price, 2))
+            if actual_shares <= 0:
+                return False
+            if not holding_id:
+                holding_id = _ensure_transaction_holding(conn, tx['fund_code'], tx.get('fund_name'),
+                                                        user_id, account, actual_price)
+        elif tx_type in ('sell', 'convert'):
+            actual_shares = (confirmed_shares if confirmed_shares is not None
+                             else tx.get('submitted_shares') or tx.get('shares') or 0)
+            if source is None or actual_shares <= 0 or actual_shares > (source['shares'] or 0) + 1e-6:
+                return False
+            actual_amount = round(round(actual_shares * confirmed_price, 2) - fee, 2)
+            if actual_amount < 0:
+                return False
+            if tx_type == 'convert':
+                if (not target_fund_code or target_fund_code == tx['fund_code']
+                        or target_price is None or target_price <= 0 or actual_amount <= 0):
+                    return False
+                converted_shares = (target_shares if target_shares is not None
+                                    else round(actual_amount / target_price, 2))
+                if converted_shares <= 0:
+                    return False
+                # 平台份额可有分位舍入差，不能允许与目标净值/金额明显矛盾。
+                if abs(converted_shares * target_price - actual_amount) > max(.02, target_price * .011):
+                    return False
         else:
-            # 分红等其他类型
-            actual_amount = confirmed_amount or tx.get("amount") or 0
+            actual_amount = confirmed_amount if confirmed_amount is not None else tx.get('amount') or 0
             actual_shares = confirmed_shares
-            actual_price = confirmed_price
-
-        conn.execute("""
-            UPDATE portfolio_transactions SET
-                status = 'confirmed', amount = ?, shares = ?, price = ?,
-                fee = ?, confirmed_at = ?
-            WHERE id = ?
-        """, (actual_amount, actual_shares, actual_price, fee, now, tx_id))
+        cur = conn.execute("""
+            UPDATE portfolio_transactions SET status='confirmed', amount=?, shares=?, price=?,
+                fee=?, confirmed_at=?, holding_id=? WHERE id=? AND status='pending'
+        """, (actual_amount, actual_shares, actual_price, fee, now, holding_id, tx_id))
+        if cur.rowcount != 1:
+            return False
+        if holding_id:
+            _recalculate_holding(holding_id, conn=conn)
+        if tx_type == 'sell' and actual_amount > 0:
+            conn.execute("""
+                INSERT INTO portfolio_cash (user_id, balance, updated_at)
+                VALUES (?, ?, datetime('now','localtime'))
+                ON CONFLICT(user_id) DO UPDATE SET balance=balance+excluded.balance,
+                    updated_at=excluded.updated_at
+            """, (user_id, actual_amount))
+        if tx_type == 'convert':
+            target_id = _ensure_transaction_holding(conn, target_fund_code, target_fund_name,
+                                                   user_id, account, target_price)
+            conn.execute("""
+                INSERT INTO portfolio_transactions
+                    (holding_id,user_id,fund_code,fund_name,transaction_type,amount,shares,price,
+                     transaction_date,transaction_time,status,confirmed_at,notes,account)
+                VALUES (?, ?, ?, ?, 'buy', ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)
+            """, (target_id, user_id, target_fund_code, target_fund_name or target_fund_code,
+                  actual_amount, converted_shares, target_price, tx['transaction_date'],
+                  tx.get('transaction_time'), now, f"从 {tx['fund_code']} 转换，源交易 #{tx_id}", account))
+            _recalculate_holding(target_id, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
+        # 未确认的分支也会在关闭时回滚，释放写锁。
         conn.close()
 
-    # ── 新基金买入：holding_id 为空时自动创建持仓 ──
-    if tx_type == "buy" and not holding_id and actual_shares and actual_shares > 0:
-        fund_code = tx["fund_code"]
-        fund_name = tx.get("fund_name", fund_code)
-        tx_account = tx.get("account") or get_config('portfolio.default_account', '花无缺')
-        # 按账户精确匹配已有持仓，避免跨账户同基金被错误关联
-        existing = get_holding_by_fund(fund_code, user_id, account=tx_account)
-        if existing:
-            holding_id = existing["id"]
-            # 更新交易记录关联
-            conn2 = _get_conn()
-            try:
-                conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
-                conn2.commit()
-            finally:
-                conn2.close()
-        else:
-            # 在同一事务中创建持仓 + 关联交易 + 重算，避免并发问题
-            conn2 = _get_conn()
-            try:
-                cursor = conn2.execute("""
-                    INSERT INTO portfolio_holdings
-                    (fund_code, fund_name, shares, cost_price, current_price, user_id, account)
-                    VALUES (?, ?, 0, ?, ?, ?, ?)
-                """, (fund_code, fund_name, actual_price, actual_price, user_id, tx_account))
-                holding_id = cursor.lastrowid
-                conn2.execute("UPDATE portfolio_transactions SET holding_id = ? WHERE id = ?", (holding_id, tx_id))
-                conn2.commit()
-            except Exception:
-                conn2.rollback()
-                raise
-            finally:
-                conn2.close()
-
-    if holding_id:
-        _recalculate_holding(holding_id)
-
-    # 捕获交易时点估值快照
-    if holding_id:
-        snapshot = _capture_valuation_snapshot(holding_id, tx.get("transaction_date", ""))
-        if snapshot:
-            conn3 = _get_conn()
-            try:
-                conn3.execute("UPDATE portfolio_transactions SET valuation_snapshot = ? WHERE id = ?",
-                             (snapshot, tx_id))
-                conn3.commit()
-            finally:
-                conn3.close()
-
+    # 以下为可重试的附加信息；失败不能将已提交账务报告为确认失败。
+    try:
+        if holding_id:
+            snapshot = _capture_valuation_snapshot(holding_id, tx.get('transaction_date', ''))
+            if snapshot:
+                with _get_conn() as snapshot_conn:
+                    snapshot_conn.execute('UPDATE portfolio_transactions SET valuation_snapshot=? WHERE id=?',
+                                          (snapshot, tx_id))
+                snapshot_conn.close()
+    except Exception as exc:
+        logger.warning('交易估值快照写入失败: %s', exc)
     # ── 补仓后跌幅即时预警 ──
     if tx_type == "buy" and holding_id and actual_price > 0:
         try:
@@ -1196,53 +1182,10 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
         except Exception as e:
             logging.warning(f"[confirm_tx] 补仓后跌幅即时预警异常: {e}")
 
-    # 卖出确认后，自动将金额计入零钱
-    if tx_type == "sell" and actual_amount > 0:
-        add_cash(user_id, actual_amount)
-
-    # ── 交易确认后，自动更新关联决策状态为 executed ──
     try:
         _auto_update_decision_on_confirm(tx_id, user_id)
-    except Exception as e:
-        logging.warning(f"[confirm_tx] 决策状态自动更新异常: {e}")
-
-    # ── 基金转换：减少源基金份额，创建/增加目标基金 ──
-    if tx_type == "convert" and target_fund_code and actual_shares and actual_shares > 0:
-        # 1. 源基金减少份额（通过 _recalculate_holding 已处理）
-        # 2. 创建目标基金的买入交易
-        target_name = target_fund_name or target_fund_code
-        # 目标基金进入源基金所在账户，避免跨账户错误关联
-        src_account = tx.get("account")
-        if holding_id and not src_account:
-            src_h = get_holding(holding_id)
-            src_account = src_h.get("account") if src_h else None
-        target_holding = get_holding_by_fund(target_fund_code, user_id, account=src_account)
-        if not target_holding:
-            # 自动创建目标基金持仓（与源基金同账户）
-            target_holding_id = create_holding(
-                fund_code=target_fund_code, fund_name=target_name,
-                shares=0, cost_price=confirmed_price,
-                current_price=confirmed_price, user_id=user_id,
-                account=src_account,
-            )
-        else:
-            target_holding_id = target_holding["id"]
-        # 为目标基金创建一笔确认的买入交易
-        conn3 = _get_conn()
-        try:
-            conn3.execute("""
-                INSERT INTO portfolio_transactions
-                    (holding_id, user_id, fund_code, transaction_type, amount, shares, price,
-                     transaction_date, status, confirmed_at, notes)
-                VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'confirmed', ?, ?)
-            """, (target_holding_id, user_id, target_fund_code,
-                  actual_amount, actual_shares, confirmed_price,
-                  tx.get("transaction_date", now[:10]), now,
-                  f"从 {tx.get('fund_code', '')} 转换"))
-            conn3.commit()
-        finally:
-            conn3.close()
-        _recalculate_holding(target_holding_id)
+    except Exception as exc:
+        logger.warning('交易关联决策更新失败: %s', exc)
 
     # 审计日志
     _log_tx_audit(
@@ -2302,7 +2245,7 @@ def _refine_bond_subcategory(default_category: str, fund_type: str) -> str:
     return default_category
 
 
-def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str = "") -> str:
+def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str = "", conn=None) -> str:
     """根据基金名称、类型和本地缓存分类：equity / bond / hybrid / money_market / index 等。
 
     优先读取 fund_metadata 缓存的 fund_category，其次用 fund_type，最后退回到名称启发式。
@@ -2316,13 +2259,14 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
 
     # 1) 优先读取本地 fund_metadata 缓存
     if fund_code:
+        owns_conn = conn is None
         try:
-            conn = _get_conn()
+            if owns_conn:
+                conn = _get_conn()
             row = conn.execute(
                 "SELECT fund_category, fund_type FROM fund_metadata WHERE fund_code = ?",
                 (fund_code,),
             ).fetchone()
-            conn.close()
             if row:
                 cached_category = (row["fund_category"] or "").strip()
                 cached_type = (row["fund_type"] or "").strip()
@@ -2333,6 +2277,10 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
                     ft = cached_type
         except Exception as e:
             logger.warning(f"读取 fund_metadata 分类失败 {fund_code}: {e}")
+
+        finally:
+            if owns_conn and conn is not None:
+                conn.close()
 
     # 2) 货币基金
     if any(kw in name for kw in ("货币", "货基", "现金", "流动性", "添利", "增利宝")):

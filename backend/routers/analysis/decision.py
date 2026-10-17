@@ -58,7 +58,7 @@ async def list_ledger(
 ):
     """查询统一决策账本列表。"""
     try:
-        from db import list_decisions
+        from db.investment_decisions import list_decisions
         data = list_decisions(
             user_id=user_id, status=status, fund_code=fund_code,
             decision_type=decision_type, source_module=source_module, limit=limit,
@@ -72,7 +72,7 @@ async def list_ledger(
 async def get_ledger_item(decision_id: int):
     """查询单条决策详情。"""
     try:
-        from db import get_decision
+        from db.investment_decisions import get_decision
         data = get_decision(decision_id)
         if not data:
             return ApiResponse.error(404, f"未找到决策 {decision_id}")

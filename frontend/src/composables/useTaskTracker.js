@@ -7,7 +7,8 @@
  * 3. 任务完成时触发通知
  */
 
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, getCurrentInstance } from 'vue'
+import { getConversationTaskStatus, getRunningConversationTasks } from '../api'
 
 const STORAGE_KEY = 'pending_tasks'
 const POLL_INTERVAL = 10000 // 10 秒轮询一次
@@ -17,6 +18,7 @@ const pendingTasks = ref([])
 const completedTask = ref(null)
 let pollTimer = null
 let isInitialized = false
+let checking = null
 
 // 从 localStorage 加载任务
 function loadTasks() {
@@ -69,17 +71,18 @@ function removeTask(convId) {
 // 检查单个任务状态
 async function checkTaskStatus(task) {
   try {
-    const response = await fetch(`/api/conversations/tasks/${task.convId}/status`)
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    const data = await response.json()
+    const { data } = await getConversationTaskStatus(task.convId)
+    if (!data?.status || !pendingTasks.value.includes(task)) return false
     task.lastChecked = Date.now()
     task.status = data.status
     task.progress = data.progress || 0
     task.completedSpecialists = data.completed_specialists || 0
     task.totalSpecialists = data.total_specialists || 0
+
+    if (data.status === 'cancelled' || data.status === 'no_message') {
+      removeTask(task.convId)
+      return true
+    }
 
     // 如果任务完成或失败，触发通知
     if (data.status === 'completed' || data.status === 'failed') {
@@ -104,7 +107,7 @@ async function checkTaskStatus(task) {
 }
 
 // 检查所有任务状态
-async function checkAllTasks() {
+async function performCheckAllTasks() {
   if (pendingTasks.value.length === 0) {
     return
   }
@@ -116,21 +119,18 @@ async function checkAllTasks() {
   saveTasks()
 }
 
+// 全局检查同样保持一个在途批次。
+function checkAllTasks() {
+  if (!checking) checking = performCheckAllTasks().finally(() => { checking = null })
+  return checking
+}
+
 // 从后端获取正在运行的任务（用于恢复状态）
 async function fetchRunningTasks() {
   try {
-    const response = await fetch('/api/conversations/tasks/running')
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    const data = await response.json()
-    const runningTasks = data.tasks || []
-
-    const backendIds = new Set(runningTasks.map(t => t.conversation_id))
-
-    // 删除后端已不存在的任务（同步前后端状态）
-    pendingTasks.value = pendingTasks.value.filter(t => backendIds.has(t.convId))
+    const { data } = await getRunningConversationTasks()
+    if (!Array.isArray(data?.tasks)) return
+    const runningTasks = data.tasks
 
     // 添加后端有但本地没有的任务
     for (const task of runningTasks) {
@@ -187,15 +187,7 @@ function initGlobalPolling() {
 }
 
 export function useTaskTracker() {
-  // 初始化时启动全局轮询
-  onMounted(() => {
-    initGlobalPolling()
-  })
-
-  // 清理时不停止轮询（保持后台运行）
-  onUnmounted(() => {
-    // 故意不停止轮询
-  })
+  if (getCurrentInstance()) onMounted(initGlobalPolling)
 
   return {
     pendingTasks,

@@ -72,20 +72,25 @@ class ConversationQualityEvaluator:
         if not conv:
             raise ValueError(f"对话 {conversation_id} 不存在")
 
-        # 获取消息
-        messages = get_messages(conversation_id)
-        if not messages:
-            raise ValueError(f"对话 {conversation_id} 没有消息")
-
-        # 获取 agent 执行记录
-        agent_runs = get_agent_runs(conversation_id)
-
-        # 获取 assistant 消息的 metadata
-        assistant_msg = None
-        for msg in reversed(messages):
-            if msg["role"] == "assistant":
-                assistant_msg = msg
-                break
+        # 显式消息可以早于默认最近50条，直接按会话与主键读取。
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            if message_id is not None:
+                row = conn.execute("SELECT * FROM messages WHERE id=? AND conversation_id=? AND role='assistant'",
+                                   (message_id,conversation_id)).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+                                   (conversation_id,)).fetchone()
+            if row is None:
+                raise ValueError('未找到指定 assistant 消息')
+            assistant_msg = dict(row)
+            message_id = assistant_msg['id']
+            agent_runs = [dict(r) for r in conn.execute(
+                'SELECT * FROM agent_runs WHERE conversation_id=? AND message_id=? ORDER BY id',
+                (conversation_id,message_id)).fetchall()]
+        finally:
+            conn.close()
 
         metadata = {}
         if assistant_msg and assistant_msg.get("metadata"):
@@ -205,19 +210,26 @@ class ConversationQualityEvaluator:
             details.append(f"检测到 {duplicate_count} 次重复调用（扣{duplicate_penalty}分）")
             score -= duplicate_penalty
 
-        # 3. 专家并行度
-        specialist_results = metadata.get("specialist_results", [])
-        if len(specialist_results) > 1:
-            # 检查是否有并行执行（通过 duration_ms 相近判断）
-            durations = [s.get("duration_ms", 0) for s in specialist_results if s.get("duration_ms")]
-            if durations:
-                avg_duration = sum(durations) / len(durations)
-                total_duration = sum(durations)
-                parallelism = 1 - (total_duration / (avg_duration * len(durations))) if avg_duration > 0 else 0
-                parallelism_score = min(100, 50 + parallelism * 100)
-                metrics["parallelism"] = parallelism
-                metrics["parallelism_score"] = parallelism_score
-                details.append(f"专家并行度: {parallelism:.0%}")
+        # 3. 用实际起止区间计算并发节省比例；缺时间不虚构并行度。
+        from datetime import datetime
+        intervals = []
+        for run in agent_runs:
+            try:
+                start, end = run.get('started_at'), run.get('completed_at')
+                if start and end:
+                    start = datetime.fromisoformat(start).timestamp()
+                    end = datetime.fromisoformat(end).timestamp()
+                    if end > start:
+                        intervals.append((start,end))
+            except (ValueError,TypeError):
+                continue
+        if len(intervals) > 1:
+            total = sum(end-start for start,end in intervals)
+            wall = max(end for _,end in intervals)-min(start for start,_ in intervals)
+            parallelism = max(0.0,1-wall/total)
+            metrics['parallelism'] = parallelism
+            metrics['parallelism_score'] = min(100,50+parallelism*100)
+            details.append(f'专家并行度: {parallelism:.0%}')
 
         # 综合分数
         final_score = (time_score * 0.6 + metrics.get("parallelism_score", 80) * 0.4) - duplicate_penalty
@@ -993,36 +1005,27 @@ async def evaluate_with_llm(conversation_id: int, message_id: int = None) -> dic
         "summary": "..."
     }
     """
-    from db.conversations import get_messages
     from services.llm_service import _call_llm, MODEL_AUX
-
-    messages = get_messages(conversation_id)
-    if not messages:
-        return {"error": "无消息"}
-
-    # 提取要评估的消息
-    target_msg = None
-    if message_id:
-        for msg in messages:
-            if msg.get("id") == message_id:
-                target_msg = msg
-                break
-    else:
-        # 找最后一条 assistant 消息
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                target_msg = msg
-                break
-
-    if not target_msg:
-        return {"error": "未找到目标消息"}
-
-    # 提取用户问题
-    user_query = ""
-    for msg in messages:
-        if msg.get("role") == "user":
-            user_query = msg.get("content", "")[:200]
-            break
+    from db._conn import _get_conn
+    conn = _get_conn()
+    try:
+        if message_id is not None:
+            target_msg = conn.execute(
+                "SELECT * FROM messages WHERE conversation_id=? AND id=? AND role='assistant'",
+                (conversation_id, message_id)).fetchone()
+        else:
+            target_msg = conn.execute(
+                "SELECT * FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+                (conversation_id,)).fetchone()
+        if target_msg is None:
+            return {"error": "未找到目标消息"}
+        target_msg = dict(target_msg)
+        question = conn.execute(
+            "SELECT content FROM messages WHERE conversation_id=? AND role='user' AND id<? ORDER BY id DESC LIMIT 1",
+            (conversation_id, target_msg['id'])).fetchone()
+        user_query = question['content'][:200] if question else ''
+    finally:
+        conn.close()
 
     # 构建评估 prompt
     content = target_msg.get("content", "")[:2000]  # 缩短输入

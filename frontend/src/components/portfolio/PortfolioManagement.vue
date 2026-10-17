@@ -116,6 +116,7 @@ import {
   dailyAdviceAPI,
   dip4PctAPI,
 } from '../../api'
+import { usePageRefresh } from '../../composables/usePageRefresh'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import PieChart from '../charts/PieChart.vue'
@@ -1514,38 +1515,55 @@ const txForm = ref({
 })
 
 // Load data
-async function loadData() {
+let portfolioGeneration = 0
+let displayedAccount = null
+let portfolioRead = null
+let autoConfirmRead = null
+async function loadData({ skipAutoConfirm = false } = {}) {
+  const account = accountFilter.value
+  if (portfolioRead?.account === account) return portfolioRead.promise
+  const version = ++portfolioGeneration
+  const current = () => version === portfolioGeneration && accountFilter.value === account
   loading.value = true
-  try {
-    try {
-      await autoConfirmPortfolioTransactions()
-    } catch (e) {
-      console.warn('自动确认待确认交易失败:', e)
-    }
-    const params = accountFilter.value ? { account: accountFilter.value } : {}
-    const { data } = await getPortfolioSummary(params)
-    summary.value = data
-    holdings.value = data.holdings || []
-    // 加载各账户零钱余额
-    for (const uid of ['小鱼儿', '花无缺']) {
-      try {
-        const { data: cashData } = await getCashBalance(uid)
-        cashBalances.value[uid] = cashData.balance || 0
-        cashInterests.value[uid] = cashData.today_interest || 0
-      } catch (_) {}
-    }
-    // 加载所有待确认交易
-    await loadPendingTxs()
-    // 加载全部基金列表（用于走势图，不受账号筛选影响）
-    await loadAllChartFunds()
-    // 加载关注列表（AI 分析下拉需要）
-    await loadWatchlist()
-    await loadActionCenterData()
-  } catch (e) {
-    showToast('加载失败: ' + e.message, 'error')
-  } finally {
-    loading.value = false
+  if (displayedAccount !== account) {
+    displayedAccount = account
+    holdings.value = []
+    summary.value = { holding_count: 0, total_cost: 0, total_value: 0, total_profit: 0, profit_rate: 0 }
   }
+  const request = (async () => {
+    try {
+      const params = account ? { account } : {}
+      const { data } = await getPortfolioSummary(params)
+      if (!current()) return
+      summary.value = data
+      holdings.value = data.holdings || []
+      // 无账户筛选时复用总览，避免为走势图再读一次相同总览。
+      if (!account) setChartFunds(data)
+      else loadAllChartFunds()
+    } catch (e) {
+      if (current()) showToast('加载失败: ' + e.message, 'error')
+    } finally {
+      if (current()) loading.value = false
+    }
+  })()
+  portfolioRead = { account, promise: request }
+  request.finally(() => { if (portfolioRead?.promise === request) portfolioRead = null })
+  // 自动确认与余额是辅助请求，不能阻塞核心持仓展示；写入完成后再刷新核心。
+  if (!skipAutoConfirm && !autoConfirmRead) {
+    autoConfirmRead = autoConfirmPortfolioTransactions().then(async ({ data }) => {
+      if (data?.result?.confirmed || data?.confirmed_count || data?.confirmed) {
+        await portfolioRead?.promise
+        loadData({ skipAutoConfirm: true })
+      }
+    }).catch(e => console.warn('自动确认待确认交易失败:', e)).finally(() => { autoConfirmRead = null })
+  }
+  Promise.allSettled(['小鱼儿', '花无缺'].map(async uid => {
+    const { data } = await getCashBalance(uid)
+    cashBalances.value[uid] = data.balance || 0
+    cashInterests.value[uid] = data.today_interest || 0
+  }))
+  Promise.allSettled([loadPendingTxs(), loadWatchlist(), loadActionCenterData()])
+  return request
 }
 
 async function loadActionCenterData() {
@@ -1567,17 +1585,13 @@ function goDecisionCenter() {
   emit('navigate', 'decisions')
 }
 
+function setChartFunds(data) {
+  allChartFunds.value = (data.holdings || []).map(h => ({
+    id: h.id, fund_code: h.fund_code, fund_name: h.fund_name, account: h.account, shares: h.shares || 0,
+  }))
+}
 async function loadAllChartFunds() {
-  try {
-    const { data } = await getPortfolioSummary()
-    allChartFunds.value = (data.holdings || []).map(h => ({
-      id: h.id,
-      fund_code: h.fund_code,
-      fund_name: h.fund_name,
-      account: h.account,
-      shares: h.shares || 0,
-    }))
-  } catch (e) { /* ignore */ }
+  try { const { data } = await getPortfolioSummary(); setChartFunds(data) } catch (_) {}
 }
 
 async function submitCashAdjust() {
@@ -2632,11 +2646,15 @@ async function removeTagFromTx(tag) {
   }
 }
 
+let initialPortfolioAnalysisChecked = false
 const TAG_PRESETS = ['追涨', '抄底', '定投', '止盈', '止损', '调仓', '管住手', '观望', '加仓', '减仓']
 
-onMounted(async () => {
-  await loadData()
+usePageRefresh(async () => {
+  const core = loadData()
   loadAlerts()
+  await core
+  if (initialPortfolioAnalysisChecked) return
+  initialPortfolioAnalysisChecked = true
   // 如果今天还未分析过，自动触发分散度分析；已分析则加载最新结果
   if (holdings.value.length > 0) {
     try {
@@ -2657,8 +2675,10 @@ onMounted(async () => {
   }
 })
 
+onMounted(restorePortfolioTasks)
+
 // KeepAlive 组件激活时重新加载数据（切换页面回来时触发）
-onActivated(async () => {
+async function restorePortfolioTasks() {
   // 检查是否有正在运行的全景诊断
   if (_panoramaGlobalState.recordId && _panoramaGlobalState.status === 'running') {
     // 恢复轮询，不重置 loading
@@ -2818,8 +2838,13 @@ onActivated(async () => {
   if (diverAiTaskState.value === 'running') diverAiLoading.value = true
   if (portfolioAiTaskState.value === 'running') aiAnalysisLoading.value = true
 
-  await loadData()
-  loadAlerts()
+}
+
+let portfolioActivated = false
+onActivated(() => {
+  if (!portfolioActivated) { portfolioActivated = true; return }
+  // 任务恢复不受核心读缓存 TTL 限制，离页停止的轮询需要立即续接。
+  restorePortfolioTasks()
 })
 
 // 页面离开时清理轮询
@@ -3408,6 +3433,7 @@ async function submitSell() {
 // Confirm transaction (确认交易)
 const confirmTargetFundCode = ref('')
 const confirmTargetFundName = ref('')
+const confirmTargetPrice = ref(0)
 
 function openConfirmTx(tx) {
   confirmTxData.value = tx
@@ -3416,6 +3442,7 @@ function openConfirmTx(tx) {
   confirmTxShares.value = 0
   confirmTargetFundCode.value = ''
   confirmTargetFundName.value = ''
+  confirmTargetPrice.value = 0
   showConfirmTx.value = true
   nextTick(() => {
     const input = document.querySelector('.modal-overlay .input-field')
@@ -3491,6 +3518,11 @@ async function submitConfirmTx() {
       showToast('转换交易需要填写目标基金代码', 'error')
       return
     }
+    if (!Number.isFinite(Number(confirmTargetPrice.value)) || Number(confirmTargetPrice.value) <= 0) {
+      showToast('请填写目标基金的实际确认净值', 'error')
+      return
+    }
+    payload.target_price = Number(confirmTargetPrice.value)
     payload.target_fund_code = confirmTargetFundCode.value.trim()
     payload.target_fund_name = confirmTargetFundName.value || confirmTargetFundCode.value.trim()
   }
@@ -6199,7 +6231,7 @@ function txDisplayAmount(tx) {
                 <label>T+1 确认净值 *</label>
                 <input v-model.number="confirmTxPrice" type="text" inputmode="decimal" step="0.0001" class="input-field" placeholder="输入确认日的实际净值" required />
               </div>
-              <button type="button" class="btn-sm btn-secondary" @click="fetchAutoNav" :disabled="autoConfirmLoading">
+              <button v-if="confirmTxData?.transaction_type !== 'convert'" type="button" class="btn-sm btn-secondary" @click="fetchAutoNav" :disabled="autoConfirmLoading">
                 {{ autoConfirmLoading ? '获取中...' : '自动获取净值' }}
               </button>
               <div v-if="confirmTxData?.transaction_type === 'sell'" class="form-group" style="margin-top:0.75rem">
@@ -6216,6 +6248,11 @@ function txDisplayAmount(tx) {
                 <label>目标基金代码 *</label>
                 <input v-model="confirmTargetFundCode" class="input-field" placeholder="转换目标基金代码" required />
                 <span v-if="confirmTargetFundName" class="field-hint" style="color:var(--color-success)">{{ confirmTargetFundName }}</span>
+              </div>
+              <div v-if="confirmTxData?.transaction_type === 'convert'" class="form-group" style="margin-top:0.75rem">
+                <label>目标基金实际确认净值 *</label>
+                <input v-model.number="confirmTargetPrice" type="number" min="0.000001" step="any" class="input-field" placeholder="按平台确认结果填写" required />
+                <span v-if="confirmTargetPrice > 0" class="field-hint">预计转入 {{ (((confirmTxData?.submitted_shares || 0) * confirmTxPrice - (confirmTxFee || 0)) / confirmTargetPrice).toFixed(2) }} 份</span>
               </div>
               <div v-if="confirmTxPrice > 0" class="add-purchase-preview">
                 <span v-if="confirmTxData?.transaction_type === 'buy'">

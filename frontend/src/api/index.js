@@ -1,5 +1,6 @@
 import api from './http'
 import './interceptors'
+import { consumeConversationSse } from './conversationSse'
 
 // 拦截器在 interceptors.js 中注册
 
@@ -434,43 +435,10 @@ export function sendMessageStream(convId, content, onEvent, targetSpecialists = 
       return
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop() // 保留不完整的行
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6))
-            onEvent(event)
-          } catch (e) {
-            // 忽略解析错误
-          }
-        }
-      }
-    }
-    // 处理剩余 buffer
-    if (buffer.startsWith('data: ')) {
-      try {
-        const event = JSON.parse(buffer.slice(6))
-        onEvent(event)
-      } catch (e) {}
-    }
+    await consumeConversationSse(response, onEvent, controller.signal)
   }).catch(err => {
-    // 忽略用户取消的错误
-    if (err.name === 'AbortError') return
-
-    // 网络错误（如息屏断开）不发送 error 事件，让前端通过 visibilitychange 恢复
-    console.warn('SSE 连接断开:', err.message)
-    // 不调用 onEvent，避免显示错误
+    if (err.name === 'AbortError' || controller.signal.aborted) return
+    onEvent({ type: 'disconnect', data: { reason: 'network', message: err.message } })
   })
 
   return controller
@@ -505,36 +473,10 @@ export function clarifyAnswerStream(convId, answer, messageId, onEvent) {
       return
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6))
-            onEvent(event)
-          } catch (e) {}
-        }
-      }
-    }
-    if (buffer.startsWith('data: ')) {
-      try {
-        const event = JSON.parse(buffer.slice(6))
-        onEvent(event)
-      } catch (e) {}
-    }
+    await consumeConversationSse(response, onEvent, controller.signal)
   }).catch(err => {
-    if (err.name === 'AbortError') return
-    console.warn('澄清续答 SSE 连接断开:', err.message)
+    if (err.name === 'AbortError' || controller.signal.aborted) return
+    onEvent({ type: 'disconnect', data: { reason: 'network', message: err.message } })
   })
 
   return controller
@@ -583,37 +525,10 @@ export function resumeConversationStream(convId, onEvent) {
       onEvent({ type: 'error', data: { message: msg, code: 'RESUME_FAILED', status: response.status } })
       return
     }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6))
-            onEvent(event)
-          } catch (e) {}
-        }
-      }
-    }
-    if (buffer.startsWith('data: ')) {
-      try {
-        const event = JSON.parse(buffer.slice(6))
-        onEvent(event)
-      } catch (e) {}
-    }
+    await consumeConversationSse(response, onEvent, controller.signal)
   }).catch(err => {
-    if (err.name !== 'AbortError') {
-      onEvent({ type: 'error', data: { message: err.message } })
-    }
+    if (err.name === 'AbortError' || controller.signal.aborted) return
+    onEvent({ type: 'disconnect', data: { reason: 'network', message: err.message } })
   })
 
   return controller
@@ -642,37 +557,10 @@ export function replayConversationStream(convId, channelId, lastSeq, onEvent) {
       onEvent({ type: 'error', data: { message: msg, status: response.status } })
       return
     }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(line.slice(6))
-            onEvent(event)
-          } catch (e) {}
-        }
-      }
-    }
-    if (buffer.startsWith('data: ')) {
-      try {
-        const event = JSON.parse(buffer.slice(6))
-        onEvent(event)
-      } catch (e) {}
-    }
+    await consumeConversationSse(response, onEvent, controller.signal)
   }).catch(err => {
-    if (err.name !== 'AbortError') {
-      onEvent({ type: 'error', data: { message: err.message } })
-    }
+    if (err.name === 'AbortError' || controller.signal.aborted) return
+    onEvent({ type: 'disconnect', data: { reason: 'network', message: err.message } })
   })
 
   return controller
@@ -3085,4 +2973,12 @@ export const decisionAPI = {
   /** 手动触发止盈闭环扫描 */
   runExitScan: (userId = 'default') =>
     api.post('/decision/exit-scan', null, { params: { user_id: userId } }).then(r => r.data),
+}
+
+/** 后台对话任务，复用统一响应协议解包。 */
+export function getConversationTaskStatus(convId) {
+  return api.get(`/conversations/tasks/${convId}/status`)
+}
+export function getRunningConversationTasks() {
+  return api.get('/conversations/tasks/running')
 }

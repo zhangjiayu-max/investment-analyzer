@@ -66,6 +66,34 @@ def _release_conv_send_lock(conv_id: int):
                 pass  # 未持有锁，忽略
 
 
+def _fast_path_cancelled(conv_id, message_id, cancel_event):
+    """发送或持久化结果前统一核对取消；完成后不再启动附加建议。"""
+    from db.conversations import get_conversation_cancel_status
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT metadata FROM messages WHERE id=? AND conversation_id=?",(message_id,conv_id)).fetchone()
+        metadata = json.loads(row['metadata'] or '{}') if row else {}
+    finally:
+        conn.close()
+    if cancel_event.is_set() or metadata.get('execution_status') == 'cancelled' or get_conversation_cancel_status(conv_id):
+        mark_message_execution_status(message_id,'cancelled')
+        return True
+    return False
+
+
+def _begin_send_attempt(conv_id):
+    """新用户请求清除旧会话标志；旧消息及其取消事件仍保持终态。"""
+    if not _acquire_conv_send_lock(conv_id):
+        raise HTTPException(409, "该对话正在处理中，请等待当前分析完成后再发送新消息")
+    try:
+        from db.conversations import clear_conversation_cancel_flag
+        clear_conversation_cancel_flag(conv_id)
+        return threading.Event()
+    except BaseException:
+        _release_conv_send_lock(conv_id)
+        raise
+
+
 def _cancel_producer_by_conv(conv_id: int):
     """通过 conv_id 查找并取消后台 producer 线程。
 
@@ -776,7 +804,7 @@ async def resume_conversation(conv_id: int, request: Request):
                 final_complexity = event.get("complexity", final_complexity)
 
                 duration_ms = int((time.time() - request_start) * 1000)
-                update_message_content_and_metadata(stream_msg_id, final_content, {
+                saved = update_message_content_and_metadata(stream_msg_id, final_content, {
                     "execution_status": "completed",
                     "complexity": final_complexity,
                     "specialist_results": [
@@ -787,6 +815,10 @@ async def resume_conversation(conv_id: int, request: Request):
                     "phase_timings": phase_timings,
                     "trace_id": trace_id,
                 })
+
+                if not saved:
+                    yield _sse_event('cancelled', {'message_id':stream_msg_id})
+                    return
 
                 if not client_disconnected:
                     yield _sse_event("answer", {
@@ -939,7 +971,8 @@ async def continue_conversation_api(conv_id: int, request: Request):
     item = get_latest_recoverable_assistant(conv_id)
     if not item:
         raise HTTPException(400, "没有可继续的对话任务")
-    mark_message_execution_status(item["id"], "resuming")
+    if not mark_message_execution_status(item["id"], "resuming"):
+        raise HTTPException(409, "任务已取消，请点击重新生成创建新的执行。")
     return await resume_conversation(conv_id, request)
 
 
@@ -961,6 +994,12 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     from db._conn import _get_conn
     conn = _get_conn()
     try:
+        target = conn.execute("SELECT * FROM messages WHERE id=? AND conversation_id=? AND role='assistant'",
+                              (message_id,conv_id)).fetchone()
+        if target is None:
+            raise HTTPException(404, "助手消息不存在")
+        target = dict(target)
+        target_meta = json.loads(target['metadata'] or '{}')
         success_run = conn.execute(
             "SELECT 1 FROM agent_runs WHERE message_id = ? AND status = 'success' LIMIT 1",
             (message_id,),
@@ -968,22 +1007,25 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     finally:
         conn.close()
 
-    if success_run:
+    if success_run and target_meta.get('execution_status') != 'cancelled':
         # 原消息已有成功专家 → 只跑综合阶段，原地恢复
         from services.conv_recovery import resume_synthesis_only
         result = resume_synthesis_only(message_id, conv_id)
         if result.get("success"):
             from db.conversations import update_message_content_and_metadata
-            update_message_content_and_metadata(
+            saved = update_message_content_and_metadata(
                 message_id,
                 result["answer"],
                 {
                     "recovered": True,
+                    "execution_status": "completed",
                     "recovery_method": "retry_resume_synthesis",
                     "specialist_count": result["specialist_count"],
                     "blackboard_entries": result.get("blackboard_entries", 0),
                 },
             )
+            if not saved:
+                raise HTTPException(409, "任务已取消，综合结果未写回。")
             logger.info(
                 f"[retry-message] conv {conv_id} msg {message_id} 走 resume_synthesis 恢复成功 "
                 f"({result['specialist_count']} 个专家, {len(result['answer'])} 字)"
@@ -1040,6 +1082,16 @@ async def resume_synthesis_api(conv_id: int, message_id: int):
     if not conv:
         raise HTTPException(404, "对话不存在")
 
+    conn = _get_conn()
+    try:
+        target = conn.execute("SELECT metadata FROM messages WHERE id=? AND conversation_id=? AND role='assistant'",
+                              (message_id,conv_id)).fetchone()
+        if target is None:
+            raise HTTPException(404, "助手消息不存在")
+        if json.loads(target['metadata'] or '{}').get('execution_status') == 'cancelled':
+            raise HTTPException(409, "任务已取消，请点击重新生成创建新的执行。")
+    finally:
+        conn.close()
     from services.conv_recovery import resume_synthesis_only
     result = resume_synthesis_only(message_id, conv_id)
     if not result.get("success"):
@@ -1051,11 +1103,13 @@ async def resume_synthesis_api(conv_id: int, message_id: int):
 
     # 写回 message
     from db.conversations import update_message_content_and_metadata
-    update_message_content_and_metadata(
+    saved = update_message_content_and_metadata(
         message_id,
         result["answer"],
-        {"recovered": True, "recovery_method": "resume_synthesis", "specialist_count": result["specialist_count"]}
+        {"recovered": True, "execution_status": "completed", "recovery_method": "resume_synthesis", "specialist_count": result["specialist_count"]}
     )
+    if not saved:
+        raise HTTPException(409, "任务已取消，综合结果未写回。")
 
     return {
         "ok": True,
@@ -1295,14 +1349,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
     # P0 修复 conv_190：获取对话级发送锁，覆盖 clarify/RAG 阶段的 40 秒空窗期
     # 原有守卫在 agent_runs 记录创建前（约 40 秒）失效，用户在此期间重复发送
     # 会创建第二个 producer 线程，导致两次回答并行 + 资源争抢 + 双倍超时。
-    if not _acquire_conv_send_lock(conv_id):
-        logger.warning(f"[trace:{trace_id}] 对话 {conv_id} 发送锁已被占用，拒绝重复发送")
-        raise HTTPException(409, "该对话正在处理中，请等待当前分析完成后再发送新消息")
+    cancel_event = _begin_send_attempt(conv_id)
     _lock_acquired = True
 
     # 共享 cancel_event：producer 内部检查 + _running_agents 存储 + /cancel 端点 set
     # 必须在 event_stream_producer 闭包外创建，保证取消信号能真正传到后台线程。
-    cancel_event = threading.Event()
 
     async def event_stream_producer():
         """producer 主体：所有准备工作（clarify/RAG/portfolio_facts）+ 编排都在这里执行。
@@ -1491,7 +1542,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             })
 
         # 3. 普通聊天：直接调用 LLM 回答，不走专家流程
-        if complexity == "chat" and not clarification.get("specialists"):
+        if complexity == "chat" and not clarification.get("specialists") and not req.target_specialists:
             # chat 路径也走 channel 事件流持久化（支持断线续接）
             stream_msg_id = create_message(conv_id, "assistant", "⏳ 分析进行中...", metadata=json.dumps({"execution_status": "streaming"}, ensure_ascii=False))
             channel_id = create_stream_channel(
@@ -1540,6 +1591,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 logger.warning(f"[trace:{trace_id}] Chat LLM 调用失败: {e}")
                 answer = "抱歉，处理您的问题时出现了错误，请重试。"
 
+            if _fast_path_cancelled(conv_id, stream_msg_id, cancel_event):
+                cancel_stream_channel(channel_id)
+                yield _sse_event('cancelled', {'message_id':stream_msg_id})
+                return
+            metadata = {'complexity':'chat', 'execution_status':'completed'}
+            if not update_message_content_and_metadata(stream_msg_id, answer, metadata):
+                cancel_stream_channel(channel_id)
+                return
             # 输出结果
             _answer_data = {"content": answer, "specialist_results": []}
             append_stream_event(channel_id, "answer", _answer_data)
@@ -1583,7 +1642,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
             return
 
         # 4. 简单任务：直接路由到专家，跳过 Orchestrator
-        if complexity == "simple" and len(clarification.get("specialists", [])) == 1:
+        if complexity == "simple" and len(clarification.get("specialists", [])) == 1 and not req.target_specialists:
             # 只需要1个专家，直接调用
             agent_key = clarification["specialists"][0]
             if agent_key:
@@ -1632,6 +1691,10 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         return {"error": str(e)}
 
                 result = await asyncio.to_thread(_run_expert)
+                if _fast_path_cancelled(conv_id, stream_msg_id, cancel_event):
+                    cancel_stream_channel(channel_id)
+                    yield _sse_event('cancelled', {'message_id':stream_msg_id})
+                    return
 
                 if "error" not in result:
                     # 发送专家完成事件
@@ -1673,13 +1736,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     answer = review["content"]
                     specialist_results[0]["analysis"] = answer
 
-                    _answer_data = {
-                        "content": answer,
-                        "specialist_results": specialist_results,
-                    }
-                    append_stream_event(channel_id, "answer", _answer_data)
-                    yield _sse_event("answer", _answer_data)
-
                     # 存储回复（更新占位消息）
                     metadata_dict = {
                         "specialist_results": [
@@ -1691,7 +1747,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "refined_query": clarification.get("refined_query", effective_query),
                         "reasoning_trail": result.get("reasoning_trail"),
                     }
-                    update_message_content_and_metadata(stream_msg_id, answer, metadata_dict)
+                    if (_fast_path_cancelled(conv_id, stream_msg_id, cancel_event)
+                            or not update_message_content_and_metadata(stream_msg_id, answer, metadata_dict)):
+                        cancel_stream_channel(channel_id)
+                        return
+                    _answer_data = {'content':answer, 'specialist_results':specialist_results}
+                    append_stream_event(channel_id, 'answer', _answer_data)
+                    yield _sse_event('answer', _answer_data)
                     msg_id = stream_msg_id
 
                     # 基金代码幻觉验证（异步）
@@ -1905,7 +1967,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         arb_specialist = _build_arbitrator_specialist(arbitration)
                         if arb_specialist:
                             _meta["specialist_results"] = p1 + [arb_specialist]
-                    update_message_content_and_metadata(stream_msg_id, content, _meta)
+                    if not update_message_content_and_metadata(stream_msg_id, content, _meta):
+                        raise CancelledError('任务已取消，忽略迟到结果')
                 try:
                     conn = _get_conn()
                     conn.execute("UPDATE agent_runs SET message_id = ? WHERE conversation_id = ? AND message_id = 0", (stream_msg_id, conv_id))
@@ -2032,6 +2095,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     finally:
                         _first_evt_executor.shutdown(wait=False, cancel_futures=True)
                     for event in _event_chain:
+                        if _fast_path_cancelled(conv_id, stream_msg_id, cancel_event):
+                            raise CancelledError('任务已取消')
                         # P0 修复 conv_190：主动更新心跳，避免专家 LLM 调用期间心跳 stale
                         # 原因：update_stream_heartbeat 导入但从未调用，心跳仅靠 append_event
                         # 自动更新。专家 LLM 调用 30-60s 期间无事件产生，心跳 stale 被误判超时。
@@ -2083,14 +2148,6 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                    "message": f"分析已进行 {warn_at_sec // 60} 分钟，正在收尾中，请稍候。"})
 
                         et = event.get("type")
-                        # === 持久化事件到 stream_events（支持断线续接）===
-                        # 跳过增量块（answer_chunk/reasoning_chunk），最终全文在 answer 事件里
-                        if et and et not in ("answer_chunk", "reasoning_chunk"):
-                            try:
-                                event_seq = append_stream_event(channel_id, et, event)
-                                event["seq"] = event_seq
-                            except Exception as _e:
-                                logger.warning(f"[trace:{trace_id}] 持久化事件失败: {_e}")
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
                             # 修复 conv 192：用 .get() 安全访问，避免自纠错重跑等场景字段缺失抛 KeyError
@@ -2146,6 +2203,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                 fail_stream_channel(channel_id, event.get("message", "未知错误"))
                             except Exception as _e:
                                 logger.warning(f"[trace:{trace_id}] 标记 channel 失败: {_e}")
+                        # === 持久化事件到 stream_events（支持断线续接）===
+                        # 跳过增量块（answer_chunk/reasoning_chunk），最终全文在 answer 事件里
+                        if et and et not in ("answer_chunk", "reasoning_chunk"):
+                            try:
+                                event_seq = append_stream_event(channel_id, et, event)
+                                event["seq"] = event_seq
+                            except Exception as _e:
+                                logger.warning(f"[trace:{trace_id}] 持久化事件失败: {_e}")
                         q.put(event)
                 except CancelledError:
                     q.put({"type": "cancelled", "message": "用户取消了执行"})

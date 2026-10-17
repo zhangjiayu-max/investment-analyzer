@@ -1185,6 +1185,9 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
                 return [], 0
 
     results = [dict(r) for r in rows]
+    # 物理索引删除失败时仍以源记录为准，FTS 与向量检索遵循相同规则。
+    from db.index_sources import source_exists
+    results = [r for r in results if source_exists(conn, r['content_type'], r['reference_id'])]
     results, dropped = _filter_old_results(results, conn=conn, query=query)
     conn.close()
     return results[:limit], dropped
@@ -1705,13 +1708,13 @@ def search_chroma(query: str, content_type: str = None, content_types: list[str]
         # cosine distance 越小越相似，超过阈值的跳过
         if distance > max_distance:
             continue
-        # cosine distance -> similarity score (越小越相似，转为负数做 rank)
+        # cosine distance 直接作为升序 rank，避免把远处候选排到前面
         output.append({
             "content_type": meta.get("content_type", ""),
             "title": meta.get("title", ""),
             "body": doc,
             "reference_id": meta.get("reference_id", ""),
-            "rank": -distance,  # 负数，和 FTS5 rank 一致（越小越相关）
+            "rank": distance,  # 本来源 rank 越小越相关；RRF只比较来源内名次
         })
     return output, 0
 
@@ -2368,6 +2371,8 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         content_types=content_types if content_types and len(content_types) > 1 else None,
         limit=limit * 2
     )
+    from db.index_sources import filter_existing_sources
+    chroma_results = filter_existing_sources(chroma_results)
     chroma_count = len(chroma_results)
 
     # 过滤 ChromaDB 中的旧数据（FTS 已在 search_knowledge 中过滤）

@@ -44,7 +44,7 @@ def test_llm_judge_returns_disabled_scores_without_calling_llm(monkeypatch):
 
 
 def test_batch_root_cause_analyzer_skips_when_disabled(monkeypatch):
-    import root_cause_analyzer
+    from infra import root_cause_analyzer
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("Bad cases should not be loaded when root cause analyzer is disabled")

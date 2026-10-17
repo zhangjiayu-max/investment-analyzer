@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from db._conn import _get_conn
@@ -160,6 +161,8 @@ def update_goal_bucket(bucket_id: int, user_id: str = "default", **fields) -> bo
         "priority",
         "notes",
         "status",
+        "linked_holdings",
+        "auto_allocate",
     }
     invalid = set(fields) - allowed
     if invalid:
@@ -279,3 +282,30 @@ def sync_bucket_from_portfolio(user_id: str = "default", total_assets: float = 0
             conn.close()
 
     return {"synced": len(updates), "buckets": list_goal_buckets(user_id=user_id, status="active")}
+
+
+def transfer_goal_bucket_funds(from_id: int, to_id: int, amount: float, user_id: str = 'default') -> bool:
+    """单事务调拨；条件扣款避免并发透支，任何失败都回滚。"""
+    if from_id == to_id or not math.isfinite(amount) or amount <= 0:
+        return False
+    conn = _get_conn()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        target = conn.execute("SELECT id FROM goal_buckets WHERE id=? AND user_id=? AND status='active'",
+                              (to_id, user_id)).fetchone()
+        if not target:
+            return False
+        cur = conn.execute("""UPDATE goal_buckets SET current_amount=current_amount-?,
+            updated_at=datetime('now','localtime') WHERE id=? AND user_id=?
+            AND status='active' AND current_amount>=?""", (amount, from_id, user_id, amount))
+        if cur.rowcount != 1:
+            return False
+        conn.execute("""UPDATE goal_buckets SET current_amount=current_amount+?,
+            updated_at=datetime('now','localtime') WHERE id=? AND user_id=?""", (amount, to_id, user_id))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

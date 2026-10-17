@@ -30,6 +30,7 @@ import { useToast } from '../composables/useToast'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useStreamingState } from '../composables/useStreamingState'
 import { useTaskTracker } from '../composables/useTaskTracker'
+import { useAppNavigation } from '../composables/useAppNavigation'
 import { usePendingAction } from '../composables/usePendingAction'
 
 const props = defineProps({
@@ -37,10 +38,12 @@ const props = defineProps({
 })
 
 const { showToast } = useToast()
+const { pendingConversationId, clearConversationTarget } = useAppNavigation()
+let conversationsReady = false
 const { pendingChatPrefill, clearChatPrefill, setTradeAction } = usePendingAction()
 const {
   streamStates, getStreamState, startStream,
-  handleStreamEvent: routeStreamEvent,
+  handleStreamEvent: routeCoreStreamEvent,
   finishStream, cancelStream: cancelStreamState,
 } = useStreamingState()
 
@@ -98,9 +101,11 @@ function executeTradeFromChat(action) {
 
 onMounted(async () => {
   await loadConversations()
+  conversationsReady = true
   document.addEventListener('visibilitychange', handleVisibilityChange)
   window.addEventListener('pageshow', handlePageShow)
-  if (!(await checkPendingTasks())) {
+  if (pendingConversationId.value) await selectNotificationConversation()
+  else if (!(await checkPendingTasks())) {
     await autoSelectLastConversation()
   }
   // 加载 Agent 列表供 @mention 使用
@@ -123,17 +128,23 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('pageshow', handlePageShow)
+  chatActive = false
+  stopRecoveries()
   stopPollingProgress()
 })
 
 // ─── KeepAlive 页面切换钩子（SPA 内部 activePage 切换）───
 // 首次挂载时 onActivated 也会触发，但此时 selectedConv 尚未就绪，recoverFromDisconnect 会自动跳过
 onActivated(() => {
+  chatActive = true
+  if (pendingConversationId.value) { selectNotificationConversation(); return }
   if (!selectedConv.value?.id) return
   recoverFromDisconnect()
 })
 
 onDeactivated(() => {
+  chatActive = false
+  stopRecoveries()
   // 切到其他页面：中断当前 SSE 连接（后端任务继续执行，切回时由 onActivated 恢复）
   pauseCurrentStream()
   stopPollingProgress()
@@ -161,27 +172,51 @@ function handlePageShow(e) {
   if (e.persisted) recoverFromDisconnect()
 }
 
-async function recoverFromDisconnect() {
-  if (!selectedConv.value?.id) return
-  if (isRecovering.value) return
-  isRecovering.value = true
-  try {
-    const convId = selectedConv.value.id
-    // 强制从 DB 刷新消息（DB 有真实的 execution_status）
-    await loadMessages(convId)
-    const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-    if (lastAssistant?.execution_status === 'streaming') {
-      // DB 中仍为 streaming，说明后端任务还在跑，恢复 SSE 连接
-      showToast('检测到后台执行中的任务，正在恢复连接...', 'info')
-      reconnectStream(convId, lastAssistant)
-    } else if (lastAssistant?.execution_status === 'completed') {
-      // DB 已完成，SSE 之前断了没收到 done 事件，静默刷新即可
-      console.log('[ChatView] 页面切回，任务已完成，已刷新消息')
-    }
-    loadConversations()
-  } finally {
-    isRecovering.value = false
+let chatActive = true
+const recoveryAttempts = new Map()
+const recoveryTimers = new Map()
+const recoveryChecks = new Map()
+function clearRecovery(convId) {
+  clearTimeout(recoveryTimers.get(convId))
+  recoveryTimers.delete(convId)
+  recoveryAttempts.delete(convId)
+}
+function stopRecoveries() {
+  for (const convId of recoveryTimers.keys()) clearRecovery(convId)
+}
+function scheduleRecovery(convId) {
+  if (!chatActive || selectedConv.value?.id !== convId || recoveryTimers.has(convId)) return
+  const attempts = recoveryAttempts.get(convId) || 0
+  if (attempts >= 6) {
+    finishStream(convId)
+    showToast('连接尚未恢复，后台任务保留，可点击「恢复连接」查看状态', 'warning')
+    return
   }
+  recoveryAttempts.set(convId, attempts + 1)
+  recoveryTimers.set(convId, setTimeout(() => {
+    recoveryTimers.delete(convId)
+    tryResumeConversation(convId)
+  }, Math.min(1000 * 2 ** attempts, 15000)))
+}
+function routeStreamEvent(convId, event, callbacks) {
+  if (event.type === 'disconnect') {
+    const state = getStreamState(convId)
+    if (state) state.statusMessage = '连接中断，正在核对后台任务状态'
+    scheduleRecovery(convId)
+    return
+  }
+  if (['done', 'error'].includes(event.type)) clearRecovery(convId)
+  return routeCoreStreamEvent(convId, event, callbacks)
+}
+async function recoverFromDisconnect() {
+  const convId = selectedConv.value?.id
+  if (!convId || isRecovering.value) return
+  isRecovering.value = true
+  clearRecovery(convId)
+  try {
+    await loadMessages(convId)
+    if (selectedConv.value?.id === convId) await tryResumeConversation(convId)
+  } finally { isRecovering.value = false }
 }
 
 const LAST_CONV_KEY = 'investment_last_conv'
@@ -212,6 +247,27 @@ async function autoSelectLastConversation() {
   if (valid) await selectConversation(valid)
 }
 
+async function selectNotificationConversation() {
+  const convId = pendingConversationId.value
+  if (!convId || !conversationsReady) return
+  let conv = conversations.value.find(item => String(item.id) === String(convId))
+  if (!conv) {
+    await loadConversations()
+    if (pendingConversationId.value !== convId) return
+    conv = conversations.value.find(item => String(item.id) === String(convId))
+  }
+  if (!conv) {
+    showToast('目标对话不存在或已删除', 'warning')
+    clearConversationTarget(convId)
+    return
+  }
+  clearConversationTarget(convId)
+  await selectConversation(conv)
+}
+watch(pendingConversationId, convId => {
+  if (convId && conversationsReady && chatActive) selectNotificationConversation()
+})
+
 // ─── 对话管理 ───
 
 async function loadConversations() {
@@ -229,10 +285,12 @@ async function selectConversation(conv) {
   // 切换对话前暂停当前 SSE 连接（任务在后台继续执行，仅断开前端流）
   // 修复：切换对话时旧 SSE 未清理，导致 streamStates 残留、侧边栏错误显示脉动
   pauseCurrentStream()
+  stopRecoveries()
+  if (selectedConv.value?.id !== conv.id) messages.value = []
   selectedConv.value = conv
   localStorage.setItem(LAST_CONV_KEY, String(conv.id))
   await loadMessages(conv.id)
-  await autoRecoverIfNeeded(conv.id)
+  if (selectedConv.value?.id === conv.id) await autoRecoverIfNeeded(conv.id)
 }
 
 async function autoRecoverIfNeeded(convId) {
@@ -272,8 +330,8 @@ async function autoRecoverIfNeeded(convId) {
           console.log('[ChatView] 对话已完成，不自动恢复可能重复的 user 消息')
           return
         }
-        showToast('检测到中断的请求，正在重新执行...', 'info')
-        sendMessageAndTrack(convId, lastMsg.content)
+        // 历史存在 user 消息不代表可重新分析；自动恢复只读查询。
+        tryResumeConversation(convId)
       }
     }
   } finally {
@@ -282,108 +340,40 @@ async function autoRecoverIfNeeded(convId) {
 }
 
 function tryResumeConversation(convId) {
-  // 新流程：先查 execution-state，按 channel 状态分流
-  getConversationExecutionState(convId).then(({ data }) => {
-    const item = data?.item
-    if (!item) {
-      // 无可恢复消息 → 不做任何操作
-      return
-    }
-    const channelId = item.channel_id
-    const channelStatus = item.channel_status
-
-    if (!channelId) {
-      // 旧对话无 channel → 走旧 resume 逻辑兼容
-      _legacyResumeConversation(convId)
-      return
-    }
-
-    if (channelStatus === 'running') {
-      // 任务还活着 → 调 replay 从头回放（前端尚未渲染任何事件）
-      showToast('正在续接任务...', 'info')
-      _reconnectReplay(convId, channelId, 0)
-    } else if (channelStatus === 'completed') {
-      // 已完成 → 直接刷新消息
-      loadMessages(convId).then(() => {
-        showToast('任务已完成', 'success')
+  if (!chatActive || selectedConv.value?.id !== convId) return Promise.resolve()
+  if (recoveryChecks.has(convId)) return recoveryChecks.get(convId)
+  const check = (async () => {
+    try {
+      const { data } = await getConversationExecutionState(convId)
+      if (!chatActive || selectedConv.value?.id !== convId) return
+      const item = data?.item
+      if (item?.channel_id && item.channel_status === 'running') {
+        _reconnectReplay(convId, item.channel_id, 0)
+        return
+      }
+      if (item && ['completed', 'failed', 'aborted', 'cancelled'].includes(item.channel_status || item.execution_status)) {
+        clearRecovery(convId)
+        finishStream(convId)
+        removeTask(convId)
+        await loadMessages(convId)
         loadConversations()
-        nextTick(() => scrollToBottom())
-      })
-    } else {
-      // failed / aborted / cancelled → 刷新消息显示真实状态 + 重试按钮
-      finishStream(convId)
-      removeTask(convId)
-      loadMessages(convId).then(() => {
-        if (channelStatus === 'aborted') {
-          showToast('任务中断，可点击「重新生成」重试', 'info')
-        } else if (channelStatus === 'failed') {
-          showToast('对话执行失败，可点击「重新生成」重试', 'info')
-        } else if (channelStatus === 'cancelled') {
-          showToast('对话已取消，可点击「继续分析」重新执行', 'info')
-        }
-      })
+        return
+      }
+      // 老任务无 channel 时保留状态、只读等待，恢复不会调用 resume/POST。
+      await loadMessages(convId)
+      if (!chatActive || selectedConv.value?.id !== convId) return
+      const assistant = [...messages.value].reverse().find(m => m.role === 'assistant')
+      if (assistant && ['completed', 'failed', 'cancelled'].includes(assistant.execution_status)) {
+        clearRecovery(convId)
+        finishStream(convId)
+        removeTask(convId)
+      } else scheduleRecovery(convId)
+    } catch (_) {
+      scheduleRecovery(convId)
     }
-  }).catch(err => {
-    console.warn('[ChatView] 查询 execution-state 失败，回退到旧 resume:', err)
-    _legacyResumeConversation(convId)
-  })
-}
-
-// 旧 resume 逻辑（兼容无 channel 的旧对话）
-function _legacyResumeConversation(convId) {
-  const controller = resumeConversationStream(convId, (event) => {
-    routeStreamEvent(convId, event, {
-      onAnswer: (cid, data, state) => {
-        if (selectedConv.value?.id !== cid) return
-        const msgIndex = messages.value.findIndex(m =>
-          m.role === 'assistant' && m.execution_status === 'streaming'
-        )
-        if (msgIndex >= 0) {
-          messages.value[msgIndex].content = data.content
-          messages.value[msgIndex].specialist_results = state.completedSpecialists.filter(s => !s.is_cross_review)
-          messages.value[msgIndex].cross_review_results = state.completedCrossReviews
-          messages.value[msgIndex].tool_calls = state.currentToolCalls
-          messages.value = [...messages.value]
-        }
-        nextTick(() => scrollToBottom())
-      },
-      onRecommendations: (cid, data) => attachRecommendationsToLastMessage(cid, data),
-      onDone: (cid) => {
-        finishStream(cid)
-        removeTask(cid)
-        loadMessages(cid).then(() => {
-          showToast('任务已完成', 'success')
-          loadConversations()
-          nextTick(() => scrollToBottom())
-        })
-      },
-      onError: (cid, errorData) => {
-        if (errorData.code === 'RESUME_FAILED') {
-          finishStream(cid)
-          removeTask(cid)
-          loadMessages(cid).then(() => {
-            const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-            const status = lastAssistant?.execution_status
-            if (status === 'cancelled') {
-              showToast('对话已取消，可点击「继续分析」重新执行', 'info')
-            } else if (status === 'failed') {
-              showToast('对话执行失败，可点击「重新生成」重试', 'info')
-            } else if (status === 'completed') {
-              showToast('任务已完成', 'success')
-            }
-          })
-          return
-        }
-        finishStream(cid)
-        removeTask(cid)
-        loadMessages(cid).then(() => {
-          showToast('任务状态已更新', 'info')
-        })
-      },
-    })
-  })
-  startStream(convId, controller)
-  addTask(convId, null, selectedConv.value?.title || '')
+  })().finally(() => { if (recoveryChecks.get(convId) === check) recoveryChecks.delete(convId) })
+  recoveryChecks.set(convId, check)
+  return check
 }
 
 // replay 续接：切回页面时续接 channel 事件流
@@ -392,6 +382,8 @@ function _reconnectReplay(convId, channelId, lastSeq) {
     // replay_end 事件：回放结束，清理状态
     if (event.type === 'replay_end') {
       const status = event.data?.status
+      if (status === 'running') { scheduleRecovery(convId); return }
+      clearRecovery(convId)
       finishStream(convId)
       removeTask(convId)
       if (status === 'completed') {
@@ -568,9 +560,13 @@ function sendMessageAndTrack(convId, text) {
   addTask(convId, null, selectedConv.value?.title || `对话 #${convId}`)
 }
 
+let messageGeneration = 0
 async function loadMessages(convId) {
+  const version = ++messageGeneration
+  const current = () => selectedConv.value?.id === convId && version === messageGeneration
   try {
     const { data } = await getMessages(convId)
+    if (!current()) return
     messages.value = (data.messages || []).map(msg => parseMessageMeta(msg))
     for (const msg of messages.value) {
       if (msg.role === 'assistant' && msg.id) {
@@ -580,6 +576,7 @@ async function loadMessages(convId) {
     await nextTick()
     scrollToBottom()
   } catch (e) {
+    if (!current()) return
     console.error('Failed to load messages:', e)
     showToast('加载历史消息失败', 'error')
     messages.value = []
@@ -1193,106 +1190,9 @@ function restoreStreamStateFromMessage(convId, msg) {
 }
 
 async function reconnectStream(convId, existingMsg) {
+  if (selectedConv.value?.id !== convId) return
   restoreStreamStateFromMessage(convId, existingMsg)
-  const existingSpecKeys = new Set((existingMsg?.specialist_results || []).map(s => s.agent_key))
-  const existingCrossKeys = new Set((existingMsg?.cross_review_results || []).map(s => s.agent_key))
-
-  const controller = resumeConversationStream(convId, (event) => {
-    const { type, data } = event
-    if (type === 'specialist_done' && existingSpecKeys.has(data.agent_key)) return
-    if (type === 'cross_review_done' && existingCrossKeys.has(data.agent_key)) return
-
-    routeStreamEvent(convId, event, {
-      onAnswer: (cid, answerData, state) => {
-        if (selectedConv.value?.id !== cid) return
-        const msgIndex = messages.value.findIndex(m =>
-          m.role === 'assistant' && m.execution_status === 'streaming'
-        )
-        if (msgIndex >= 0) {
-          const msg = messages.value[msgIndex]
-          msg.content = answerData.content
-          msg.specialist_results = state.completedSpecialists.filter(s => !s.is_cross_review)
-          msg.cross_review_results = state.completedCrossReviews
-          msg.tool_calls = state.currentToolCalls
-          msg.rag = state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null
-        } else {
-          messages.value.push({
-            role: 'assistant',
-            content: answerData.content,
-            created_at: new Date().toISOString(),
-            specialist_results: state.completedSpecialists.filter(s => !s.is_cross_review),
-            cross_review_results: state.completedCrossReviews,
-            tool_calls: state.currentToolCalls,
-            rag: state.currentToolCalls._ragSources ? { sources: state.currentToolCalls._ragSources } : null,
-          })
-        }
-        nextTick(() => scrollToBottom())
-      },
-      onDone: (cid, doneData) => {
-        if (selectedConv.value?.id === cid) {
-          const state = getStreamState(cid)
-          const msgIndex = messages.value.findIndex(m =>
-            m.role === 'assistant' && m.execution_status === 'streaming'
-          )
-          if (msgIndex >= 0) {
-            const msg = messages.value[msgIndex]
-            if (state?.lastTiming) {
-              msg.duration_ms = state.lastTiming.duration_ms
-              msg.phase_timings = state.lastTiming.phase_timings
-            }
-            msg.execution_status = 'completed'
-          }
-        }
-        finishStream(cid)
-        removeTask(cid)
-        loadConversations()
-        showToast('任务执行完成', 'success')
-      },
-      onError: (cid, errorData) => {
-        if (selectedConv.value?.id === cid) {
-          if (errorData.code === 'RESUME_FAILED') {
-            finishStream(cid)
-            removeTask(cid)
-            // 409 表示对话已取消/失败/重复请求，刷新消息显示真实状态，不自动重发
-            // 用户会在消息气泡上看到「已取消」或「执行失败」状态及对应的重试按钮
-            loadMessages(cid).then(() => {
-              const lastAssistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-              const status = lastAssistant?.execution_status
-              if (status === 'cancelled') {
-                showToast('对话已取消，可点击「继续分析」重新执行', 'info')
-              } else if (status === 'failed') {
-                showToast('对话执行失败，可点击「重新生成」重试', 'info')
-              } else if (status === 'completed') {
-                showToast('任务已完成', 'success')
-              } else {
-                console.log('[ChatView] 恢复连接返回 409，当前状态:', status)
-              }
-            })
-            return
-          }
-          const msgIndex = messages.value.findIndex(m =>
-            m.role === 'assistant' && m.execution_status === 'streaming'
-          )
-          if (msgIndex >= 0) {
-            loadMessages(cid).then(() => { showToast('任务状态已更新', 'info') })
-          } else {
-            messages.value.push({
-              role: 'assistant',
-              content: '恢复连接失败: ' + (errorData.message || '未知错误'),
-              created_at: new Date().toISOString(),
-            })
-          }
-        }
-        finishStream(cid)
-        removeTask(cid)
-      },
-    })
-  })
-
-  const state = streamStates.get(convId)
-  if (state) {
-    state.streamAbort = controller
-  }
+  return tryResumeConversation(convId)
 }
 
 async function retryMessage(userMsg) {
@@ -1337,7 +1237,7 @@ async function continueAssistantMessage(msg) {
     msg.execution_status = 'streaming'
     messages.value = [...messages.value]
   }
-  tryResumeConversation(convId)
+  if (selectedConv.value?.id === convId) handleResume()
 }
 
 async function regenerateAssistantMessage(msg) {
@@ -1368,7 +1268,6 @@ async function regenerateAssistantMessage(msg) {
 async function handleResume() {
   const convId = selectedConv.value?.id
   if (!convId || sending.value) return
-  sending.value = true
   const controller = resumeConversationStream(convId, (event) => {
     routeStreamEvent(convId, event, {
       onAnswerChunk: (cid, data, state) => {
@@ -1429,19 +1328,12 @@ async function handleResume() {
           }
         }
         finishStream(cid)
-        sending.value = false
         loadConversations()
       },
       onError: (cid, data) => {
         if (data.code === 'RESUME_FAILED') {
           finishStream(cid)
-          sending.value = false
-          const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
-          if (lastUserMsg) {
-            showToast('对话已中断，正在重新执行...', 'info')
-            inputText.value = lastUserMsg.content
-            handleSend()
-          }
+            showToast('恢复执行失败，可点击「重新生成」主动重试', 'warning')
           return
         }
         if (selectedConv.value?.id === cid) {
@@ -1452,7 +1344,6 @@ async function handleResume() {
           })
         }
         finishStream(cid)
-        sending.value = false
       },
     })
   })

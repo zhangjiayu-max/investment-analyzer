@@ -215,49 +215,20 @@ def delete_knowledge_by_source(source: str) -> int:
     return count
 
 
-def cleanup_orphan_fts_records() -> dict:
-    """清理 FTS 索引中的孤儿记录（knowledge_base 中已删除但 FTS 中仍存在的记录）。
-
-    Returns:
-        {"cleaned": int, "details": str}
-    """
+def cleanup_orphan_fts_records(dry_run: bool = False) -> dict:
+    """按类型对应源表判定孤儿；未知类型不删，支持只读候选预览。"""
+    from db.index_sources import source_exists
+    conn = _get_conn()
     try:
-        from services.rag import _get_conn as _get_rag_conn
-
-        rag_conn = _get_rag_conn()
-        conn = _get_conn()
-
-        # 查找 FTS 中存在但 knowledge_base 中不存在的记录
-        orphans = rag_conn.execute("""
-            SELECT rowid, c3 as reference_id, c0 as content_type
-            FROM knowledge_fts_content
-            WHERE c3 NOT IN (SELECT id FROM knowledge_base)
-        """).fetchall()
-
-        cleaned = 0
-        for orphan in orphans:
-            ref_id = orphan["reference_id"]
-            content_type = orphan["content_type"]
-            try:
-                rag_conn.execute(
-                    "DELETE FROM knowledge_fts WHERE content_type = ? AND reference_id = ?",
-                    (content_type, ref_id)
-                )
-                cleaned += 1
-            except Exception as e:
-                logger.warning(f"清理孤儿 FTS 记录失败 (ref_id={ref_id}): {e}")
-
-        rag_conn.commit()
-        rag_conn.close()
+        rows = conn.execute('SELECT rowid,content_type,reference_id FROM knowledge_fts').fetchall()
+        orphans = [dict(row) for row in rows if not source_exists(conn,row['content_type'],row['reference_id'])]
+        if not dry_run:
+            with conn:
+                conn.executemany('DELETE FROM knowledge_fts WHERE rowid=?',[(r['rowid'],) for r in orphans])
+        return {'cleaned':0 if dry_run else len(orphans), 'candidates':orphans,
+                'details':f"发现 {len(orphans)} 条孤儿 FTS 记录", 'dry_run':dry_run}
+    finally:
         conn.close()
-
-        return {
-            "cleaned": cleaned,
-            "details": f"清理了 {cleaned} 条孤儿 FTS 记录"
-        }
-    except Exception as e:
-        logger.error(f"清理孤儿 FTS 记录失败: {e}")
-        return {"cleaned": 0, "details": f"清理失败: {e}"}
 
 
 def list_knowledge_books() -> list[dict]:

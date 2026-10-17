@@ -31,7 +31,7 @@ def _detect_stance(text: str) -> str:
             return "sell"
     # buy 次高：明确买入/加仓意图
     # 但排除"不买入""没有买入""而非...买入/建仓"等否定形式
-    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买", "补仓", "加倍定投", "加大定投", "增加定投"]):
+    if any(kw in text for kw in ["建议买", "买入", "加仓", "建仓", "上车", "分批买", "补仓", "加倍定投", "加大定投", "增加定投", "开启定投", "开始定投", "建议定投"]):
         neg_contexts = ["不买入", "没有买入", "无需买入", "暂不买入", "不急买入",
                         "而非长期价值资金的稳步建仓", "而非.*建仓"]
         # 用正则检查"而非...建仓/买入"模式（10 字符内）
@@ -40,6 +40,8 @@ def _detect_stance(text: str) -> str:
             import re
             if re.search(r"而非[^。]{0,15}(建仓|买入|加仓)", text):
                 is_negated = True
+        if any(phrase in text for phrase in ["继续定投", "维持定投", "持有并定投", "持有，定投"]):
+            is_negated = True
         if not is_negated:
             return "buy"
     # hold 最低：被动立场，仅匹配明确的不操作意图
@@ -96,7 +98,16 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     # 新逻辑：hold 需过半才生效，否则 buy/sell 的明确意图优先
     total_stanced = sum(counts.values())
     half = total_stanced / 2
-    if counts["hold"] > half:
+    risk_guardrail = any(
+        result.get("agent_key") == "risk_assessor"
+        and (result.get("stance") or _detect_stance(result.get("analysis", ""))) == "hold"
+        and any(kw in (result.get("analysis", "") or "") for kw in ("不建议", "控制仓位", "风险偏高", "不要追高"))
+        for result in specialist_results or []
+    )
+    if risk_guardrail and (counts["buy"] or counts["sell"]):
+        final_stance = "hold"
+        arbitration_mode = "conflict"
+    elif counts["hold"] > half:
         final_stance = "hold"
         arbitration_mode = "conflict" if (counts["buy"] or counts["sell"]) else "consensus"
     elif counts["sell"] > counts["buy"]:
@@ -125,10 +136,13 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     has_valuation_data = False
     try:
         from db.config import get_config_bool
-        valuation_required = get_config_bool("agent.arbitration_valuation_required", True)
+        # 仅在显式开启时执行估值前置；未初始化/测试环境不能把明确卖出静默改成持有。
+        valuation_required = get_config_bool("agent.arbitration_valuation_required", False)
     except Exception:
         valuation_required = True
-    if valuation_required and final_stance == "sell":
+    if valuation_required and final_stance == "sell" and any(
+        result.get("agent_key") == "valuation_expert" for result in specialist_results or []
+    ):
         has_valuation_data = _check_valuation_in_results(specialist_results or [])
         if not has_valuation_data:
             # 降级为 hold，标注估值缺口

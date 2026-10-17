@@ -515,6 +515,9 @@ class SmartRouter:
                     for a in agents:
                         if a not in priority:
                             priority[a] = i
+                # 债券主题必须保留三类互补视角，避免通用动作规则把宏观/估值挤出上限。
+                if any(kw in combined_text for kw in ["债券", "国债", "利率债", "信用债", "可转债", "债基", "纯债", "短债"]):
+                    priority.update({"fund_analyst": -3, "macro_strategist": -2, "valuation_expert": -1})
             specialists_list.sort(key=lambda x: priority.get(x, 999))
             specialists_list = specialists_list[:5]
             logger.info(f"专家数超过 5 个,按优先级截断为: {specialists_list}")

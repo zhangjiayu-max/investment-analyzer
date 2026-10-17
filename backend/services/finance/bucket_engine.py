@@ -110,23 +110,10 @@ def generate_allocation_suggestion():
     return sorted(suggestions, key=lambda x: x.get('excess_ratio', x.get('deficit_ratio', 0)), reverse=True)
 
 
-def transfer_between_buckets(from_bucket_id, to_bucket_id, amount):
-    """执行跨桶调拨。"""
-    from_bucket = get_goal_bucket(from_bucket_id)
-    to_bucket = get_goal_bucket(to_bucket_id)
-
-    if not from_bucket or not to_bucket:
-        return False
-
-    from_current = from_bucket.get('current_amount', 0)
-    if from_current < amount:
-        return False
-
-    update_goal_bucket(from_bucket_id, current_amount=from_current - amount)
-    update_goal_bucket(to_bucket_id, current_amount=to_bucket.get('current_amount', 0) + amount)
-
-    logger.info(f"跨桶调拨完成: from={from_bucket_id}, to={to_bucket_id}, amount={amount}")
-    return True
+def transfer_between_buckets(from_bucket_id, to_bucket_id, amount, user_id='default'):
+    """校验并原子执行跨桶调拨。"""
+    from db.goal_buckets import transfer_goal_bucket_funds
+    return transfer_goal_bucket_funds(from_bucket_id, to_bucket_id, amount, user_id=user_id)
 
 
 def _map_category_to_risk_level(category):

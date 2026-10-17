@@ -7,7 +7,7 @@ from services.finance_planner import (
     stress_test, get_goals_progress,
 )
 
-router = APIRouter(prefix="/finance", tags=["finance"])
+router = APIRouter(prefix="/api/finance", tags=["finance"])
 
 
 @router.get("/cash-flow-forecast")

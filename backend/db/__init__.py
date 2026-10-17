@@ -236,7 +236,7 @@ from db.fund_holdings_snapshot import (
 from db.async_tasks import (
     init_async_tasks_table, create_async_task, update_async_task,
     get_async_task, list_async_tasks, get_latest_async_task,
-    get_latest_done_task, get_running_async_task,
+    get_latest_done_task, get_running_async_task, cleanup_stale_async_tasks,
 )
 
 # SSE 对话事件流持久化
@@ -316,8 +316,12 @@ from db.smart_add_plans import (
 )
 # 三模块联动 P0（2026-08-01）：统一投资决策账本（闭环核心）
 from db.investment_decisions import (
-    init_investment_decisions_table, create_decision, get_decision,
-    list_decisions, update_decision_status, update_exit_state, update_exit_plan,
+    init_investment_decisions_table,
+    create_decision as create_investment_decision,
+    get_decision as get_investment_decision,
+    list_decisions as list_investment_decisions,
+    update_decision_status as update_investment_decision_status,
+    update_exit_state, update_exit_plan,
     record_review, get_decisions_due_for_review, get_decision_accuracy_stats,
 )
 # 4%定投法（雷牛牛方法论）：建仓配置 + 触发记录

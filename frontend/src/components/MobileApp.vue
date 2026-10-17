@@ -7,7 +7,9 @@ import ChatView from './ChatView.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
-import { mobileMoreGroups, mobileTabs } from '../mobileNavigation.js'
+import { mobileMoreGroups, mobileTabs, getVisibleMobileMoreGroups } from '../mobileNavigation.js'
+import { useAppNavigation } from '../composables/useAppNavigation'
+import { isDevMode, setDevMode } from '../navigation.js'
 
 // 懒加载组件：defineAsyncComponent 让 Vite 自动按动态 import 做代码分割
 // 首屏 JS 预计降 40%+，低频页面（系统管理/质量评测等）按需加载
@@ -52,16 +54,17 @@ const HealthDashboardV2 = defineAsyncComponent(() => import('./health/HealthDash
 const DecisionCenter = defineAsyncComponent(() => import('./decision/DecisionCenter.vue'))
 const FeatureUsagePage = defineAsyncComponent(() => import('./analysis/FeatureUsagePage.vue'))
 
-const activePage = ref(localStorage.getItem('activePage') || 'dashboard')
+const { activePage } = useAppNavigation()
 const showMoreMenu = ref(false)
 const showNotificationCenter = ref(false)
+const devMode = ref(isDevMode())
 
-watch(activePage, (val) => {
-  localStorage.setItem('activePage', val)
-})
 
-// 扁平化 moreItems（兼容 currentPageLabel 查找）
+
+// 扁平化 moreItems（兼容 currentPageLabel 查找，含隐藏项以便直接导航仍可显示标题）
 const moreItems = mobileMoreGroups.flatMap(g => g.items)
+// 更多菜单展示用：按开发者模式过滤
+const visibleMoreGroups = computed(() => getVisibleMobileMoreGroups(devMode.value))
 
 function navigate(key) {
   if (key === '__more__') {
@@ -128,7 +131,7 @@ const pageProps = computed(() => {
     return { onNavigate: (page) => navigate(page) }
   }
   // 与 Home.vue 对齐：需跨页跳转的页面透传 onNavigate
-  if (['alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
+  if (['chat', 'alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
     return { onNavigate: (page) => navigate(page) }
   }
   return {}
@@ -166,6 +169,11 @@ function onSelectTask(taskId) {
 
 function onBack() {
   currentTaskId.value = null
+}
+
+function toggleDevMode() {
+  devMode.value = !devMode.value
+  setDevMode(devMode.value)
 }
 </script>
 
@@ -229,7 +237,7 @@ function onBack() {
             </button>
           </div>
           <div class="mobile-more-grid">
-            <template v-for="group in mobileMoreGroups" :key="group.label">
+            <template v-for="group in visibleMoreGroups" :key="group.label">
               <div class="mobile-more-group-label">{{ group.label }}</div>
               <button
                 v-for="item in group.items"
@@ -241,6 +249,19 @@ function onBack() {
                 <span class="mobile-more-label">{{ item.label }}</span>
               </button>
             </template>
+          </div>
+          <div class="mobile-more-footer">
+            <button
+              @click="toggleDevMode"
+              :class="['mobile-dev-toggle', { active: devMode }]"
+              :title="devMode ? '关闭开发者模式，回到精简视图' : '开启开发者模式，显示全部功能'"
+            >
+              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+              <span>开发者模式</span>
+            </button>
           </div>
         </div>
       </div>
@@ -526,7 +547,34 @@ function onBack() {
   background: var(--color-bg-hover);
 }
 
-/* 🔥 常用功能角标 */
+/* 开发者模式切换 */
+.mobile-more-footer {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--color-border-light);
+}
+.mobile-dev-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.6rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.mobile-dev-toggle.active {
+  color: var(--color-primary);
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-bg);
+}
+
 .mobile-more-hot {
   position: absolute;
   top: 3px;

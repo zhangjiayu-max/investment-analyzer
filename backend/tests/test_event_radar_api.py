@@ -13,9 +13,10 @@ def test_manual_scan_endpoint(tmp_db):
         resp = client.post("/api/alerts/event-radar/scan")
     assert resp.status_code == 200
     data = resp.json()
-    # 中间件包装为 {code, message, data}
+    # 扫描已改为后台任务，接口只保证立即返回可轮询的任务凭据。
     assert data["code"] == 0
-    assert data["data"]["extracted"] == 2
+    assert data["data"]["status"] == "running"
+    assert data["data"]["task_id"]
 
 
 def test_list_events_endpoint(tmp_db):

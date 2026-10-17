@@ -157,13 +157,15 @@ def _discovery_layer(fund_code: str, index_code: str | None) -> dict:
     return layer
 
 
-def _sizing_layer(fund_code: str, user_id: str, holding: dict | None, total_assets: float) -> dict:
+def _sizing_layer(fund_code: str, user_id: str, holding: dict | None, total_assets: float,
+                  plan_result: dict | None = None) -> dict:
     """② 执行层：智能补仓 sizing（含相关性降权），失败时凯利兜底。"""
     layer = {"suggested_amount": 0.0, "source": "none", "correlation_risk": None}
     # 优先取智能补仓计划中该标的的金额（已含 S1 相关性降权）
     try:
         from services.advisor.smart_add_planner import generate_smart_add_plan
-        plan_result = generate_smart_add_plan(user_id)
+        if plan_result is None:
+            plan_result = generate_smart_add_plan(user_id)
         for p in plan_result.get("plans", []):
             if p.get("fund_code") == fund_code:
                 layer["suggested_amount"] = p.get("final_suggested_amount", 0) or 0
@@ -210,7 +212,8 @@ def _risk_layer(index_code: str | None, holdings: list[dict], fund_code: str,
         return {"enabled": False, "corr_downweight": 1.0, "flags": [f"风控评估异常: {e}"]}
 
 
-def run_investment_decision(fund_code: str, user_id: str = "default") -> dict:
+def run_investment_decision(fund_code: str, user_id: str = "default",
+                            plan_result: dict | None = None) -> dict:
     """对单标的运行完整投资决策流水线，返回决策卡片并写入决策账本。
 
     Args:
@@ -260,7 +263,7 @@ def run_investment_decision(fund_code: str, user_id: str = "default") -> dict:
     # ② 执行层
     holding_with_risk = dict(holding)
     holding_with_risk["_corr_risk"] = risk_check
-    sizing = _sizing_layer(fund_code, user_id, holding_with_risk, total_assets)
+    sizing = _sizing_layer(fund_code, user_id, holding_with_risk, total_assets, plan_result=plan_result)
     suggested_amount = sizing.get("suggested_amount", 0)
     # 若 sizing 未含相关性降权且风控要求，应用风控降权
     if require_risk and sizing.get("source") != "smart_add":
@@ -313,7 +316,7 @@ def run_investment_decision(fund_code: str, user_id: str = "default") -> dict:
     # 写入决策账本
     decision_id = None
     try:
-        from db import create_decision
+        from db.investment_decisions import create_decision
         decision_id = create_decision(
             decision_type="opportunity_buy" if verdict == "can_buy" else "watch",
             source_module="agent_pipeline",
@@ -326,6 +329,7 @@ def run_investment_decision(fund_code: str, user_id: str = "default") -> dict:
                 "valuation_percentile": valuation_percentile,
                 "opportunity_score": opp_score,
                 "entry_price": holding.get("current_price"),
+                "entry_date": (holding.get("price_updated_at") or "")[:10],
                 "current_price": holding.get("current_price"),
                 "cost_price": cost_price,
             },

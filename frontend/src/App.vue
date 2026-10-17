@@ -6,21 +6,20 @@ import MobileApp from './components/MobileApp.vue'
 import TickerBar from './components/finance/TickerBar.vue'
 import TaskNotification from './components/TaskNotification.vue'
 import OnboardingWelcome from './components/family/OnboardingWelcome.vue'
+import { useAppNavigation } from './composables/useAppNavigation'
 import { useMobile } from './composables/useMobile'
 import { useTaskTracker } from './composables/useTaskTracker'
 
 const { isMobile } = useMobile()
 const { completedTask, clearCompletedTask } = useTaskTracker()
 
-const activePage = ref(localStorage.getItem('activePage') || 'articles')
+const { activePage, openConversation } = useAppNavigation()
 const showKyc = ref(false)
 const searchQuery = ref('')
 // 首次访问引导：未标记 hasVisited 时弹出
 const showOnboarding = ref(!localStorage.getItem('hasVisited'))
 
-watch(activePage, (val) => {
-  localStorage.setItem('activePage', val)
-})
+
 
 function handleSearch(q) {
   searchQuery.value = q
@@ -41,8 +40,7 @@ onUnmounted(() => {
 
 // 任务完成时跳转到对话页面
 function handleViewResult(convId) {
-  activePage.value = 'chat'
-  // 可以通过事件总线或 store 传递 convId 给 Chat 组件
+  openConversation(convId)
   clearCompletedTask()
 }
 </script>

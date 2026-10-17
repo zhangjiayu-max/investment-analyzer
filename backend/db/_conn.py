@@ -5,7 +5,7 @@
 ═══════════════════════════════════════════════════════════════
 
 1. 数据库文件路径：
-   - 默认: backend/data/valuations.db
+   - 默认: <project_root>/data/valuations.db
    - 可通过环境变量 DB_PATH 覆盖（绝对路径）
    - 所有模块统一从 `from db._conn import DB_PATH` 获取，禁止独立定义
 

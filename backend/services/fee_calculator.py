@@ -8,6 +8,7 @@
 开关：fee.auto_calc_enabled（默认 true），关闭后自动确认不计算手续费。
 """
 
+import math
 from datetime import date, datetime
 
 from db.config import get_config_bool, get_config_float
@@ -82,9 +83,8 @@ def get_fund_fee_rate(fund_code: str | None) -> float | None:
         if row and row["subscription_fee"] is not None:
             r = float(row["subscription_fee"])
             # subscription_fee 存储为百分比（如 0.15 表示 0.15%），归一化为小数
-            if r > 1.0:
-                r = r / 100.0
-            rate = r
+            if math.isfinite(r) and 0 <= r <= 100:
+                rate = r / 100.0
     except Exception:
         rate = None
     _FUND_FEE_CACHE[fund_code] = (rate, _time.time())

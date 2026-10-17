@@ -5,6 +5,8 @@ from datetime import datetime
 
 from db._conn import _get_conn, _row_to_dict
 
+STALE_TASK_MINUTES = 30
+
 
 def init_async_tasks_table(conn):
     """建表，启动时由 init_db 调用。"""
@@ -75,6 +77,7 @@ def get_async_task(task_id: int) -> dict | None:
 def list_async_tasks(task_type: str = None, status: str = None, limit: int = 50) -> list[dict]:
     """列出异步任务，可按类型和状态过滤。"""
     conn = _get_conn()
+    cleanup_stale_async_tasks(_conn=conn)
     sql = "SELECT * FROM async_tasks"
     params = []
     conditions = []
@@ -96,6 +99,7 @@ def list_async_tasks(task_type: str = None, status: str = None, limit: int = 50)
 def get_latest_async_task(task_type: str) -> dict | None:
     """获取指定类型最近一条任务（不限状态）。"""
     conn = _get_conn()
+    cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute(
         "SELECT * FROM async_tasks WHERE task_type = ? ORDER BY id DESC LIMIT 1",
         (task_type,)
@@ -126,6 +130,7 @@ def get_running_async_task(task_type: str) -> dict | None:
     返回 None 表示无运行中任务,可以触发新任务。
     """
     conn = _get_conn()
+    cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute(
         "SELECT * FROM async_tasks WHERE task_type = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
         (task_type,)
@@ -134,3 +139,24 @@ def get_running_async_task(task_type: str) -> dict | None:
     if not row:
         return None
     return _row_to_dict(row)
+
+
+def cleanup_stale_async_tasks(max_age_minutes: int = STALE_TASK_MINUTES, _conn=None) -> int:
+    """将长时间无更新的 running 任务标记为 error，避免重启后永久卡住。"""
+    own_conn = _conn is None
+    conn = _conn or _get_conn()
+    try:
+        cur = conn.execute(
+            """UPDATE async_tasks
+               SET status = 'error',
+                   error_msg = ?,
+                   updated_at = datetime('now','localtime')
+             WHERE status = 'running'
+               AND updated_at < datetime('now','localtime', ?)""",
+            (f"任务超过 {max_age_minutes} 分钟未更新，已自动标记失败", f"-{max_age_minutes} minutes"),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        if own_conn:
+            conn.close()

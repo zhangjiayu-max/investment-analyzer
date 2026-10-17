@@ -2,11 +2,11 @@
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from db import (
     get_portfolio_summary, get_cash_balance, list_goal_buckets,
-    list_holdings, list_recommendations,
+    get_cashflow,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 def forecast_cash_flow(months=12):
     """预测未来现金流。"""
     portfolio = get_portfolio_summary()
-    cash = get_cash_balance()
+    cash = (get_cash_balance() or {}).get('balance', 0) or 0
+    cashflow = get_cashflow()
     buckets = list_goal_buckets()
 
     monthly_contribution = 0
@@ -25,25 +26,36 @@ def forecast_cash_flow(months=12):
             current_amount = bucket.get('current_amount', 0)
             monthly_contribution += max(0, (target_amount - current_amount) / 36)
 
-    monthly_contribution = min(monthly_contribution, cash / 6)
+    monthly_contribution = min(monthly_contribution, max(0, cash / 6))
 
     forecast = []
     current_cash = cash
     current_portfolio = portfolio.get('total_value', 0)
 
+    start = datetime.now()
     for i in range(months):
-        month_date = (datetime.now() + timedelta(days=i * 30)).strftime('%Y-%m')
+        month_index = start.year * 12 + start.month - 1 + i
+        month_date = f'{month_index // 12:04d}-{month_index % 12 + 1:02d}'
+
+        # 月支出沿用共享现金流口径（包含偿债），投入仅为现金到持仓的转移。
+        monthly_income = cashflow['monthly_income']
+        monthly_expense = cashflow['monthly_expense']
+        current_cash += monthly_income - monthly_expense
+        contribution = min(monthly_contribution, max(0, current_cash))
 
         expected_return = current_portfolio * 0.06 / 12
-        current_portfolio += expected_return
-        current_cash += monthly_contribution
+        current_portfolio += expected_return + contribution
+        current_cash -= contribution
 
         forecast.append({
             'month': month_date,
             'cash_balance': round(current_cash, 2),
             'portfolio_value': round(current_portfolio, 2),
             'total_assets': round(current_cash + current_portfolio, 2),
-            'monthly_contribution': round(monthly_contribution, 2),
+            'monthly_contribution': round(contribution, 2),
+            'monthly_income': round(monthly_income, 2),
+            'monthly_expense': round(monthly_expense, 2),
+            'expected_return': round(expected_return, 2),
         })
 
     return forecast
@@ -52,21 +64,21 @@ def forecast_cash_flow(months=12):
 def generate_allocation_suggestion():
     """基于目标的资产配置建议。"""
     portfolio = get_portfolio_summary()
-    holdings = portfolio.get('holdings', {})
+    holdings = portfolio.get('holdings', [])
     total_value = portfolio.get('total_value', 0)
 
     equity_value = 0
     bond_value = 0
     money_value = 0
 
-    for fund_code, h in holdings.items():
+    for h in holdings:
         category = h.get('fund_category', 'equity')
-        current_value = h.get('current_value', 0)
+        current_value = h.get('current_value') or 0
         if category == 'equity' or category == 'index':
             equity_value += current_value
         elif category == 'bond':
             bond_value += current_value
-        elif category == 'money':
+        elif category in ('money', 'money_market'):
             money_value += current_value
 
     equity_ratio = equity_value / total_value if total_value > 0 else 0
@@ -138,7 +150,7 @@ def generate_allocation_suggestion():
 def stress_test(scenario='moderate'):
     """风险压力测试。"""
     portfolio = get_portfolio_summary()
-    holdings = portfolio.get('holdings', {})
+    holdings = portfolio.get('holdings', [])
     total_value = portfolio.get('total_value', 0)
 
     scenario_params = {
@@ -151,18 +163,21 @@ def stress_test(scenario='moderate'):
 
     equity_value = 0
     other_value = 0
+    money_value = 0
 
-    for fund_code, h in holdings.items():
+    for h in holdings:
         category = h.get('fund_category', 'equity')
-        current_value = h.get('current_value', 0)
+        current_value = h.get('current_value') or 0
         if category == 'equity' or category == 'index':
             equity_value += current_value
+        elif category in ('money', 'money_market'):
+            money_value += current_value
         else:
             other_value += current_value
 
     stressed_equity = equity_value * (1 - params['equity_drop'])
     stressed_other = other_value * (1 - params['bond_drop'])
-    stressed_total = stressed_equity + stressed_other
+    stressed_total = stressed_equity + stressed_other + money_value
     max_drawdown = (total_value - stressed_total) / total_value if total_value > 0 else 0
 
     return {
@@ -201,9 +216,9 @@ def get_goals_progress():
         linked_holdings = bucket.get('linked_holdings')
         linked_ids = json.loads(linked_holdings) if linked_holdings else []
         if linked_ids:
-            for fund_code, h in portfolio.get('holdings', {}).items():
+            for h in portfolio.get('holdings', []):
                 if h.get('id') in linked_ids:
-                    current_amount += h.get('current_value', 0)
+                    current_amount += h.get('current_value') or 0
 
         ratio = current_amount / target_amount if target_amount > 0 else 0
         gap = target_amount - current_amount
