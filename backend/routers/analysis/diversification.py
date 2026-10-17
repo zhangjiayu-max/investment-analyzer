@@ -13,7 +13,7 @@ from db import (
     list_holdings, get_holding, list_transactions,
     get_portfolio_diversification, get_portfolio_penetration,
     get_transaction_summary,
-    get_analysis_agent,
+    get_analysis_agent, get_analysis_agent_by_name,
     create_portfolio_analysis_record, list_portfolio_analysis_records,
     create_async_task, update_async_task, get_running_async_task,
     search_indexes_by_keyword, get_latest_valuation,
@@ -23,6 +23,7 @@ from db.portfolio import update_analysis_record
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from db.config import get_config as _get_config, get_config_int, get_config_float
 from services.rag import build_rag_context_with_details  # 保留向后兼容
+from ._agent_contract import require_analysis_agent
 from ._shared import _parse_mcp_pct_pairs, _parse_mcp_correlation, inject_rag_context, build_portfolio_facts_with_check
 
 logger = logging.getLogger(__name__)
@@ -128,11 +129,13 @@ async def portfolio_diversification_api(force_refresh: bool = False):
 
 
 @router.post("/api/portfolio/analysis/diversification/ai-summary")
-async def portfolio_diversification_ai_summary(agent_id: int = 2):
+async def portfolio_diversification_ai_summary(agent_id: int | None = None):
     """基于 MCP + 持仓数据，后台生成 AI 分散度分析解读（异步模式）。"""
-    agent = get_analysis_agent(agent_id)
-    if not agent:
-        raise HTTPException(404, "分析 Agent 不存在")
+    agent = require_analysis_agent(
+        "分散度分析师",
+        lambda name: get_analysis_agent(agent_id) if agent_id is not None else get_analysis_agent_by_name(name),
+    )
+    agent_id = agent["id"]
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
@@ -158,28 +161,21 @@ async def portfolio_diversification_ai_summary(agent_id: int = 2):
         "holdings_detail": holdings_detail,  # 完整持仓明细（基金名/代码/占比/盈亏/跟踪指数）
     }, ensure_ascii=False)
 
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("diversification_ai")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-    record_id = create_portfolio_analysis_record(
-        analysis_type="diversification_ai",
-        summary=f"分散度解读 · {result.get('holding_count', len(holdings))}只基金",
-        input_data=input_data,
-        result_data="",
-        token_usage=0,
-        agent_id=agent_id,
-        status="running",
-    )
-    # 创建 async_task 记录用于通用状态查询
-    task_id = create_async_task("diversification_ai", caller="diversification_ai")
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "diversification_ai", "diversification_ai", {"portfolio": "default", "agent_id": agent_id},
+        "portfolio_analysis_records", dict(analysis_type="diversification_ai", summary=f"分散度解读 · {len(holdings)}只基金", input_data=input_data, token_usage=0, agent_id=agent_id))
+    if started["reused"]:
+        return started
+    record_id, task_id = started["id"], started["task_id"]
+
     task = asyncio.create_task(_run_diversification_ai_async(task_id, record_id, agent_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"task_id": task_id, "record_id": record_id, "status": "running"}
+    return started
 
 
-async def _run_diversification_ai_async(task_id: int, record_id: int, agent_id: int = 2):
+async def _run_diversification_ai_async(task_id: int, record_id: int, agent_id: int | None = None):
     """后台执行 AI 分散度分析解读（包裹 async_task 状态跟踪）。"""
     try:
         await _run_diversification_ai_summary_async(record_id, agent_id)
@@ -191,15 +187,48 @@ async def _run_diversification_ai_async(task_id: int, record_id: int, agent_id: 
         else:
             error_msg = record.get("error_msg", "未知错误") if record else "记录不存在"
             update_async_task(task_id, status="error", error_msg=error_msg)
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
+        error_msg = str(e) or "分析任务已取消"
         logger.error(f"分散度 AI 分析失败 task_id={task_id}, record_id={record_id}: {e}")
-        update_async_task(task_id, status="error", error_msg=str(e))
+        try:
+            update_analysis_record(record_id, status="error", error_msg=error_msg)
+        except Exception as persistence_error:
+            logger.error(f"分散度分析错误记录写入失败 record_id={record_id}: {persistence_error}")
+        update_async_task(task_id, status="error", error_msg=error_msg)
+        if isinstance(e, asyncio.CancelledError):
+            raise
 
 
-async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 2):
-    """后台执行 AI 分散度分析解读。"""
+async def _run_diversification_ai_summary_async(record_id: int, agent_id: int | None = None):
+    """覆盖配置、前置数据、日志与 LLM 的完整失败边界。"""
+    trace_id = f"log_{uuid.uuid4().hex[:12]}"
+    start_ts = time.time()
+    uid = f"diversification_{record_id}"
+    try:
+        await _execute_diversification_ai_summary(record_id, agent_id, trace_id, start_ts, uid)
+    except (Exception, asyncio.CancelledError) as error:
+        error_msg = str(error) or "分析任务已取消"
+        try:
+            update_analysis_record(record_id, status="error", error_msg=error_msg)
+        except Exception as persistence_error:
+            logger.error(f"分散度分析错误记录写入失败 record_id={record_id}: {persistence_error}")
+        try:
+            complete_analysis_log(trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000), error_msg=error_msg)
+        except Exception as persistence_error:
+            logger.warning(f"分散度分析错误日志写入失败: {persistence_error}")
+        raise
+    finally:
+        _untrack_agent(uid)
+
+
+async def _execute_diversification_ai_summary(record_id: int, agent_id: int | None,
+                                             trace_id: str, _start_ts: float, uid: str):
+    """生成分散度解读；可选 MCP 数据保留原有降级。"""
     # 1. 获取 agent 配置
-    agent = get_analysis_agent(agent_id)
+    agent = require_analysis_agent(
+        "分散度分析师",
+        lambda name: get_analysis_agent(agent_id) if agent_id is not None else get_analysis_agent_by_name(name),
+    )
     system_prompt = agent["system_prompt"]
 
     # 2. 获取持仓 + 分散度数据
@@ -504,9 +533,6 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     if rag_section:
         user_content += rag_section
 
-    uid = f"diversification_{int(time.time())}"
-    trace_id = f"log_{uuid.uuid4().hex[:12]}"
-    _start_ts = time.time()
     create_analysis_log(
         trace_id=trace_id, agent_id=agent["id"], agent_name=agent["name"],
         analysis_type="diversification", source_table="portfolio_analysis_records",
@@ -515,30 +541,23 @@ async def _run_diversification_ai_summary_async(record_id: int, agent_id: int = 
     )
     _track_agent(uid, "分散度分析师", "持仓分散度解读")
     logger.info(f"[trace:{trace_id}] 分散度分析师开始 record_id={record_id}")
-    try:
-        from services.llm_service import _call_llm, MODEL_ANALYSIS
-        response = await asyncio.to_thread(lambda: _call_llm(
-            caller="diversification_analysis",
-            trace_id=trace_id,
-            model=MODEL_ANALYSIS,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=get_config_float('llm.temperature_analysis', 0.3),
-            max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
-        ))
-        analysis = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
-        logger.info(f"[trace:{trace_id}] 分散度分析师完成 record_id={record_id} tokens={tokens}")
-    except Exception as e:
-        logger.error(f"[trace:{trace_id}] 分散度 AI 分析失败 record_id={record_id}: {e}")
-        update_analysis_record(record_id, status="error", error_msg=str(e))
-        _elapsed_ms = int((time.time() - _start_ts) * 1000)
-        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
-        return
-    finally:
-        _untrack_agent(uid)
+    from services.llm_service import _call_llm, MODEL_ANALYSIS
+    response = await asyncio.to_thread(lambda: _call_llm(
+        caller="diversification_analysis",
+        trace_id=trace_id,
+        model=MODEL_ANALYSIS,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=get_config_float('llm.temperature_analysis', 0.3),
+        max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
+    ))
+    analysis = response.choices[0].message.content or ""
+    if not analysis.strip():
+        raise ValueError("模型未返回有效分析，请重试")
+    tokens = response.usage.total_tokens if response.usage else 0
+    logger.info(f"[trace:{trace_id}] 分散度分析师完成 record_id={record_id} tokens={tokens}")
 
     update_analysis_record(
         record_id,

@@ -26,6 +26,8 @@ from ._shared import (
     inject_rag_context,
 )
 
+from ._agent_contract import require_analysis_agent
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-deep-dive"])
 
@@ -43,13 +45,10 @@ def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: 
 @router.post("/api/portfolio/analysis/deep-dive/{holding_id}")
 async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
     """模式 2：单基金深度分析 — 分析买入质量、持有收益、操作记录。"""
+    agent = require_analysis_agent("基金深度分析师", get_analysis_agent_by_name)
     holding = get_holding(holding_id)
     if not holding:
         raise HTTPException(404, "持仓不存在")
-
-    agent = get_analysis_agent_by_name("基金深度分析师")
-    if not agent:
-        raise HTTPException(404, "基金深度分析师未配置")
 
     fund_code = holding["fund_code"]
     fund_name = holding.get("fund_name", "")
@@ -229,28 +228,19 @@ async def fund_deep_dive_api(holding_id: int, req: DeepDiveRequest):
         f"{rag_context if rag_context else ''}"
     )
 
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("deep_dive_analysis")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "deep_dive_analysis", "deep_dive", {"holding_id": holding_id, "agent_id": agent["id"]},
+        "portfolio_analysis_records", dict(analysis_type="deep_dive", summary=f"深度分析 · {fund_name}", input_data=json.dumps({"holding_id": holding_id, "fund_code": fund_code}, ensure_ascii=False), agent_id=agent["id"]))
+    if started["reused"]:
+        return started
+    record_id, async_task_id = started["id"], started["task_id"]
 
-    # 创建记录（status='running'）
-    record_id = create_portfolio_analysis_record(
-        analysis_type="deep_dive",
-        summary=f"深度分析 · {fund_name}",
-        input_data=json.dumps({"holding_id": holding_id, "fund_code": fund_code}, ensure_ascii=False),
-        status="running",
-        agent_id=agent["id"],
-    )
-    # 创建 async_task 记录用于通用状态查询
-    async_task_id = create_async_task("deep_dive_analysis", caller="deep_dive")
-
-    # 后台执行分析
     task = asyncio.create_task(_run_deep_dive_async(async_task_id, record_id, agent["system_prompt"], user_content, fund_name, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
+    return started
 
 
 async def _run_deep_dive_async(async_task_id: int, record_id: int, system_prompt: str, user_content: str, fund_name: str = "", agent_id: int = None, agent_name: str = ""):
@@ -258,13 +248,13 @@ async def _run_deep_dive_async(async_task_id: int, record_id: int, system_prompt
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
-    create_analysis_log(
-        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
-        analysis_type="deep_dive", source_table="portfolio_analysis_records",
-        source_id=record_id, query=user_content[:300],
-        input_summary=f"深度:{fund_name}",
-    )
     try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
+            analysis_type="deep_dive", source_table="portfolio_analysis_records",
+            source_id=record_id, query=user_content[:300],
+            input_summary=f"深度:{fund_name}",
+        )
         from services.llm_service import _call_llm, MODEL_ANALYSIS
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_deep_dive",
@@ -278,6 +268,8 @@ async def _run_deep_dive_async(async_task_id: int, record_id: int, system_prompt
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
+        if not result_text.strip():
+            raise ValueError("模型未返回有效分析，请重试")
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         update_async_task(async_task_id, status="done")

@@ -6,6 +6,7 @@ from db._conn import _get_conn
 
 # 2026-07-13 性能优化：配置进程级缓存（dict + TTL），消除 N+1 DB 往返
 _CONFIG_CACHE: dict[str, tuple[str, float]] = {}
+_CONFIG_CACHE_DB = None
 _CONFIG_CACHE_TTL = 60.0  # 秒
 
 # 默认配置（首次启动时写入）
@@ -702,6 +703,12 @@ def get_config(key: str, default: str = '') -> str:
     每次开关 SQLite 连接 + 2 条 PRAGMA，是主要耗时来源。配置极少变更，缓存 60 秒。
     update_config / reset_configs 会自动清缓存。
     """
+    global _CONFIG_CACHE_DB
+    from db._conn import DB_PATH
+    cache_db = str(DB_PATH.resolve())
+    if _CONFIG_CACHE_DB != cache_db:
+        _CONFIG_CACHE.clear()
+        _CONFIG_CACHE_DB = cache_db
     now = _time.monotonic()
     cached = _CONFIG_CACHE.get(key)
     if cached is not None:

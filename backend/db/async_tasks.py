@@ -1,6 +1,7 @@
 """异步分析任务 CRUD — 统一管理所有 Agent 分析的异步执行状态。"""
 
 import json
+import hashlib
 from datetime import datetime
 
 from db._conn import _get_conn, _row_to_dict
@@ -30,6 +31,55 @@ def init_async_tasks_table(conn):
         conn.execute("ALTER TABLE async_tasks ADD COLUMN progress TEXT DEFAULT ''")
     except Exception:
         pass  # 列已存在
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(async_tasks)')}
+    for name, definition in [('request_key', "TEXT DEFAULT ''"),
+                             ('source_table', "TEXT DEFAULT ''"), ('source_id', 'INTEGER')]:
+        if name not in columns:
+            conn.execute(f'ALTER TABLE async_tasks ADD COLUMN {name} {definition}')
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_async_task_request_running "
+                 "ON async_tasks(task_type, request_key) WHERE status='running' AND request_key != ''")
+
+
+def start_analysis_task(task_type: str, caller: str, request_data: dict,
+                        source_table: str, source_fields: dict) -> dict:
+    """同一目标原子创建任务和分析记录，复用时始终返回对应记录 ID。"""
+    allowed = {
+        'analysis_history': {'index_code', 'index_name', 'agent_id', 'agent_name', 'prompt_used',
+                             'news_context', 'valuation_context', 'result', 'token_usage'},
+        'portfolio_analysis_records': {'user_id', 'analysis_type', 'summary', 'input_data',
+                                      'result_data', 'token_usage', 'agent_id'},
+    }
+    if source_table not in allowed or not source_fields or set(source_fields) - allowed[source_table]:
+        raise ValueError('无效的分析记录字段')
+    request_key = hashlib.sha256(json.dumps(request_data, sort_keys=True, ensure_ascii=False,
+                                           separators=(',', ':')).encode()).hexdigest()
+    conn = _get_conn()
+    try:
+        cleanup_stale_async_tasks(_conn=conn)
+        conn.execute('BEGIN IMMEDIATE')
+        existing = conn.execute(
+            "SELECT id,source_id FROM async_tasks WHERE task_type=? AND request_key=? AND status='running'",
+            (task_type, request_key)).fetchone()
+        if existing:
+            task_id, record_id, reused = existing['id'], existing['source_id'], True
+        else:
+            fields = dict(source_fields, status='running')
+            columns = ','.join(fields)
+            placeholders = ','.join('?' for _ in fields)
+            record_id = conn.execute(f'INSERT INTO {source_table} ({columns}) VALUES ({placeholders})',
+                                     list(fields.values())).lastrowid
+            task_id = conn.execute(
+                "INSERT INTO async_tasks (task_type,caller,request_key,source_table,source_id,status) "
+                "VALUES (?,?,?,?,?,'running')", (task_type, caller, request_key, source_table, record_id)).lastrowid
+            reused = False
+        conn.commit()
+        return {'ok': True, 'id': record_id, 'record_id': record_id, 'task_id': task_id,
+                'status': 'running', 'reused': reused}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def create_async_task(task_type: str, caller: str = "") -> int:
@@ -58,7 +108,13 @@ def update_async_task(task_id: int, **fields) -> bool:
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [task_id]
     conn = _get_conn()
-    cur = conn.execute(f"UPDATE async_tasks SET {set_clause} WHERE id = ?", values)
+    guard = ''
+    if fields.get('status') in ('done', 'error', 'running'):
+        guard = " AND (status = 'running' OR status = ?)"
+        values.append(fields['status'])
+    cur = conn.execute(f"UPDATE async_tasks SET {set_clause} WHERE id = ?{guard}", values)
+    if fields.get('status') == 'error':
+        _cleanup_analysis_records(conn, STALE_TASK_MINUTES)
     conn.commit()
     conn.close()
     return cur.rowcount > 0
@@ -67,6 +123,7 @@ def update_async_task(task_id: int, **fields) -> bool:
 def get_async_task(task_id: int) -> dict | None:
     """获取异步任务详情。"""
     conn = _get_conn()
+    cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute("SELECT * FROM async_tasks WHERE id = ?", (task_id,)).fetchone()
     conn.close()
     if not row:
@@ -155,8 +212,45 @@ def cleanup_stale_async_tasks(max_age_minutes: int = STALE_TASK_MINUTES, _conn=N
                AND updated_at < datetime('now','localtime', ?)""",
             (f"任务超过 {max_age_minutes} 分钟未更新，已自动标记失败", f"-{max_age_minutes} minutes"),
         )
+        count = cur.rowcount
+        _cleanup_analysis_records(conn, max_age_minutes)
         conn.commit()
-        return cur.rowcount
+        return count
     finally:
         if own_conn:
             conn.close()
+
+
+def _cleanup_analysis_records(conn, max_age_minutes: int):
+    """同步任务终态，并清理没有活跃任务关联的历史悬挂记录。"""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    error = f'分析超过 {max_age_minutes} 分钟未更新，执行已中断，请重试'
+    for table in ('portfolio_analysis_records', 'analysis_history'):
+        if table not in tables:
+            continue
+        columns = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+        if not {'status', 'error_msg', 'created_at'} <= columns:
+            continue
+        conn.execute(f"""UPDATE {table} SET status='error', error_msg=COALESCE(
+                (SELECT NULLIF(t.error_msg,'') FROM async_tasks t WHERE t.source_table=?
+                 AND t.source_id={table}.id AND t.status='error' ORDER BY t.id DESC LIMIT 1), ?)
+            WHERE status='running' AND (
+                EXISTS (SELECT 1 FROM async_tasks t WHERE t.source_table=? AND t.source_id={table}.id
+                        AND t.status='error')
+                OR (created_at < datetime('now','localtime', ?) AND NOT EXISTS (
+                    SELECT 1 FROM async_tasks t WHERE t.source_table=? AND t.source_id={table}.id
+                    AND t.status='running')))
+            """, (table, error, table, f'-{max_age_minutes} minutes', table))
+    if 'agent_analysis_log' in tables:
+        conditions = []
+        for table in ('portfolio_analysis_records', 'analysis_history'):
+            if table in tables:
+                columns = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+                if 'status' in columns:
+                    conditions.append(f"(source_table='{table}' AND source_id IN (SELECT id FROM {table} WHERE status='error'))")
+        conditions.append("""(created_at < datetime('now','localtime', ?) AND NOT EXISTS (
+            SELECT 1 FROM async_tasks t WHERE t.source_table=agent_analysis_log.source_table
+            AND t.source_id=agent_analysis_log.source_id AND t.status='running'))""")
+        conn.execute("""UPDATE agent_analysis_log SET status='error',error_msg=?,
+            completed_at=datetime('now','localtime') WHERE status='running' AND ("""
+            + ' OR '.join(conditions) + ')', (error, f'-{max_age_minutes} minutes'))

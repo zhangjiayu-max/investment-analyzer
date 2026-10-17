@@ -1072,6 +1072,7 @@ import json as _json
 
 _specialist_cache = None
 _specialist_cache_ts = 0
+_specialist_cache_db = None
 _SPECIALIST_CACHE_TTL = 60  # 秒
 
 
@@ -1079,15 +1080,17 @@ def load_specialist_agents() -> dict:
     """从数据库加载所有编排专家 Agent，返回 {agent_key: {name, icon, description, tools, system_prompt}}。
 
     带 60 秒内存缓存，避免每次请求都查库。
-    降级：DB 无数据时回退到硬编码的 SPECIALIST_AGENTS。
+    缓存按数据库路径隔离，配置冲突明确报错，避免静默覆盖专家。
     """
-    global _specialist_cache, _specialist_cache_ts
-    if _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
+    global _specialist_cache, _specialist_cache_ts, _specialist_cache_db
+    from db._conn import DB_PATH
+    cache_db = str(DB_PATH.resolve())
+    if _specialist_cache_db == cache_db and _specialist_cache is not None and (_time.time() - _specialist_cache_ts) < _SPECIALIST_CACHE_TTL:
         return _specialist_cache
 
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT agent_key, name, icon, description, tools, system_prompt FROM agents WHERE is_specialist = 1"
+        "SELECT agent_key, name, icon, description, tools, system_prompt, knowledge_scope FROM agents WHERE is_specialist = 1 ORDER BY id"
     ).fetchall()
     conn.close()
 
@@ -1099,10 +1102,14 @@ def load_specialist_agents() -> dict:
         }
         result = {}
         for r in rows:
+            if not r["agent_key"] or r["agent_key"] in result:
+                raise ValueError(f"专家标识缺失或重复：{r['agent_key']}（{r['name']}）")
             tools = _json.loads(r["tools"]) if r["tools"] else []
             raw_icon = r["icon"] or "robot"
             emoji_icon = _icon_map.get(raw_icon, raw_icon)
             result[r["agent_key"]] = {
+                "agent_key": r["agent_key"],
+                "knowledge_scope": r["knowledge_scope"] or "{}",
                 "name": r["name"],
                 "icon": emoji_icon,
                 "description": r["description"] or "",
@@ -1116,14 +1123,16 @@ def load_specialist_agents() -> dict:
 
     _specialist_cache = result
     _specialist_cache_ts = _time.time()
+    _specialist_cache_db = cache_db
     return result
 
 
 def clear_specialist_cache() -> None:
     """清除专家 Agent 内存缓存（在更新 agent 配置后调用）。"""
-    global _specialist_cache, _specialist_cache_ts
+    global _specialist_cache, _specialist_cache_ts, _specialist_cache_db
     _specialist_cache = None
     _specialist_cache_ts = 0
+    _specialist_cache_db = None
 
 
 def get_agent_tools(agent_key: str) -> list[str]:

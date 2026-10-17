@@ -43,14 +43,16 @@ _MEMORY_CACHE_TTL = 300
 
 
 def _mc_get(key: str):
-    entry = _MEMORY_CACHE.get(key)
+    from db._conn import DB_PATH
+    entry = _MEMORY_CACHE.get((str(DB_PATH.resolve()), key))
     if entry and entry[1] > time.time():
         return entry[0]
     return None
 
 
 def _mc_set(key: str, value):
-    _MEMORY_CACHE[key] = (value, time.time() + _MEMORY_CACHE_TTL)
+    from db._conn import DB_PATH
+    _MEMORY_CACHE[(str(DB_PATH.resolve()), key)] = (value, time.time() + _MEMORY_CACHE_TTL)
 
 
 def _safe_float(val) -> float | None:

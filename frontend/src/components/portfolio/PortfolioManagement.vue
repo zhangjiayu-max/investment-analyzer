@@ -1,4 +1,5 @@
 <script setup>
+import { whatIfScenarios, buildWhatIfRequest } from '../../utils/whatIfScenarios.js'
 import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick, onUnmounted } from 'vue'
 
 // ── 持仓表格列拖拽排序 ──
@@ -2179,15 +2180,10 @@ function formatDcaResult(r) {
 }
 
 // 情景推演
-const whatIfScenario = ref('market_crash')
+const whatIfScenario = ref('market_drop')
 const whatIfCustomPrompt = ref('')
 const whatIfLoading = ref(false)
-const whatIfScenarios = [
-  { key: 'market_crash', icon: '📉', label: '大盘跌20%' },
-  { key: 'rate_hike', icon: '📈', label: '利率上升2%' },
-  { key: 'sector_rotation', icon: '🔄', label: '行业轮动' },
-  { key: 'custom', icon: '✏️', label: '自定义' },
-]
+
 
 // 将 modeResult 渲染为 HTML（字符串走 markdown，对象走格式化 JSON）
 const modeResultHtml = computed(() => {
@@ -2202,14 +2198,8 @@ async function runWhatIfMode() {
   whatIfLoading.value = true
   modeResult.value = null
   try {
-    let prompt = ''
-    const scenario = whatIfScenarios.find(s => s.key === whatIfScenario.value)
-    if (whatIfScenario.value === 'custom') {
-      prompt = whatIfCustomPrompt.value
-    } else {
-      prompt = scenario?.label || whatIfScenario.value
-    }
-    const { data } = await runWhatIf(prompt)
+    const request = buildWhatIfRequest(whatIfScenario.value, whatIfCustomPrompt.value)
+    const { data } = await runWhatIf(request)
     modeResult.value = data
   } catch (e) {
     modeResult.value = `推演失败: ${e.message || e}`

@@ -3611,20 +3611,25 @@ def create_portfolio_analysis_record(analysis_type: str, summary: str,
 def update_analysis_record(record_id: int, **fields) -> bool:
     """更新分析记录字段（result_data, status, token_usage 等）。"""
     if not fields:
-        conn.close()
         return False
     conn = _get_conn()
     sets = ", ".join(f"{k} = ?" for k in fields)
     vals = list(fields.values()) + [record_id]
-    conn.execute(f"UPDATE portfolio_analysis_records SET {sets} WHERE id = ?", vals)
+    guard = ''
+    if fields.get('status') in ('done', 'error', 'running'):
+        guard = " AND (status = 'running' OR status = ?)"
+        vals.append(fields['status'])
+    cur = conn.execute(f"UPDATE portfolio_analysis_records SET {sets} WHERE id = ?{guard}", vals)
     conn.commit()
     conn.close()
-    return True
+    return cur.rowcount > 0
 
 
 def get_analysis_record_status(record_id: int) -> dict | None:
     """查询分析记录状态。"""
     conn = _get_conn()
+    from db.async_tasks import cleanup_stale_async_tasks
+    cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute(
         "SELECT id, status, result_data, token_usage, error_msg FROM portfolio_analysis_records WHERE id = ?",
         (record_id,)
@@ -3640,16 +3645,18 @@ def list_portfolio_analysis_records(analysis_type: str = None,
                                     user_id: str = "default") -> list[dict]:
     """列出持仓分析记录。"""
     conn = _get_conn()
+    from db.async_tasks import cleanup_stale_async_tasks
+    cleanup_stale_async_tasks(_conn=conn)
     if analysis_type:
         rows = conn.execute("""
-            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
+            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at, status, error_msg
             FROM portfolio_analysis_records
             WHERE user_id = ? AND analysis_type = ?
             ORDER BY created_at DESC LIMIT ?
         """, (user_id, analysis_type, limit)).fetchall()
     else:
         rows = conn.execute("""
-            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at
+            SELECT id, user_id, analysis_type, summary, result_data, token_usage, created_at, status, error_msg
             FROM portfolio_analysis_records
             WHERE user_id = ?
             ORDER BY created_at DESC LIMIT ?

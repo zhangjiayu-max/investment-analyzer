@@ -68,13 +68,7 @@ def _init_analysis_tables(conn=None):
         row = conn.execute("SELECT id FROM analysis_agents WHERE name = ?", (name,)).fetchone()
         if not row:
             conn.execute("INSERT INTO analysis_agents (name, description, system_prompt) VALUES (?, ?, ?)", (name, desc, prompt))
-        else:
-            # 所有 agent 的 prompt 都保持最新，更新前先保存旧版本
-            old = conn.execute("SELECT id, system_prompt FROM analysis_agents WHERE name = ?", (name,)).fetchone()
-            if old and old["system_prompt"] != prompt:
-                from db.agents import save_prompt_version
-                save_prompt_version(old["id"], 'analysis', old["system_prompt"], conn=conn)
-            conn.execute("UPDATE analysis_agents SET system_prompt = ?, description = ? WHERE name = ?", (prompt, desc, name))
+        # 已存在配置由用户和提示词版本管理，启动不覆盖自定义内容。
 
     # P1-2: 清理历史 DB 残留的伪删除 agent 行
     # 仅删除「既不在默认 agent 列表、且 is_active=0」的残留行，避免影响现役 agent
@@ -1072,7 +1066,11 @@ def update_analysis_history(history_id: int, **fields) -> bool:
     conn = _get_conn()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values()) + [history_id]
-    cur = conn.execute(f"UPDATE analysis_history SET {set_clause} WHERE id = ?", values)
+    guard = ''
+    if updates.get('status') in ('done', 'error', 'running'):
+        guard = " AND (status = 'running' OR status = ?)"
+        values.append(updates['status'])
+    cur = conn.execute(f"UPDATE analysis_history SET {set_clause} WHERE id = ?{guard}", values)
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -1082,6 +1080,8 @@ def update_analysis_history(history_id: int, **fields) -> bool:
 def get_analysis_history_status(history_id: int) -> dict | None:
     """查询指数分析任务状态。"""
     conn = _get_conn()
+    from db.async_tasks import cleanup_stale_async_tasks
+    cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute(
         "SELECT id, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
         (history_id,),
@@ -1098,6 +1098,8 @@ def list_analysis_history(index_code: str = None, limit: int = 50) -> list[dict]
     - 传 H30217.CSI 可匹配到 H30217（传入带后缀，记录不带后缀）
     """
     conn = _get_conn()
+    from db.async_tasks import cleanup_stale_async_tasks
+    cleanup_stale_async_tasks(_conn=conn)
     if index_code:
         # 去掉后缀作为基础代码，用 LIKE 兼容后缀差异
         base_code = index_code.split('.')[0]

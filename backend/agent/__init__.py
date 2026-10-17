@@ -16,13 +16,10 @@
 注意：``memory`` 和 ``kyc`` 因与子目录同名，由各自包的 __init__.py 重导出处理，
 不走 finder 重定向，以保证 ``from agent.memory.xxx import`` 等子包导入正常。
 
-附带修复：commit 2ec0bf9 将根目录 .py 文件移入 services/ 子目录后，
-大量 ``from services.xxx import`` 路径未更新。finder 动态搜索 services
-子目录，自动重定向 ``services.xxx`` → ``services.<subdir>.xxx``。
+services 的兼容路径由 services 包独立处理，避免两个 finder 互相覆盖。
 """
 import importlib
 import importlib.util
-import os
 import sys
 
 # ── agent 模块显式重定向映射 ──
@@ -78,45 +75,29 @@ _RELOCATED_MODULES = {
     'agent.ab_testing': 'agent.state.ab_testing',
 }
 
-# services 子目录缓存（首次使用时填充）
-_services_dir = None
-_services_subdirs = None
-
-
-def _get_services_layout():
-    """惰性获取 services 目录路径及子目录列表。"""
-    global _services_dir, _services_subdirs
-    if _services_dir is None:
-        import services as _svc
-        _services_dir = os.path.dirname(_svc.__file__)
-        _services_subdirs = [
-            d for d in os.listdir(_services_dir)
-            if os.path.isdir(os.path.join(_services_dir, d))
-            and not d.startswith('_') and not d.startswith('.')
-        ]
-    return _services_dir, _services_subdirs
-
-
 class _ProxyLoader:
-    """返回已加载模块的 Loader。"""
+    """延迟加载规范模块，别名共享对象且保留规范 spec。"""
 
-    def __init__(self, module):
-        self._module = module
+    def __init__(self, real_name):
+        self.real_name = real_name
 
     def create_module(self, spec):
-        return self._module
+        module = importlib.import_module(self.real_name)
+        self._canonical_spec = module.__spec__
+        return module
 
     def exec_module(self, module):
-        pass  # 模块已执行完毕
+        module.__spec__ = self._canonical_spec
 
 
 class _AgentRelocationFinder:
     """将旧模块路径重定向到新位置。
 
-    1. agent.xxx → agent.<subdir>.xxx（显式映射）
-    2. services.xxx → services.<subdir>.xxx（动态搜索子目录）
+    agent.xxx → agent.<subdir>.xxx（显式映射）
     多级名称（如 agent.core.orchestrator）不在映射中，自动跳过。
     """
+
+    _agent_relocation_finder = True
 
     def find_spec(self, name, path=None, target=None):
         # 1) 显式映射（agent 模块）
@@ -124,32 +105,16 @@ class _AgentRelocationFinder:
         if new_name:
             return self._make_spec(name, new_name)
 
-        # 2) 动态搜索 services.xxx（commit 2ec0bf9 遗留路径修复）
-        if name.startswith('services.') and name.count('.') == 1:
-            short_name = name[len('services.'):]
-            svc_dir, subdirs = _get_services_layout()
-            # 若是 services 根目录的直接模块或子包，交给标准 finder
-            if os.path.isfile(os.path.join(svc_dir, short_name + '.py')):
-                return None
-            if os.path.isdir(os.path.join(svc_dir, short_name)):
-                return None
-            # 在子目录中搜索同名 .py
-            for sub in subdirs:
-                candidate = os.path.join(svc_dir, sub, short_name + '.py')
-                if os.path.isfile(candidate):
-                    return self._make_spec(name, f'services.{sub}.{short_name}')
-
         return None
 
     @staticmethod
     def _make_spec(old_name, new_name):
-        """导入真实模块并以旧名注册，返回代理 spec。"""
-        real_mod = importlib.import_module(new_name)
-        sys.modules[old_name] = real_mod
+        """仅创建 spec；加载交给 Loader，避免 finder 中重入导入。"""
         return importlib.util.spec_from_loader(
-            old_name, loader=_ProxyLoader(real_mod)
+            old_name, loader=_ProxyLoader(new_name)
         )
 
 
 # 在 sys.meta_path 前部安装 finder
-sys.meta_path.insert(0, _AgentRelocationFinder())
+if not any(getattr(f, "_agent_relocation_finder", False) for f in sys.meta_path):
+    sys.meta_path.insert(0, _AgentRelocationFinder())

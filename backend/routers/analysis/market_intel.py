@@ -37,6 +37,7 @@ from services.rag import build_rag_context_with_details, log_rag_search  # 保�
 from services.market_data import get_market_overview
 from services.unified_evidence import build_unified_evidence
 from ._shared import inject_rag_context
+from ._agent_contract import require_analysis_agent, parse_analysis_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/market-intelligence", tags=["analysis-market-intel"])
@@ -672,6 +673,7 @@ async def get_market_intelligence_overview(force: bool = False):
 @router.post("/overview/trigger")
 async def trigger_market_intelligence():
     """触发市场热点情报分析（异步）。"""
+    require_analysis_agent("市场情报分析师", get_analysis_agent_by_name)
     # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
     existing = get_running_async_task("market_intelligence")
     if existing:
@@ -695,6 +697,9 @@ async def _run_market_intelligence_async(task_id: int):
 
 async def _do_market_intelligence():
     """市场热点情报分析业务逻辑。"""
+    agent_row = require_analysis_agent("市场情报分析师", get_analysis_agent_by_name)
+    agent_id, agent_name = agent_row["id"], agent_row["name"]
+    base_prompt = agent_row["system_prompt"]
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"market_intelligence_{today}"
 
@@ -793,21 +798,6 @@ async def _do_market_intelligence():
         if breadth:
             sector_perf_text += f"涨跌家数：{breadth.get('up', 0)}↑ {breadth.get('down', 0)}↓ 涨停{breadth.get('limit_up', 0)}家 跌停{breadth.get('limit_down', 0)}家\n"
 
-    base_prompt = ""
-    agent_id = None
-    agent_name = "市场情报分析师"
-    try:
-        agent_row = get_analysis_agent_by_name("市场情报分析师")
-        if agent_row:
-            agent_id = agent_row.get("id")
-            agent_name = agent_row.get("name", "市场情报分析师")
-            base_prompt = agent_row.get("system_prompt") or ""
-    except Exception:
-        pass
-    if not base_prompt:
-        from db.analysis import DEFAULT_MARKET_INTELLIGENCE_PROMPT
-        base_prompt = DEFAULT_MARKET_INTELLIGENCE_PROMPT
-
     prompt = f"""{base_prompt}
 
 ---
@@ -888,12 +878,7 @@ async def _do_market_intelligence():
             )),
             timeout=120,
         )
-        content = response.choices[0].message.content or "{}"
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-        else:
-            parsed = json.loads(content)
+        content, parsed = parse_analysis_response(response, "summary", "sectors")
         sectors = parsed.get("sectors", [])
         summary = parsed.get("summary", "")
         cctv_signal = parsed.get("cctv_signal", "")
@@ -943,6 +928,12 @@ async def _do_market_intelligence():
         conn.close()
     except Exception as e:
         logger.warning(f"记录市场情报分析历史失败: {e}")
+        if llm_status == "success":
+            try:
+                complete_analysis_log(trace_id=trace_id, status="error", duration_ms=llm_duration, error_msg=str(e))
+            except Exception:
+                pass
+            raise HTTPException(500, f"市场情报分析历史保存失败: {e}") from e
 
     # 回补 source_id 到统一日志
     if _mi_history_id:
@@ -961,6 +952,9 @@ async def _do_market_intelligence():
         )
     except Exception as e:
         logger.warning(f"记录 agent_run 失败: {e}")
+
+    if llm_status == "error":
+        raise RuntimeError(f"市场情报分析失败: {llm_error_msg}")
 
     result = {
         "news": all_news[:15],

@@ -47,14 +47,14 @@ _REFLECTION_PROMPT = """你是分析质量评估员。请对以下专家分析�
 ## 输出格式（严格 JSON）
 
 ```json
-{
+{{
   "sufficient": true/false,
   "confidence": 0.0-1.0,
   "gaps": ["缺口1", "缺口2"],
   "issues": ["问题1", "问题2"],
   "need_retry": true/false,
   "cross_blind_spots": ["盲点1", "盲点2"]
-}
+}}
 ```
 
 - sufficient: 信息是否充分（无缺口且无严重问题）
@@ -168,14 +168,15 @@ def evaluate_analysis(analysis: str, tool_calls: list, user_question: str,
             caller=f"self_reflection_{agent_key}",
         )
 
-        if not response:
+        response_text = response.choices[0].message.content or "" if response and response.choices else ""
+        if not response_text.strip():
             logger.warning(f"[self_reflection] {agent_name} LLM 返回空")
             return None
 
         # 解析 JSON
-        result = _parse_reflection_json(response)
+        result = _parse_reflection_json(response_text)
         if not result:
-            logger.warning(f"[self_reflection] {agent_name} JSON 解析失败: {response[:200]}")
+            logger.warning(f"[self_reflection] {agent_name} JSON 解析失败: {response_text[:200]}")
             return None
 
         # 计算综合得分

@@ -21,6 +21,7 @@ from db import (
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from infra.state import track_agent, untrack_agent
 from ._shared import build_portfolio_facts_with_check
+from ._agent_contract import require_analysis_agent, require_specialist_analysis
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-bond-recommend"])
@@ -69,6 +70,7 @@ def _fetch_bond_data():
 @router.post("/api/bond/ai-recommend")
 async def bond_ai_recommend():
     """AI 债券配置推荐（异步）。立即返回 task_id，后台执行。"""
+    require_analysis_agent("债券配置顾问", get_analysis_agent_by_name)
     task_id = create_async_task("bond_recommend", caller="bond_ai_recommend")
     task = asyncio.create_task(_run_bond_recommend_async(task_id))
     _background_tasks.add(task)
@@ -88,8 +90,12 @@ async def _run_bond_recommend_async(task_id: int):
 
 async def _do_bond_recommend():
     """AI 债券配置推荐业务逻辑。"""
-    import ssl
-    ssl._create_default_https_context = ssl._create_unverified_context
+    agent = require_analysis_agent("债券配置顾问", get_analysis_agent_by_name)
+    return await asyncio.to_thread(_do_bond_recommend_sync, agent)
+
+
+def _do_bond_recommend_sync(_bond_agent):
+    """网络抓取、持仓穿透和同步专家调用在线程执行。"""
     import akshare as ak
     import json as json_mod
     from tools import _get_bond_yield_curve, _get_macro_policy_data
@@ -230,9 +236,8 @@ async def _do_bond_recommend():
     uid = f"bond_{int(time.time())}"
     track_agent(uid, "资产配置顾问", "债券配置推荐")
     # 动态查找 agent_id，避免硬编码错位
-    _bond_agent = get_analysis_agent_by_name("债券配置顾问")
-    _bond_agent_id = _bond_agent.get("id") if _bond_agent else 8
-    _bond_agent_name = _bond_agent.get("name", "债券配置顾问") if _bond_agent else "债券配置顾问"
+    _bond_agent_id = _bond_agent["id"]
+    _bond_agent_name = _bond_agent["name"]
     # 分析记录埋点（running）
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
@@ -252,15 +257,13 @@ async def _do_bond_recommend():
             "allocation_advisor",
             "请基于以下数据给出债券配置建议",
             context=combined_input,
+            system_prompt_override=_bond_agent["system_prompt"],
         )
-        result = specialist_result.get("analysis", "") or ""
+        result = require_specialist_analysis(specialist_result)
+        tokens = specialist_result.get("tokens_used", 0) or 0
         logging.info(f"[bond_ai_recommend] specialist result length: {len(result)}, status: {specialist_result.get('status')}")
-        if not result:
-            logging.warning("[bond_ai_recommend] specialist returned empty result")
-            result = ""
     except Exception as e:
         logging.error(f"[bond_ai_recommend] run_specialist failed: {e}")
-        result = ""
         try:
             complete_analysis_log(
                 trace_id=trace_id, status="error",
@@ -270,6 +273,7 @@ async def _do_bond_recommend():
             _trace_completed = True
         except Exception as _e:
             logging.warning(f"complete_analysis_log 失败: {_e}")
+        raise
     finally:
         untrack_agent(uid)
 
@@ -296,9 +300,17 @@ async def _do_bond_recommend():
             input_data=combined_input[:2000],
             result_data=json_mod.dumps(parsed, ensure_ascii=False),
             agent_id=_bond_agent_id,
+            token_usage=tokens,
         )
+        try:
+            from db.agent_analysis_log import update_analysis_log_source
+            update_analysis_log_source(trace_id=trace_id, source_id=record_id)
+        except Exception as e:
+            logging.warning(f"[bond_ai_recommend] 日志来源回填失败: {e}")
     except Exception as e:
         logging.error(f"[bond_ai_recommend] 保存记录失败: {e}")
+        complete_analysis_log(trace_id=trace_id, status="error", duration_ms=int((time.time() - _start_ts) * 1000), error_msg=str(e))
+        raise
 
     # 分析记录埋点（done）
     if not _trace_completed:
@@ -306,6 +318,7 @@ async def _do_bond_recommend():
             complete_analysis_log(
                 trace_id=trace_id, status="done",
                 duration_ms=int((time.time() - _start_ts) * 1000),
+                token_usage=tokens,
             )
         except Exception as _e:
             logging.warning(f"complete_analysis_log 失败: {_e}")
@@ -342,7 +355,7 @@ async def _do_bond_recommend():
     except Exception as e:
         logging.warning(f"[bond_ai_recommend] 结论保存失败: {e}")
 
-    return {"ok": True, "result": parsed, "merged_into": "allocation_advisor"}
+    return {"ok": True, "record_id": record_id, "id": record_id, "result": parsed, "merged_into": "allocation_advisor"}
 
 
 @router.get("/api/bond/ai-recommend/records")

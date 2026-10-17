@@ -24,6 +24,8 @@ from ._shared import (
     inject_rag_context, build_portfolio_facts_with_check,
 )
 
+from ._agent_contract import require_analysis_agent
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-panorama"])
 
@@ -41,35 +43,24 @@ def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: 
 @router.post("/api/portfolio/analysis/panorama")
 async def panorama_analysis_api(req: PanoramaAnalysisRequest):
     """全景诊断 — 从全局视角诊断投资组合健康状况（异步执行）。"""
+    agent = require_analysis_agent("全景诊断分析师", get_analysis_agent_by_name)
     holdings = list_holdings()
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
 
-    agent = get_analysis_agent_by_name("全景诊断分析师")
-    if not agent:
-        raise HTTPException(404, "全景诊断分析师未配置")
-
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("panorama_analysis")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-
-    record_id = create_portfolio_analysis_record(
-        analysis_type="panorama",
-        summary=f"全景诊断 · {len(holdings)}只基金",
-        input_data=json.dumps({"holdings_count": len(holdings)}, ensure_ascii=False),
-        result_data="",
-        status="running",
-        agent_id=agent["id"],
-    )
-    # 创建 async_task 记录用于通用状态查询
-    async_task_id = create_async_task("panorama_analysis", caller="panorama")
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "panorama_analysis", "panorama", {"portfolio": "default", "agent_id": agent["id"]},
+        "portfolio_analysis_records", dict(analysis_type="panorama", summary=f"全景诊断 · {len(holdings)}只基金", input_data=json.dumps({"holdings_count": len(holdings)}, ensure_ascii=False), agent_id=agent["id"]))
+    if started["reused"]:
+        return started
+    record_id, async_task_id = started["id"], started["task_id"]
 
     task = asyncio.create_task(_run_panorama_async(async_task_id, record_id, agent["system_prompt"], holdings, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
+    return started
 
 
 async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt: str, holdings: list, agent_id: int = None, agent_name: str = ""):
@@ -146,6 +137,8 @@ async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt:
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
+        if not result_text.strip():
+            raise ValueError("模型未返回有效分析，请重试")
         tokens = response.usage.total_tokens if response.usage else 0
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")

@@ -17,6 +17,8 @@ from ._shared import build_portfolio_facts_with_check, build_data_gap_section
 from db.config import get_config_int, get_config_float
 from models.portfolio import TradeReviewRequest
 
+from ._agent_contract import require_analysis_agent
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-trade-review"])
 
@@ -34,13 +36,10 @@ def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: 
 @router.post("/api/portfolio/analysis/trade-review")
 async def trade_review_api(req: TradeReviewRequest):
     """模式 3：交易复盘 — 分析交易行为模式和操作质量。"""
+    agent = require_analysis_agent("交易复盘分析师", get_analysis_agent_by_name)
     txs = list_transactions(limit=500)
     if not txs:
         raise HTTPException(400, "暂无交易记录")
-
-    agent = get_analysis_agent_by_name("交易复盘分析师")
-    if not agent:
-        raise HTTPException(404, "交易复盘分析师未配置")
 
     # 过滤日期范围
     if req.start_date:
@@ -125,29 +124,19 @@ async def trade_review_api(req: TradeReviewRequest):
         f"\n## 交易明细（含交易时点估值）\n" + "\n".join(tx_lines)
     )
 
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("trade_review_analysis")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
+    from db.async_tasks import start_analysis_task
+    started = start_analysis_task(
+        "trade_review_analysis", "trade_review", {"start_date": req.start_date, "end_date": req.end_date, "agent_id": agent["id"]},
+        "portfolio_analysis_records", dict(analysis_type="trade_review", summary=f"交易复盘 · {buy_count}买{sell_count}卖", input_data=json.dumps({"start_date": req.start_date, "end_date": req.end_date, "tx_count": len(txs)}, ensure_ascii=False), agent_id=agent["id"]))
+    if started["reused"]:
+        return started
+    record_id, async_task_id = started["id"], started["task_id"]
 
-    # 创建记录（status='running'）
-    record_id = create_portfolio_analysis_record(
-        analysis_type="trade_review",
-        summary=f"交易复盘 · {buy_count}买{sell_count}卖",
-        input_data=json.dumps({"start_date": req.start_date, "end_date": req.end_date, "tx_count": len(txs)},
-                              ensure_ascii=False),
-        status="running",
-        agent_id=agent["id"],
-    )
-    # 创建 async_task 记录用于通用状态查询
-    async_task_id = create_async_task("trade_review_analysis", caller="trade_review")
-
-    # 后台执行分析
     task = asyncio.create_task(_run_trade_review_async(async_task_id, record_id, agent["system_prompt"], user_content, agent["id"], agent["name"]))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    return {"ok": True, "id": record_id, "task_id": async_task_id, "status": "running"}
+    return started
 
 
 async def _run_trade_review_async(async_task_id: int, record_id: int, system_prompt: str, user_content: str, agent_id: int = None, agent_name: str = ""):
@@ -155,13 +144,13 @@ async def _run_trade_review_async(async_task_id: int, record_id: int, system_pro
     import uuid
     trace_id = f"log_{uuid.uuid4().hex[:12]}"
     _start_ts = time.time()
-    create_analysis_log(
-        trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
-        analysis_type="trade_review", source_table="portfolio_analysis_records",
-        source_id=record_id, query=user_content[:300],
-        input_summary="交易复盘",
-    )
     try:
+        create_analysis_log(
+            trace_id=trace_id, agent_id=agent_id, agent_name=agent_name,
+            analysis_type="trade_review", source_table="portfolio_analysis_records",
+            source_id=record_id, query=user_content[:300],
+            input_summary="交易复盘",
+        )
         from services.llm_service import _call_llm, MODEL_AUX
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="portfolio_trade_review",
@@ -175,6 +164,8 @@ async def _run_trade_review_async(async_task_id: int, record_id: int, system_pro
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
         ))
         result_text = response.choices[0].message.content or ""
+        if not result_text.strip():
+            raise ValueError("模型未返回有效分析，请重试")
         tokens = response.usage.total_tokens if response.usage else 0
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         update_async_task(async_task_id, status="done")

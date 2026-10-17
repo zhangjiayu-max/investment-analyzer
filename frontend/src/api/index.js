@@ -849,8 +849,10 @@ export function deleteLinkedArticle(id) {
 // ── AI 市场分析 API ──────────────────────────────────────
 
 /** 触发 AI 分析 */
-export function runAnalysis(indexCode, indexName, agentId = 9) {
-  return api.post('/analysis/run', { index_code: indexCode, index_name: indexName, agent_id: agentId })
+export function runAnalysis(indexCode, indexName, agentId = null) {
+  const request = { index_code: indexCode, index_name: indexName }
+  if (agentId != null) request.agent_id = agentId
+  return api.post('/analysis/run', request)
 }
 
 /** 查询指数 AI 分析执行状态 */
@@ -858,24 +860,45 @@ export function getIndexAnalysisStatus(historyId) {
   return api.get(`/analysis/history/${historyId}/status`)
 }
 
-/** 轮询指数 AI 分析直到完成 */
-export function pollIndexAnalysisStatus(historyId, onProgress, interval = 3000) {
+/** 分析轮询共享期限；取消后不再更新已离开的页面。 */
+function pollAnalysisRecord(recordId, getter, onProgress, interval, maxWaitMs) {
   let cancelled = false
+  let timer
+  let wake
+  const cancel = () => { cancelled = true; clearTimeout(timer); wake?.() }
+  if (!recordId) {
+    onProgress({ status: 'error', error: '缺少分析记录 ID，请重新提交' })
+    return cancel
+  }
+  const startedAt = Date.now()
   const poll = async () => {
     while (!cancelled) {
-      try {
-        const { data } = await getIndexAnalysisStatus(historyId)
-        onProgress(data)
-        if (data.status === 'done' || data.status === 'error') return data
-      } catch (e) {
-        onProgress({ status: 'error', error: e.message })
-        return null
+      if (Date.now() - startedAt >= maxWaitMs) {
+        onProgress({ status: 'error', error: '分析等待超时，请刷新记录查看结果或重试' })
+        return
       }
-      await new Promise(r => setTimeout(r, interval))
+      try {
+        const { data } = await getter(recordId)
+        if (cancelled) return
+        onProgress(data)
+        if (data.status === 'done' || data.status === 'error') return
+      } catch (e) {
+        if (!cancelled) onProgress({ status: 'error', error: e.message })
+        return
+      }
+      await new Promise(resolve => {
+        wake = resolve
+        timer = setTimeout(resolve, Math.min(interval, Math.max(0, maxWaitMs - (Date.now() - startedAt))))
+      })
     }
   }
   poll()
-  return () => { cancelled = true }
+  return cancel
+}
+
+/** 轮询指数 AI 分析直到完成 */
+export function pollIndexAnalysisStatus(historyId, onProgress, interval = 3000, maxWaitMs = 30 * 60 * 1000) {
+  return pollAnalysisRecord(historyId, getIndexAnalysisStatus, onProgress, interval, maxWaitMs)
 }
 
 /** 分析历史列表 */
@@ -1653,23 +1676,8 @@ export function getPanoramaStatus(recordId) {
 }
 
 /** 轮询全景诊断直到完成 */
-export function pollPanoramaStatus(recordId, onProgress, interval = 3000) {
-  let cancelled = false
-  const poll = async () => {
-    while (!cancelled) {
-      try {
-        const { data } = await getPanoramaStatus(recordId)
-        onProgress(data)
-        if (data.status === 'done' || data.status === 'error') return data
-      } catch (e) {
-        onProgress({ status: 'error', error: e.message })
-        return null
-      }
-      await new Promise(r => setTimeout(r, interval))
-    }
-  }
-  poll()
-  return () => { cancelled = true }
+export function pollPanoramaStatus(recordId, onProgress, interval = 3000, maxWaitMs = 30 * 60 * 1000) {
+  return pollAnalysisRecord(recordId, getPanoramaStatus, onProgress, interval, maxWaitMs)
 }
 
 /** 模式2：单基金深度分析（异步） */
@@ -1713,23 +1721,8 @@ export function getAnalysisStatus(recordId) {
 }
 
 /** 轮询任意分析直到完成 */
-export function pollAnalysisStatus(recordId, onProgress, interval = 3000) {
-  let cancelled = false
-  const poll = async () => {
-    while (!cancelled) {
-      try {
-        const { data } = await getAnalysisStatus(recordId)
-        onProgress(data)
-        if (data.status === 'done' || data.status === 'error') return data
-      } catch (e) {
-        onProgress({ status: 'error', error: e.message })
-        return null
-      }
-      await new Promise(r => setTimeout(r, interval))
-    }
-  }
-  poll()
-  return () => { cancelled = true }
+export function pollAnalysisStatus(recordId, onProgress, interval = 3000, maxWaitMs = 30 * 60 * 1000) {
+  return pollAnalysisRecord(recordId, getAnalysisStatus, onProgress, interval, maxWaitMs)
 }
 
 /** 列出全景诊断记录 */
@@ -2602,8 +2595,8 @@ export function getDcaOptimization() {
 }
 
 // ========== 情景推演 ==========
-export function runWhatIf(scenario) {
-  return api.post('/portfolio/analysis/what-if', { scenario })
+export function runWhatIf(request) {
+  return api.post('/portfolio/analysis/what-if', request)
 }
 
 // ========== 对比分析 AI 差异 ==========

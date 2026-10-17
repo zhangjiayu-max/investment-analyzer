@@ -25,6 +25,7 @@ from services.llm_service import _call_llm, MODEL_AUX
 from services.market_data import get_index_current_price
 from infra.state import track_agent as _track_agent, untrack_agent as _untrack_agent, hot_topics_cache as _hot_topics_cache
 from ._shared import build_portfolio_facts_with_check
+from ._agent_contract import require_analysis_agent, parse_analysis_response
 from analysis.action_extractor import extract_actions, format_actions_for_response
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ _background_tasks = set()
 @router.post("/api/dashboard/hotspots-analysis")
 async def trigger_hotspots_analysis():
     """触发结构化热点分析（异步）。立即返回 task_id，后台执行。"""
+    require_analysis_agent("热点分析专家", get_analysis_agent_by_name)
     # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
     existing = get_running_async_task("hotspots_analysis")
     if existing:
@@ -59,6 +61,9 @@ async def _run_hotspots_analysis_async(task_id: int):
 
 async def _do_hotspots_analysis():
     """结构化热点分析 — LLM 输出 JSON 推荐。"""
+    agent = require_analysis_agent("热点分析专家", get_analysis_agent_by_name)
+    agent_id, agent_name = agent["id"], agent["name"]
+    base_prompt = agent["system_prompt"]
     # 1. 收集今日数据
     from routers.dashboard.dashboard import get_hot_topics
     news_data = await get_hot_topics()
@@ -69,6 +74,7 @@ async def _do_hotspots_analysis():
     ) if news_list else "暂无新闻"
 
     # 估值数据 + 可参考指数代码
+    all_indexes = []
     try:
         indexes = list_valuation_indexes()
         seen = {}
@@ -144,22 +150,6 @@ async def _do_hotspots_analysis():
     except Exception:
         bond_text = "暂无"
 
-    # 从 analysis_agents 加载热点分析 prompt（动态查找，避免 id 错位）
-    agent_id = None
-    agent_name = "热点分析专家"
-    try:
-        agent = get_analysis_agent_by_name("热点分析专家")
-        if agent:
-            agent_id = agent.get("id")
-            agent_name = agent.get("name", "热点分析专家")
-            base_prompt = agent.get("system_prompt", "") or ""
-        else:
-            base_prompt = ""
-    except Exception:
-        base_prompt = ""
-    if not base_prompt:
-        base_prompt = "你是一位专业的A股市场分析专家。请基于以下市场数据分析今日投资机会，输出结构化JSON。\n\n## 输出格式\n返回严格JSON：{\"summary\":\"...\", \"recommendations\":[{\"direction\":\"up|down|watch\",\"index_name\":\"...\",\"index_code\":\"...\",\"reason\":\"...\",\"confidence\":\"high|medium|low\"}]}\n\n## 今日数据："
-
     prompt = base_prompt + f"""
 
 ## 组合约束（系统注入，优先级最高）
@@ -225,13 +215,8 @@ async def _do_hotspots_analysis():
             temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=get_config_int('llm.max_tokens_report', 8192),
         )), timeout=120)
-        content = response.choices[0].message.content or "{}"
+        content, parsed = parse_analysis_response(response, "summary", "recommendations")
         _tokens = response.usage.total_tokens if response.usage else 0
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-        else:
-            parsed = json.loads(content)
         recs = parsed.get("recommendations", [])
         index_lookup = {i["index_code"]: i for i in all_indexes} if all_indexes else {}
         for rec in recs:
@@ -257,15 +242,26 @@ async def _do_hotspots_analysis():
                 for i, rid in enumerate(rec_ids):
                     if i < len(recs):
                         recs[i]["id"] = rid
-                _conn = _get_conn()
-                _conn.execute(
-                    "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
-                    (13, "热点分析专家", base_prompt[:500] if base_prompt else "", news_text[:500], content, 0)
-                )
-                _conn.commit()
-                _conn.close()
             except Exception as e:
                 logging.warning(f"保存推荐记录失败: {e}")
+                raise RuntimeError(f"推荐记录保存失败: {e}") from e
+        # 所有成功分析均写入历史，关联实际 Agent 和实际 token。
+        try:
+            conn = _get_conn()
+            try:
+                history = conn.execute(
+                    "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage) VALUES (?, ?, ?, ?, ?, ?)",
+                    (agent_id, agent_name, base_prompt[:500], news_text[:500], content, _tokens),
+                )
+                conn.commit()
+                history_id = history.lastrowid
+            finally:
+                conn.close()
+            from db.agent_analysis_log import update_analysis_log_source
+            update_analysis_log_source(trace_id, history_id)
+        except Exception as e:
+            logging.warning(f"保存热点分析历史失败: {e}")
+            raise RuntimeError(f"热点分析历史保存失败: {e}") from e
         result = {
             "analysis_date": time.strftime("%Y-%m-%d"),
             "summary": parsed.get("summary", ""),
@@ -286,17 +282,20 @@ async def _do_hotspots_analysis():
             except Exception:
                 pass
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
-        complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=_tokens)
+        try:
+            complete_analysis_log(trace_id=trace_id, status="done", duration_ms=_elapsed_ms, token_usage=_tokens)
+        except Exception as e:
+            logging.warning(f"热点分析完成日志写入失败: {e}")
         return result
     except asyncio.TimeoutError:
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg="分析超时")
-        return {"summary": "分析超时，请重试", "recommendations": [], "analysis_text": ""}
+        raise RuntimeError("分析超时，请重试")
     except Exception as e:
         _elapsed_ms = int((time.time() - _start_ts) * 1000)
         complete_analysis_log(trace_id=trace_id, status="error", duration_ms=_elapsed_ms, error_msg=str(e))
         logging.warning(f"热点结构化分析失败: {e}")
-        return {"summary": f"分析失败: {str(e)}", "recommendations": [], "analysis_text": ""}
+        raise
     finally:
         _untrack_agent(uid)
 

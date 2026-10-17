@@ -158,6 +158,12 @@ def test_verify_hypothetical_tx_with_nav_history(tmp_db):
         suggested_tier=None, profit_rate_at_snapshot=-0.1,
         valuation_zscore=None, current_price_at_snapshot=1.0,
     )
+    # 快照默认记录今天；本用例验证 30 天前买入，交易日期需与净值 fixture 一致。
+    conn = _get_conn()
+    conn.execute("UPDATE portfolio_transactions SET transaction_date=? WHERE fund_code=? AND is_hypothetical=1",
+                 (buy_date, "000055"))
+    conn.commit()
+    conn.close()
 
     txs = list_hypothetical_txs()
     assert len(txs) >= 1

@@ -312,9 +312,10 @@ def test_scan_forward_events_integration(tmp_db):
     }}]'''
 
     with patch("services.event_radar._collect_news", return_value=fake_news), \
+         patch("services.event_radar._collect_leading_signals", return_value=[]), \
          patch("services.event_radar._call_llm", return_value=fake_llm_resp), \
          patch("services.event_radar._determine_relevance",
-               return_value=("market_watch", [], [])), \
+               return_value=("market_watch", [], [], [])), \
          patch("db.portfolio.list_holdings", return_value=[]):
         result = scan_forward_events(trace_id="test")
 
@@ -331,7 +332,7 @@ def test_scan_forward_events_disabled():
     """开关关闭时返回 skipped。"""
     from services.event_radar import scan_forward_events
 
-    with patch("services.event_radar.get_config", return_value="false"):
+    with patch("services.event_radar.get_config_bool", return_value=False):
         result = scan_forward_events()
     assert result.get("skipped") == "disabled"
 

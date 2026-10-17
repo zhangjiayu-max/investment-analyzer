@@ -25,23 +25,24 @@ _TTSKILL_BIN = None
 # 天天基金 Skill API（用于安装基础包和同步）
 _BASE_URL = "https://skills.tiantianfunds.com/ai-smart-skill-service/openapi"
 
-# Skill 注册表（skill_id → ttskill invoke 使用的 ID + action 默认值）
-# version 对应已安装的 skill 版本（通过 ttskill skill install/update 升级）
+# Skill 注册表（业务名 → ttskill invoke 使用的 skill_id）
+# 注意：不再硬编码 version。调用时省略 --skill-version，让 ttskill CLI 解析
+# 已安装版本，并在服务端要求更高版本时自动 update（见 invoke.js 的 auto-update）。
 SKILLS = {
-    "fund_base_info":    {"id": "TTFUND_BASE_INFOS",        "version": "1.3.2"},
-    "fund_manager":      {"id": "TTFUND_MANAGER_INFO",      "version": "1.1.1"},
-    "fund_condition":    {"id": "TTFUND_CONDITION_SELECT",  "version": "1.4.1"},
-    "fund_holding":      {"id": "TTFUND_HOLDING_INFO",      "version": "1.2.0"},
-    "fund_gold":         {"id": "TTFUND_GOLD_INFO",         "version": "1.1.1"},
-    "fund_tg_strategy":  {"id": "TTFUND_STRATEGY_INFO",     "version": "1.0.0"},
-    "fund_index":        {"id": "TTFUND_INDEX_INFO",        "version": "1.1.2"},
-    "fund_nav":          {"id": "TTFUND_NAV_INFO",          "version": "1.1.1"},
-    "fund_portfolio":    {"id": "TTFUND_PORTFOLIO_ANALYSIS","version": "1.0.0"},
-    "fund_favor":        {"id": "TTFUND_FAVOR_ZX",          "version": "1.3.1"},
-    "bond_market":       {"id": "TTFUND_BOND_MARKET",       "version": "1.1.1"},
-    "fund_backtest":     {"id": "TTFUND_GROUP_BACKTEST",    "version": "1.1.1"},
-    "fund_search":       {"id": "TTFUND_SEARCH",            "version": "1.1.1"},
-    "stock_price":       {"id": "TTFUND_STOCK_PRICE_QUERY", "version": "1.1.1"},
+    "fund_base_info":    "TTFUND_BASE_INFOS",
+    "fund_manager":      "TTFUND_MANAGER_INFO",
+    "fund_condition":    "TTFUND_CONDITION_SELECT",
+    "fund_holding":      "TTFUND_HOLDING_INFO",
+    "fund_gold":         "TTFUND_GOLD_INFO",
+    "fund_tg_strategy":  "TTFUND_STRATEGY_INFO",
+    "fund_index":        "TTFUND_INDEX_INFO",
+    "fund_nav":          "TTFUND_NAV_INFO",
+    "fund_portfolio":    "TTFUND_PORTFOLIO_ANALYSIS",
+    "fund_favor":        "TTFUND_FAVOR_ZX",
+    "bond_market":       "TTFUND_BOND_MARKET",
+    "fund_backtest":     "TTFUND_GROUP_BACKTEST",
+    "fund_search":       "TTFUND_SEARCH",
+    "stock_price":       "TTFUND_STOCK_PRICE_QUERY",
 }
 
 # ttskill invoke 的 action 映射
@@ -63,6 +64,12 @@ ACTION_MAP = {
 }
 
 _client_instance = None
+_LOGIN_REQUIRED = "天天基金登录已失效或未授权，请在系统配置 → 天天基金 → 扫码登录（或运行 ttskill login --env prod --force）"
+_LOGIN_ENDPOINT = "/api/config/ttfund/login"
+
+
+class TtfundLoginRequired(RuntimeError):
+    """用户需主动扫码授权，调用方应展示操作指引。"""
 
 
 def _find_ttskill() -> str:
@@ -204,7 +211,11 @@ def check_login() -> dict:
     判断逻辑：auth.current_user.is_expired 为 False 才算已登录。
     旧逻辑查 auth_token_present（不存在该字段）导致永远返回 False。
     """
-    ttskill = _find_ttskill()
+    try:
+        ttskill = _find_ttskill()
+    except RuntimeError:
+        return {"ok": True, "installed": False, "logged_in": False,
+                "state": "not_installed", "error": "ttskill CLI 未安装，请在系统配置 → 天天基金安装"}
     try:
         result = subprocess.run(
             [ttskill, "status", "--json"],
@@ -214,16 +225,25 @@ def check_login() -> dict:
             data = json.loads(result.stdout) if result.stdout.strip().startswith("{") else {}
             user = data.get("auth", {}).get("current_user", {})
             is_expired = user.get("is_expired", True)
-            return {
+            logged_in = bool(user) and is_expired is False
+            status = {
                 "ok": True,
                 "installed": True,
-                "logged_in": bool(user) and not is_expired,
+                "logged_in": logged_in,
+                "state": "ready" if logged_in else ("expired" if user else "login_required"),
                 "expires_at": user.get("expires_at", ""),
-                "output": result.stdout.strip(),
             }
-        return {"ok": True, "installed": True, "logged_in": False, "output": result.stdout.strip()}
+            if not logged_in:
+                status.update(error=_LOGIN_REQUIRED, login_endpoint=_LOGIN_ENDPOINT)
+            return status
+        return {"ok": False, "installed": True, "logged_in": False, "state": "error",
+                "error": "ttskill 状态检查失败，请在系统配置 → 天天基金重新检查或扫码登录",
+                "login_endpoint": _LOGIN_ENDPOINT}
     except Exception as e:
-        return {"ok": False, "installed": True, "logged_in": False, "error": str(e)}
+        logger.warning("ttskill 状态检查失败: %s", type(e).__name__)
+        return {"ok": False, "installed": True, "logged_in": False, "state": "error",
+                "error": "ttskill 状态检查失败，请在系统配置 → 天天基金重新检查或扫码登录",
+                "login_endpoint": _LOGIN_ENDPOINT}
 
 
 def get_ttfund_client() -> "TtfundClient":
@@ -235,26 +255,27 @@ def get_ttfund_client() -> "TtfundClient":
 
 
 class TtfundClient:
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 60):
         self._timeout = timeout
 
     def _invoke(self, skill_name: str, params: dict) -> dict:
         """通过 ttskill CLI 调用指定 skill。"""
         ttskill = _find_ttskill()
 
-        skill = SKILLS.get(skill_name)
-        if not skill:
+        skill_id = SKILLS.get(skill_name)
+        if not skill_id:
             raise ValueError(f"未知 skill: {skill_name}")
 
         action = ACTION_MAP.get(skill_name, "query")
         body = json.dumps(params, ensure_ascii=False)
 
         try:
+            # 不传 --skill-version：CLI 会解析已安装版本，服务端要求升级时自动 update，
+            # 避免硬编码版本号过期后触发 skill_version_required 409。
             result = subprocess.run(
-                [ttskill, "invoke", skill["id"],
+                [ttskill, "invoke", skill_id,
                  "--action", action,
-                 "--body", body,
-                 "--skill-version", skill["version"]],
+                 "--body", body],
                 capture_output=True, text=True, timeout=self._timeout,
             )
 
@@ -263,9 +284,10 @@ class TtfundClient:
 
             # 检测是否需要登录
             combined = output + stderr
-            if "cli_login_required" in combined or "login" in combined.lower():
-                if result.returncode != 0:
-                    raise RuntimeError("需要登录，请调用 ttskill login 扫码授权")
+            if "cli_login_required" in combined.lower() or (
+                result.returncode != 0 and "login" in combined.lower()
+            ):
+                raise TtfundLoginRequired(_LOGIN_REQUIRED)
 
             # 非零退出码且无有效输出
             if result.returncode != 0 and not output:
@@ -307,6 +329,8 @@ class TtfundClient:
                         return json.dumps(val, ensure_ascii=False, indent=2)
                 return json.dumps(data, ensure_ascii=False, indent=2)
             return str(data)
+        except TtfundLoginRequired:
+            raise
         except Exception as e:
             logger.warning(f"ttfund {skill_name} 调用失败: {e}")
             return ""
