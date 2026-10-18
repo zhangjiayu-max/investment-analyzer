@@ -16,6 +16,7 @@ import HouseholdCashflowCard from '../family/HouseholdCashflowCard.vue'
 import { shanghaiMonth } from '../../utils/expenseDates'
 
 const { showToast } = useToast()
+const emit = defineEmits(['navigate'])
 
 // ── ECharts 动态加载 ──
 let echartsModule = null
@@ -53,6 +54,7 @@ const assetOverview = computed(() => dashboard.value?.asset_overview || {})
 const healthScore = computed(() => dashboard.value?.health_score || {})
 const fourPots = computed(() => dashboard.value?.four_pots || {})
 const actions = computed(() => dashboard.value?.actions || [])
+const householdActions = computed(() => dashboard.value?.household_diagnosis?.actions || [])
 const roadmap = computed(() => dashboard.value?.roadmap || {})
 
 const score = computed(() => healthScore.value?.total_score || 0)
@@ -294,7 +296,22 @@ watch(showProfileDrawer, (v) => {
       </div>
     </div>
 
-    <HouseholdCashflowCard title="家庭收支诊断" :cashflow="householdCashflow" class="mb-5" />
+    <section v-if="householdActions.length" class="card editorial-card household-actions" aria-label="家庭财务行动清单">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="section-title">今天最需要处理的事情</h3>
+        <span class="terminal-label">{{ householdActions.length }} 项</span>
+      </div>
+      <div v-for="(action, idx) in householdActions" :key="action.action_id" class="household-action-row">
+        <span class="action-rank">{{ idx + 1 }}</span>
+        <div class="flex-1 min-w-0">
+          <strong>{{ action.title }}</strong>
+          <p>{{ action.reason }}</p>
+          <small>证据：{{ action.evidence?.missing?.join('、') || action.evidence?.pending_bills || action.evidence?.emergency_gap || '已登记数据' }}</small>
+        </div>
+        <button class="btn-xs btn-primary" type="button" @click="emit('navigate', action.navigate_to || 'family-finance')">{{ action.cta || '去处理' }}</button>
+      </div>
+    </section>
+    <HouseholdCashflowCard title="家庭收支诊断" :cashflow="householdCashflow" class="mb-5" @edit-budget="emit('navigate', 'family-finance')" />
 
     <div v-if="loading && !dashboard" class="flex justify-center py-20">
       <div class="spinner spinner-lg"></div>
@@ -506,6 +523,12 @@ watch(showProfileDrawer, (v) => {
   flex-direction: column;
   gap: var(--space-2);
 }
+
+.household-actions { margin-bottom: var(--space-5); }
+.household-action-row { display: flex; align-items: center; gap: var(--space-3); padding: .75rem 0; border-top: 1px solid var(--color-border-light); }
+.household-action-row strong { display: block; font-size: .88rem; }
+.household-action-row p { margin: .2rem 0; color: var(--color-text-secondary); font-size: .8rem; line-height: 1.5; }
+.household-action-row small { color: var(--color-text-muted); font-size: .72rem; }
 .metric-label {
   font-size: 13px;
   color: var(--color-text-secondary);

@@ -354,6 +354,7 @@ def set_expense_month_complete(month: str, complete: bool, user_id: str = "defau
 def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
     """统一家庭现金流：实际/待付/月均预留、月预算和应急储备分别计算。"""
     from db.recurring_expenses import get_recurring_summary
+    from db.portfolio import get_portfolio_cash_snapshot
 
     month = _validate_month(month) if month else _current_month()
     conn = _get_conn()
@@ -368,7 +369,7 @@ def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
         investment_row = conn.execute("SELECT emergency_months FROM user_investment_profile WHERE user_id=?",
                                       (user_id,)).fetchone()
         buckets = conn.execute("SELECT * FROM goal_buckets WHERE user_id=? AND status='active'", (user_id,)).fetchall()
-        cash_row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchone()
+        cash_snapshot = get_portfolio_cash_snapshot(user_id, conn=conn)
     finally:
         conn.close()
     income = max(0.0, float(profile.get("monthly_income") or 0))
@@ -381,32 +382,96 @@ def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
     expense = known_expense if complete else max(budget, known_expense)
     source = "records" if complete else "budget_and_records" if recorded or pending or provision else "profile_static"
     surplus = income - expense
+    income_known = income > 0
+    data_gaps = []
+    if not income_known:
+        data_gaps.append("monthly_income")
+    if not (budget > 0 or complete):
+        data_gaps.append("monthly_expense_or_month_complete")
+    # 已支付周期账单已经在 recorded/fixed_total 中，避免固定负担重复计算。
+    manual_fixed = max(0.0, summary["fixed_total"] - bills.get("paid_total", 0))
+    fixed_obligation = manual_fixed + bills.get("recurring_due_total", 0)
+    variable_recorded = max(0.0, summary["variable_total"])
     target_months = int(investment_row["emergency_months"] or 6) if investment_row else 6
     emergency = [dict(b) for b in buckets if b["bucket_type"] == "emergency"]
-    cash = max(0.0, float(cash_row["balance"] or 0)) if cash_row else 0.0
+    cash = max(0.0, cash_snapshot["cash_balance"])
     emergency_target = max(sum(float(b.get("target_amount") or 0) for b in emergency), expense * target_months)
     emergency_available = min(cash, sum(max(0.0, float(b.get("current_amount") or 0)) for b in emergency)) if emergency else cash
     emergency_gap = max(0.0, emergency_target - emergency_available)
     reserve = min(max(0.0, surplus), emergency_gap)
     data_complete = income > 0 and (budget > 0 or complete)
     investable = max(0.0, surplus - reserve) if data_complete else 0.0
+    safe_to_spend = round(income - fixed_obligation - variable_recorded - provision, 2) if income_known else None
+
+    def _month_offset(value: str, offset: int) -> str:
+        year, number = map(int, value.split("-"))
+        absolute = year * 12 + number - 1 + offset
+        return f"{absolute // 12:04d}-{absolute % 12 + 1:02d}"
+
+    def _forecast() -> list[dict]:
+        running_cash = cash
+        result = []
+        from db.recurring_expenses import get_recurring_summary
+        for offset in range(3):
+            target = _month_offset(month, offset)
+            forecast_conn = _get_conn()
+            try:
+                target_summary = get_expense_summary(target, user_id, conn=forecast_conn)
+                target_bills = get_recurring_summary(target, user_id, conn=forecast_conn)
+            finally:
+                forecast_conn.close()
+            target_manual_fixed = max(0.0, target_summary["fixed_total"] - target_bills.get("paid_total", 0))
+            target_fixed = round(target_manual_fixed + target_bills.get("recurring_due_total", 0), 2)
+            # 预算代表全月必要支出的上限；若预算缺失，则至少锁定固定必缴。
+            planned_outflow = round(max(budget, target_fixed), 2) if budget > 0 else target_fixed
+            running_cash = round(running_cash - planned_outflow, 2)
+            result.append({
+                "month": target,
+                "fixed_obligation": target_fixed,
+                "planned_outflow": planned_outflow,
+                "cash_balance": running_cash,
+                "status": "safe" if running_cash >= 0 else "shortfall",
+            })
+        return result
+
+    forecast_3m = _forecast()
+    necessary_monthly_outflow = max(budget, fixed_obligation) if (budget > 0 or fixed_obligation > 0) else 0
     debt_payment = summary["debt_payment"] + bills["pending_debt_payment"]
     return {
         "month": month,
         "monthly_income": round(income, 2),
+        "income_known": income_known,
+        "data_gaps": data_gaps,
         "monthly_expense": round(expense, 2),
+        "expense_estimate_complete": budget > 0 or complete,
         "expense_source": source,
         "expense_complete": complete,
         "recorded_expense": round(recorded, 2),
+        "known_expense": round(known_expense, 2),
         "budget_expense": round(budget, 2),
         "pending_bills": round(pending, 2),
+        "pending_debt_payment": round(bills.get("pending_debt_payment", 0), 2),
+        "recorded_debt_payment": round(summary["debt_payment"], 2),
+        "variable_total": round(summary["variable_total"], 2),
         "future_provision": round(provision, 2),
         "monthly_provision": bills["monthly_provision"],
+        "recurring_paid": bills.get("recurring_paid", bills.get("paid_total", 0)),
+        "recurring_pending": bills.get("recurring_pending", pending),
+        "recurring_due_total": bills.get("recurring_due_total", bills.get("paid_total", 0) + pending),
+        "recurring_count": bills.get("recurring_count", 0),
+        "recurring_bills": bills.get("recurring_bills", []),
+        "recurring_by_category": bills.get("recurring_by_category", []),
         "fixed_total": summary["fixed_total"],
         "debt_payment": round(debt_payment, 2),
         "monthly_surplus": round(surplus, 2),
         "surplus_rate": round(surplus / income, 4) if income > 0 else None,
         "investable_surplus": round(investable, 2),
+        "investable_surplus_known": bool(data_complete),
+        "safe_to_spend": safe_to_spend,
+        "fixed_obligation": round(fixed_obligation, 2),
+        "variable_recorded": round(variable_recorded, 2),
+        "cash_runway_months": round(cash / necessary_monthly_outflow, 1) if necessary_monthly_outflow > 0 else None,
+        "forecast_3m": forecast_3m,
         "bucket_reserve": round(reserve, 2),
         "emergency_target": round(emergency_target, 2),
         "emergency_available": round(emergency_available, 2),

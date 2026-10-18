@@ -18,11 +18,11 @@ import RecurringBills from './RecurringBills.vue'
 import HouseholdCashflowCard from './HouseholdCashflowCard.vue'
 import { shanghaiMonth, previousMonth } from '../../utils/expenseDates'
 
-const props = defineProps({ open: Boolean })
+const props = defineProps({ open: Boolean, initialMonth: { type: String, default: '' } })
 const emit = defineEmits(['update:open', 'updated'])
 const { showToast } = useToast()
 
-const month = ref(shanghaiMonth())
+const month = ref(/^\d{4}-(0[1-9]|1[0-2])$/.test(props.initialMonth) ? props.initialMonth : shanghaiMonth())
 const items = ref([])
 const summary = ref({ total: 0, fixed_total: 0, variable_total: 0, by_category: {} })
 const trend = ref([])
@@ -99,7 +99,8 @@ async function loadBudget() {
   try {
     const { data } = await getProfile()
     if (sequence !== budgetSequence || !props.open) return
-    budget.value = { monthly_income: data.monthly_income ?? '', monthly_expense: data.monthly_expense ?? '' }
+    const profile = data?.profile || data || {}
+    budget.value = { monthly_income: profile.monthly_income ?? '', monthly_expense: profile.monthly_expense ?? '' }
     budgetReady.value = true
   } catch (e) { if (sequence === budgetSequence && props.open) showToast('收支预算加载失败，请重试', 'error') }
 }
@@ -119,8 +120,15 @@ async function saveBudget() {
   finally { budgetSaving.value = false }
 }
 watch(month, () => { resetForm(); if (props.open) load() })
+watch(() => props.initialMonth, value => {
+  if (!props.open || !/^\d{4}-(0[1-9]|1[0-2])$/.test(value) || value === month.value) return
+  month.value = value
+})
 watch(() => props.open, open => {
-  if (open) { load(); loadBudget() }
+  if (open) {
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(props.initialMonth) && props.initialMonth !== month.value) month.value = props.initialMonth
+    load(); loadBudget()
+  }
   else { ++requestSequence; ++budgetSequence; resetForm(); if (!operationBusy.value) { deleteTarget.value = null; completionTarget.value = null; copyTarget.value = null } }
 })
 onBeforeUnmount(() => { ++requestSequence; ++budgetSequence })

@@ -1,11 +1,14 @@
 <script setup>
-import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, ref, watch } from 'vue'
 import { getFinanceDashboard, getFinanceTrend } from '../../api'
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
+import TermTooltip from '../ui/TermTooltip.vue'
 import LineChart from '../charts/LineChart.vue'
 import ExpenseManager from './ExpenseManager.vue'
 import HouseholdCashflowCard from './HouseholdCashflowCard.vue'
+import FixedBillsOverview from './FixedBillsOverview.vue'
+import { shanghaiMonth } from '../../utils/expenseDates'
 
 const { showToast } = useToast()
 
@@ -14,6 +17,7 @@ const data = ref(null)
 const trend = ref(null)
 const trendLoading = ref(false)
 const expenseOpen = ref(false)
+const selectedMonth = ref(shanghaiMonth())
 let dashboardSequence = 0
 let trendSequence = 0
 let activatedBefore = false
@@ -24,10 +28,18 @@ const debt = computed(() => data.value?.debt || {})
 const goals = computed(() => data.value?.goals || {})
 const alloc = computed(() => data.value?.allocation || {})
 const risk = computed(() => data.value?.risk || {})
+const cashAccounts = computed(() => nw.value.cash_accounts || [])
+const currentMonth = computed(() => shanghaiMonth())
+const historicalSelection = computed(() => selectedMonth.value && selectedMonth.value !== currentMonth.value)
+const cashScopeLabel = computed(() => ({ household_accounts: '分账户现金', legacy_default_cash: '旧版家庭现金（未分账户）', user_cash: '当前用户现金' }[nw.value.cash_scope] || '现金来源待确认'))
+
 const warnings = computed(() => data.value?.health_warnings || [])
 
 function money(value) {
   return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+function assetMoney(value) {
+  return Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 function pct(value) {
   return value == null ? '待确认' : `${(Number(value) * 100).toFixed(1)}%`
@@ -43,10 +55,12 @@ function progressColor(pct) {
 }
 
 async function load() {
+  const month = selectedMonth.value
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return
   const sequence = ++dashboardSequence
   loading.value = true
   try {
-    const { data: res } = await getFinanceDashboard()
+    const { data: res } = await getFinanceDashboard(month)
     if (sequence !== dashboardSequence) return
     data.value = res
   } catch (e) {
@@ -95,6 +109,7 @@ const trendSeries = computed(() => {
 
 onMounted(load)
 onActivated(() => { if (activatedBefore) load(); activatedBefore = true })
+watch(selectedMonth, month => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) load(); else { ++dashboardSequence; loading.value = false } })
 onDeactivated(() => { ++dashboardSequence; ++trendSequence })
 onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
 </script>
@@ -106,6 +121,7 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         <h2 class="page-title editorial-title-lg">财务总览</h2>
         <p class="page-desc">家庭资产负债全景，一眼看清财务健康状态。</p>
       </div>
+      <label class="month-selector">收支月份<input v-model="selectedMonth" type="month" aria-label="收支月份" /></label>
       <button class="btn-secondary" :disabled="loading" @click="load">
         <Icon :name="loading ? 'spinner' : 'refresh'" size="16" />
         刷新
@@ -136,21 +152,27 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         <section class="card net-worth-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="wallet" size="18" />
-            <h3 class="title"><span class="term-with-tip">资产总览<span class="term-tip">已登记现金与基金资产汇总；负债余额未完整登记，不能据此确认家庭净资产</span></span></h3>
+            <h3 class="title"><TermTooltip label="资产总览" content="已登记现金与基金资产汇总；负债余额未完整登记，不能据此确认家庭净资产" /></h3>
           </div>
           <div class="card-body">
             <div class="hero-metric">
-              <span class="terminal-label">总资产</span>
-              <strong class="font-jet-lg">¥{{ money(nw.total_assets) }}</strong>
+              <span class="terminal-label">{{ historicalSelection ? '总资产（当前）' : '总资产' }}</span>
+              <strong class="font-jet-lg">¥{{ assetMoney(nw.total_assets) }}</strong>
+              <span class="asset-scope">{{ historicalSelection ? '当前资产快照；收支按所选月份展示' : '与持仓管理「全部账户」口径一致' }}</span>
+            </div>
+            <div class="asset-composition">
+              <p>持仓市值 ¥{{ assetMoney(nw.holding_value) }} + 现金 ¥{{ assetMoney(nw.cash_balance) }} = 总资产 ¥{{ assetMoney(nw.total_assets) }}</p>
+              <div class="cash-breakdown"><span>{{ cashScopeLabel }}</span><span v-for="account in cashAccounts" :key="account.account">{{ account.account === 'default' ? '默认账户' : account.account }} ¥{{ assetMoney(account.balance) }}</span></div>
+              <p class="asset-scope-note">仅汇总已登记投资资产；未涵盖未登记资产，负债余额尚未完整录入，不能视为完整家庭净资产。</p>
             </div>
             <div class="metric-grid">
               <div class="metric-item">
                 <span class="terminal-label">现金</span>
-                <strong class="font-jet">¥{{ money(nw.cash_balance) }}</strong>
+                <strong class="font-jet">¥{{ assetMoney(nw.cash_balance) }}</strong>
               </div>
               <div class="metric-item">
                 <span class="terminal-label">持仓市值</span>
-                <strong class="font-jet">¥{{ money(nw.holding_value) }}</strong>
+                <strong class="font-jet">¥{{ assetMoney(nw.holding_value) }}</strong>
               </div>
               <div class="metric-item">
                 <span class="terminal-label">总成本</span>
@@ -169,13 +191,13 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         </section>
 
         <!-- 2. 现金流：与资金桶、健康诊断共用相同口径 -->
-        <HouseholdCashflowCard :cashflow="cf" />
+        <HouseholdCashflowCard :cashflow="cf" @edit-budget="expenseOpen = true" />
 
         <!-- 3. 负债 -->
         <section class="card debt-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="credit-card" size="18" />
-            <h3 class="title"><span class="term-with-tip">负债<span class="term-tip">已登记月供与收入的比例；月供不能推算贷款本金，负债余额待录入</span></span></h3>
+            <h3 class="title"><TermTooltip label="贷款还款" content="仅统计贷款还款，不包含保险等非贷款支出；月供不能推算贷款本金，贷款余额待录入" /></h3>
           </div>
           <div class="card-body">
             <div v-if="debt.liabilities_status === 'unknown' || data.household_diagnosis?.liabilities_status === 'unknown'" class="debt-summary">负债余额未录入，当前未知；月供仅反映现金支出。</div>
@@ -183,8 +205,16 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
             <div v-else class="no-data">负债余额未录入，当前未知</div>
             <div class="metric-grid two-col">
               <div class="metric-item">
-                <span class="terminal-label">月供</span>
-                <strong class="font-jet">¥{{ money(debt.monthly_debt_payment) }}</strong>
+                <span class="terminal-label">已还贷款</span>
+                <strong class="font-jet">¥{{ assetMoney(debt.recorded_debt_payment ?? debt.monthly_debt_payment) }}</strong>
+              </div>
+              <div class="metric-item">
+                <span class="terminal-label">待还贷款</span>
+                <strong class="font-jet">¥{{ assetMoney(debt.pending_debt_payment) }}</strong>
+              </div>
+              <div class="metric-item">
+                <span class="terminal-label">本月贷款还款</span>
+                <strong class="font-jet">¥{{ assetMoney(debt.monthly_debt_payment ?? ((debt.recorded_debt_payment || 0) + (debt.pending_debt_payment || 0))) }}</strong>
               </div>
               <div class="metric-item">
                 <span class="terminal-label">负债收入比</span>
@@ -198,7 +228,7 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         <section class="card goals-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="target" size="18" />
-            <h3 class="title"><span class="term-with-tip">目标进度<span class="term-tip">各财务目标（如备用金、购房、教育）的资金桶达成进度</span></span></h3>
+            <h3 class="title"><TermTooltip label="目标进度" content="各财务目标（如备用金、购房、教育）的资金桶达成进度" /></h3>
             <span class="card-meta meta">
               共 {{ goals.buckets?.length || 0 }} 个目标，
               目标 ¥{{ money(goals.total_target) }}
@@ -235,7 +265,7 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         <section class="card alloc-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="pie-chart" size="18" />
-            <h3 class="title"><span class="term-with-tip">投资配置<span class="term-tip">当前资产配置比例与目标配比的偏离度，含市场估值水平与护栏触发数</span></span></h3>
+            <h3 class="title"><TermTooltip label="投资配置" content="当前资产配置比例与目标配比的偏离度，含市场估值水平与护栏触发数" /></h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
@@ -248,7 +278,7 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
                 <strong class="font-jet">{{ alloc.market_level || '-' }}</strong>
               </div>
               <div class="metric-item">
-                <span class="term-with-tip">护栏提示<span class="term-tip">基于您的风险偏好和持仓上限自动触发的风险提示规则数量</span></span>
+                <TermTooltip label="护栏提示" content="基于您的风险偏好和持仓上限自动触发的风险提示规则数量" />
                 <strong class="font-jet">{{ alloc.guardrails_count || 0 }} 条</strong>
               </div>
             </div>
@@ -262,12 +292,12 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
         <section class="card risk-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="shield" size="18" />
-            <h3 class="title"><span class="term-with-tip">风险视图<span class="term-tip">压力测试下的最大损失估算与风险等级，含在险金额与回撤比例</span></span></h3>
+            <h3 class="title"><TermTooltip label="风险视图" content="压力测试下的最大损失估算与风险等级，含在险金额与回撤比例" /></h3>
           </div>
           <div class="card-body">
             <div class="metric-grid three-col">
               <div class="metric-item">
-                <span class="term-with-tip">压力测试损失<span class="term-tip">模拟极端市场环境（如2008/2015级下跌）下组合的预期最大损失</span></span>
+                <TermTooltip label="压力测试损失" content="模拟极端市场环境（如2008/2015级下跌）下组合的预期最大损失" />
                 <strong class="font-jet negative">¥{{ money(risk.stress_loss_amount) }}</strong>
               </div>
               <div class="metric-item">
@@ -290,6 +320,8 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
           </div>
         </section>
       </div>
+
+      <FixedBillsOverview :month="selectedMonth" :cashflow="cf" />
 
       <!-- 投资趋势 -->
       <section class="card trend-card reveal-stagger editorial-card">
@@ -341,11 +373,16 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
       </section>
     </template>
     <HouseholdCashflowCard v-if="!loading && !data" :cashflow="null" />
-    <ExpenseManager v-model:open="expenseOpen" @updated="load" />
+    <ExpenseManager v-model:open="expenseOpen" :initial-month="selectedMonth" @updated="load" />
   </div>
 </template>
 
 <style scoped>
+.asset-composition { padding: var(--space-3); border: 1px solid var(--color-border-light); border-radius: var(--radius-md); }
+.asset-composition p { margin: 0; font-size: .78rem; line-height: 1.7; }
+.cash-breakdown { display: flex; flex-wrap: wrap; gap: .35rem .8rem; margin-top: .4rem; font-size: .75rem; color: var(--color-text-secondary); }
+.asset-composition .asset-scope-note { margin-top: .5rem; font-size: .72rem; color: var(--color-text-muted); }
+.hero-metric .asset-scope { margin-top: .45rem; color: var(--color-text-secondary); font-size: .72rem; }
 .finance-page {
   padding: var(--space-6);
   display: flex;
@@ -359,6 +396,8 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
   justify-content: space-between;
   gap: var(--space-4);
 }
+.month-selector { display: inline-flex; align-items: center; gap: .5rem; margin-left: auto; font-size: .8rem; color: var(--color-text-secondary); }
+.month-selector input { width: 150px; }
 
 .empty-panel {
   min-height: 200px;
