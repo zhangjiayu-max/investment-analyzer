@@ -128,3 +128,25 @@ describe('failed activation refresh', () => {
     expect(w.text()).not.toContain('旧投资行动')
   })
 })
+
+describe('recalculation navigation race', () => {
+  it('keeps the newer activation dashboard when an older recalculation finishes late', async () => {
+    let resolveRecalculation
+    api.recalculateHealthV2.mockReturnValueOnce(new Promise(resolve => { resolveRecalculation = resolve }))
+    api.getHealthV2Dashboard.mockResolvedValueOnce({ data: { actions: [] } }).mockResolvedValueOnce({ data: { actions: [{ action_id: 'new', title: '最新家庭约束行动', category: 'cash_deploy' }] } })
+    const visible = ref(true)
+    const placeholder = defineComponent({ render: () => h('p', 'other page') })
+    const host = defineComponent({ setup: () => () => h(KeepAlive, null, { default: () => visible.value ? h(HealthDashboardV2) : h(placeholder) }) })
+    const w = mount(host, { global: { stubs: { Teleport: true, Transition: true } } }); pageWrappers.push(w)
+    await flushPromises()
+    await w.findAll('button').find(b => b.text().includes('重新诊断')).trigger('click')
+    expect(api.recalculateHealthV2).toHaveBeenCalledTimes(1)
+    visible.value = false; await flushPromises(); visible.value = true; await flushPromises()
+    expect(w.text()).toContain('最新家庭约束行动')
+    resolveRecalculation({ data: { actions: [{ action_id: 'old', title: '过期重算投资行动', category: 'cash_deploy' }] } }); await flushPromises()
+    expect(w.text()).toContain('最新家庭约束行动')
+    expect(w.text()).not.toContain('过期重算投资行动')
+    const recalculate = w.findAll('button').find(b => b.text().includes('重新诊断'))
+    expect(recalculate.attributes('disabled')).toBeUndefined()
+  })
+})

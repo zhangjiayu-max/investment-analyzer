@@ -22,15 +22,15 @@
 - [x] 完成周期数据层与路由；通过现有 init_db 初始化入口建表（仓库实际入口为 backend/db/__init__.py）。
 - [x] 在原支出抽屉增加账单模板、当月待付及确认支付，编辑和重要操作使用 ConfirmDialog，保留实际支出录入。
 - [x] 总览显示实际/待付/预留/预计结余；资金桶显示必要预留与可投资上限；诊断增加现金流、还贷和应急金事实并限制现金增配建议。
-- [ ] 执行后端相关回归、前端交互回归与构建；使用临时数据库验证旧库升级及完整支付流程；独立审查需求和代码质量。
+- [x] 执行后端相关回归、前端交互回归与构建；使用临时数据库验证旧库升级及完整支付流程；独立审查需求和代码质量。
 
 ## 验证命令
 
 ```sh
 python3 -m pytest backend/tests/test_db_expense.py backend/tests/test_recurring_expenses.py backend/tests/test_family_cashflow.py -q
 cd frontend
-npm test -- src/__tests__/expenseManager.test.js src/__tests__/recurringExpenses.test.js src/__tests__/familyCashflow.test.js
-npm run build
+npm test -- src/__tests__/expenseManager.test.js src/__tests__/recurringExpenses.test.js src/__tests__/familyCashflow.test.js src/__tests__/api-urls.test.js
+npm run build -- --outDir /tmp/investment-household-frontend-build
 ```
 
 当前工作区有其他任务的未提交修改，保留这些修改，在现有 checkout 上仅更新本任务相关文件，不自动提交混合变更。

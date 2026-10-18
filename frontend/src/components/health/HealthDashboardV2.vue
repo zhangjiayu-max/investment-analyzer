@@ -145,13 +145,16 @@ async function refreshAll() {
 }
 
 async function handleRecalculate() {
+  const sequence = ++dashboardSequence
   recalculating.value = true
   try {
     const { data } = await recalculateHealthV2()
+    if (sequence !== dashboardSequence) return
     dashboard.value = data.result || data
     await Promise.all([loadHistory(), loadHouseholdCashflow()])
     showToast('健康度已重新计算', 'success')
   } catch (e) {
+    if (sequence !== dashboardSequence) return
     showToast('重新计算失败: ' + e.message, 'error')
   } finally {
     recalculating.value = false

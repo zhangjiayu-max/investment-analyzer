@@ -396,6 +396,19 @@ def init_db():
     # 修复 UNIQUE 约束：确保包含 metric_type（处理已存在但约束不对的表）
     _fix_unique_constraint(conn)
 
+    # 清理历史测试残留：估值契约测试使用 normal.png + index_name=index_code，
+    # 若测试曾绕过临时库运行，这些记录会错误出现在生产指数选择器中。
+    try:
+        cur = conn.execute(
+            "DELETE FROM index_valuations "
+            "WHERE lower(trim(COALESCE(source_image, ''))) IN ('data/images/normal.png', 'normal.png') "
+            "AND trim(COALESCE(index_name, '')) = trim(index_code)"
+        )
+        if cur.rowcount > 0:
+            print(f"[db] 清理 {cur.rowcount} 条估值测试残留记录")
+    except Exception as e:
+        print(f"[db] 清理估值测试残留失败（不阻塞启动）: {e}")
+
     # ── 螺丝钉估值表 ──────────────────────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dd_valuations (
