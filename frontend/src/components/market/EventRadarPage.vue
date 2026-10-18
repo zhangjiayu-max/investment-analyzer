@@ -18,6 +18,7 @@ import {
   updateWatchlistEntry, getWatchlistExitStatus, analyzeEventImpact,
   getEventImpactAmount, getLeadingIndicatorSignals, getBacktestStatsBySource,
   getEventBeneficiaries, getEventBeneficiaryStats, getRecommendationAccuracy,
+  getAsyncTaskStatus, backfillEventVerification,
 } from '../../api'
 import Icon from '../ui/Icon.vue'
 import { useToast } from '../../composables/useToast'
@@ -285,7 +286,7 @@ async function loadEvents() {
 
 async function loadWatchlist() {
   try {
-    const { data } = await listWatchlist('watching')
+    const { data } = await listWatchlist()
     watchlist.value = data?.items || []
     // 只做轻量级巡检刷新估值分位（静默）
     if (watchlist.value.length) autoPatrol()
@@ -470,9 +471,10 @@ async function autoPatrol() {
   patrolling.value = true
   try {
     const { data } = await patrolWatchlist()
+    const result = data?.task_id ? await waitForAsyncTask(data.task_id, '关注列表巡检') : data
     // 用巡检结果更新当前 watchlist，保存后端 signal_status 等完整字段
     const patrolMap = {}
-    for (const item of data?.all_items || []) {
+    for (const item of result?.all_items || []) {
       patrolMap[item.id] = item
     }
     watchlist.value = watchlist.value.map(w => {
@@ -549,8 +551,9 @@ async function handleVerify() {
   verifying.value = true
   try {
     const { data } = await triggerEventRadarVerify()
+    const result = data?.task_id ? await waitForAsyncTask(data.task_id, '落地验证') : data
     useToast().showToast(
-      `验证完成：${data?.verified || 0} 个事件，正确 ${data?.correct || 0}，偏差 ${data?.wrong || 0}`,
+      `验证完成：${result?.verified || 0} 个事件，正确 ${result?.correct || 0}，偏差 ${result?.wrong || 0}`,
       'success'
     )
     await loadEvents()
@@ -560,6 +563,20 @@ async function handleVerify() {
   } finally {
     verifying.value = false
   }
+}
+
+/** 等待统一后台任务终态，避免把首响 task_id 当成业务结果。 */
+async function waitForAsyncTask(taskId, label = '后台任务') {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 10 * 60 * 1000) {
+    const { data } = await getAsyncTaskStatus(taskId)
+    if (data?.status === 'done') return data.result || {}
+    if (['error', 'failed'].includes(data?.status)) {
+      throw new Error(data.error_msg || data.error || `${label}失败`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000))
+  }
+  throw new Error(`${label}超时，任务仍在后台执行`)
 }
 
 let scanPollGeneration = 0
@@ -635,7 +652,9 @@ async function handleAnalyzeImpact(evt) {
   eventImpactMap.value[eid] = { ...cur, loading: true, error: '' }
   try {
     const { data } = await analyzeEventImpact(eid)
-    const result = data?.data || data || {}
+    const result = data?.task_id
+      ? await waitForAsyncTask(data.task_id, '事件深度解读')
+      : (data?.data || data || {})
     if (result.error) {
       eventImpactMap.value[eid] = { ...cur, loading: false, error: result.error }
       useToast().showToast(result.error, 'warning')
@@ -1126,8 +1145,9 @@ async function handleScanWatchlistSignals() {
   scanningWatchlist.value = true
   try {
     const { data } = await triggerWatchlistScan()
+    const result = data?.task_id ? await waitForAsyncTask(data.task_id, '关注信号扫描') : data
     useToast().showToast(
-      `扫描完成：扫描 ${data?.watchlist_scanned || 0} 只基金，生成 ${data?.alerts_created || 0} 个信号`,
+      `扫描完成：扫描 ${result?.watchlist_scanned || 0} 只基金，生成 ${result?.alerts_created || 0} 个信号`,
       'success'
     )
     await loadWatchlist()
@@ -1135,6 +1155,22 @@ async function handleScanWatchlistSignals() {
     useToast().showToast('扫描失败', 'error')
   } finally {
     scanningWatchlist.value = false
+  }
+}
+
+/** 补全事件历史验证结果，并在任务完成后刷新统计。 */
+async function backfillVerify(force = false) {
+  if (verifying.value) return
+  verifying.value = true
+  try {
+    const { data } = await backfillEventVerification(200, force)
+    const result = data?.task_id ? await waitForAsyncTask(data.task_id, '事件验证补全') : data
+    useToast().showToast(`补全完成：${result?.verified || result?.processed || 0} 个事件`, 'success')
+    await Promise.all([loadEvents(), loadAccuracy()])
+  } catch (e) {
+    useToast().showToast(`补全失败：${e.message || e}`, 'error')
+  } finally {
+    verifying.value = false
   }
 }
 

@@ -145,8 +145,16 @@ async def opportunity_watch_api(opportunity_id: int):
         )
     except Exception as e:
         if "UNIQUE" in str(e):
-            update_opportunity_status(opportunity_id, "watching")
-            return {"ok": True, "dedup": True}
+            # 已存在的关注项可能已经上车，不能把机会状态从 bought 降回 watching。
+            existing_status = "watching"
+            try:
+                from db.watchlist import list_watchlist
+                existing = next((w for w in list_watchlist() if w.get("fund_code") == fund.get("fund_code")), None)
+                existing_status = "bought" if existing and existing.get("status") == "bought" else "watching"
+            except Exception:
+                pass
+            update_opportunity_status(opportunity_id, existing_status)
+            return {"ok": True, "dedup": True, "status": existing_status}
         raise HTTPException(500, str(e))
     update_opportunity_status(opportunity_id, "watching")
     return {"ok": True, "watch_id": watch_id}

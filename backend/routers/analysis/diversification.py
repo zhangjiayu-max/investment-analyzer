@@ -183,7 +183,12 @@ async def _run_diversification_ai_async(task_id: int, record_id: int, agent_id: 
         from db import get_portfolio_analysis_record
         record = get_portfolio_analysis_record(record_id)
         if record and record.get("status") == "done":
-            update_async_task(task_id, status="done", result={"record_id": record_id, "status": "done"})
+            update_async_task(task_id, status="done", result={
+                "record_id": record_id,
+                "status": "done",
+                "result": record.get("result_data") or "",
+                "token_usage": record.get("token_usage") or 0,
+            })
         else:
             error_msg = record.get("error_msg", "未知错误") if record else "记录不存在"
             update_async_task(task_id, status="error", error_msg=error_msg)
@@ -624,9 +629,9 @@ async def portfolio_ai_summary_today_status():
 
 
 @router.get("/api/portfolio/analysis/penetration")
-async def portfolio_penetration_api():
+async def portfolio_penetration_api(force_refresh: bool = False):
     """跨基金持仓穿透分析：加权聚合底层股票持仓。"""
-    result = get_portfolio_penetration()
+    result = get_portfolio_penetration(force_refresh=force_refresh)
     return result
 
 

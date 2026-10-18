@@ -82,7 +82,12 @@ async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt:
             )
 
         type_dist = diversification.get('type_distribution', {})
-        type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
+        # diversification 返回的是金额；提示词这里必须转换为占比，避免把 ¥ 金额当成百分比。
+        type_lines = [
+            f"  - {k}: {(float(v) / total_value * 100):.1f}%"
+            for k, v in type_dist.items()
+            if total_value > 0
+        ]
 
         mcp_context = _get_mcp_context(holdings)
         valuation_context = _get_holdings_valuation_context(holdings)

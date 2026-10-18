@@ -1336,6 +1336,17 @@ async def mark_as_bought_api(item_id: int, payload: dict = None):
             target_profit_pct=float(target_profit_pct) if target_profit_pct is not None else None,
             stop_loss_pct=float(stop_loss_pct) if stop_loss_pct is not None else None,
         )
+        # 关注列表上车也要同步主题机会跟踪，避免闭环断在「上车信号」。
+        try:
+            from db.opportunities import mark_matching_opportunities_bought
+            mark_matching_opportunities_bought(
+                fund_code=item.get("fund_code", ""),
+                entry_price=float(entry_price) if entry_price is not None else None,
+                entry_date=entry_date,
+                user_id=item.get("user_id") or "default",
+            )
+        except Exception as e:
+            logger.warning(f"[watchlist] 同步主题机会上车记录失败: {e}")
         return {
             "ok": True,
             "message": f"{item.get('fund_name','')} 已标记为已买入，已记录上车信息",
@@ -1346,6 +1357,15 @@ async def mark_as_bought_api(item_id: int, payload: dict = None):
         }
     else:
         update_watchlist_item(item_id, status="bought")
+        try:
+            from db.opportunities import mark_matching_opportunities_bought
+            mark_matching_opportunities_bought(
+                fund_code=item.get("fund_code", ""),
+                entry_date=entry_date,
+                user_id=item.get("user_id") or "default",
+            )
+        except Exception as e:
+            logger.warning(f"[watchlist] 同步主题机会上车记录失败: {e}")
         return {"ok": True, "message": f"{item.get('fund_name','')} 已标记为已买入"}
 
 

@@ -923,6 +923,19 @@ async def create_transaction_api(req: CreateTransactionRequest):
     # 买入交易自动标记关注列表为「已上车」
     if req.transaction_type in ("buy", "buyin", "subscribe"):
         try:
+            # 实际买入同时推进主题机会闭环：发现/观察 → 上车 → 跟踪验证。
+            from db.opportunities import mark_matching_opportunities_bought
+            from datetime import datetime as _dt_opp
+            mark_matching_opportunities_bought(
+                fund_code=req.fund_code,
+                amount=req.amount or 0,
+                entry_price=req.price,
+                entry_date=req.transaction_date or _dt_opp.now().strftime("%Y-%m-%d"),
+                transaction_id=tx_id,
+            )
+        except Exception as e:
+            logger.warning(f"[portfolio] 同步主题机会上车记录失败: {e}")
+        try:
             from db.config import get_config_bool
             auto_mark_full = get_config_bool("watchlist.auto_mark_bought_enabled", False)
             if auto_mark_full:
@@ -1312,10 +1325,11 @@ async def ai_suggestion_to_decision_api(data: AiSuggestionToDecisionRequest):
     elif any(kw in suggestion_text for kw in ["谨慎", "不确定", "低置信"]):
         confidence = "low"
 
+    payload = data.model_dump()
     candidate_id = create_candidate_from_structured_recommendation({
         "source_type": "ai_chat",
-        "source_id": data.get("conversation_id"),
-        "scenario_type": data.get("scenario_type", "ai_analysis"),
+        "source_id": payload.get("conversation_id"),
+        "scenario_type": payload.get("scenario_type") or "ai_analysis",
         "action_type": action_type,
         "target_type": "fund" if fund_code else "portfolio",
         "target_code": fund_code,
@@ -1324,7 +1338,7 @@ async def ai_suggestion_to_decision_api(data: AiSuggestionToDecisionRequest):
         "rationale": suggestion_text,
         "suggested_amount": amount_hint,
         "confidence": confidence,
-        "evidence": {"source": "ai_chat", "agent_id": data.get("agent_id")},
+        "evidence": {"source": "ai_chat", "agent_id": payload.get("agent_id")},
         "priority": 2 if action_type in ("buy", "sell") else 3,
     })
 

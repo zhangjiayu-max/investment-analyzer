@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onActivated, onDeactivated } from 'vue'
-import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, getOpportunityStats, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI } from '../api'
+import { getDashboard, runAnalysis, runPanoramaAnalysis, pollPanoramaStatus, getHotTopics, getDailyReport, getDailyReportTask, regenerateDailyReport, submitDailyReportFeedback, listPanoramaRecords, triggerHotspotsAnalysis, getLatestHotspotsAnalysis, getRecommendations, getRecommendationStats, submitRecommendationFeedback, getBondRecommend, listBondRecommendRecords, autoVerifyRecommendations, fetchRecentValuations, getBondMarketTemperature, getHotspotsRelate, getRebalancingSuggestion, listTodayDecisions, updateDecisionStatus, completeDecisionAction, listDueDecisionReviews, submitDecisionReview, getDecisionPrecheck, getTodayOpportunities, getOpportunityStats, scanDailyOpportunities, createDecisionFromOpportunity, watchOpportunity, dailyAdviceAPI, getAsyncTaskStatus } from '../api'
 import GaugeChart from './charts/GaugeChart.vue'
 import ConfirmDialog from './layout/ConfirmDialog.vue'
 import AppToast from './layout/AppToast.vue'
@@ -201,7 +201,7 @@ const hotspotsTaskCallbacks = {
     hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
     try {
       const { data: opp } = await scanDailyOpportunities({ force_refresh: true })
-      opportunities.value = opp.items || []
+      opportunities.value = (await resolveOpportunityTask(opp)).items || []
     } catch (e) {
       console.warn('机会引擎刷新失败:', e)
     }
@@ -439,7 +439,8 @@ async function loadOpportunities() {
       getTodayOpportunities(),
       getOpportunityStats(),
     ])
-    opportunities.value = res.items || []
+    const result = await resolveOpportunityTask(res)
+    opportunities.value = result.items || []
     opportunityStats.value = stats
   } catch (e) {
     opportunities.value = []
@@ -447,6 +448,18 @@ async function loadOpportunities() {
   } finally {
     opportunitiesLoading.value = false
   }
+}
+
+async function resolveOpportunityTask(response) {
+  if (!response?.task_id) return response || {}
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 10 * 60 * 1000) {
+    const { data } = await getAsyncTaskStatus(response.task_id)
+    if (data?.status === 'done') return data.result || {}
+    if (['error', 'failed'].includes(data?.status)) throw new Error(data.error_msg || data.error || '机会扫描失败')
+    await new Promise(resolve => setTimeout(resolve, 2000))
+  }
+  throw new Error('机会扫描仍在后台执行')
 }
 
 const hotTopicsAnalyzedAt = ref('')
@@ -652,7 +665,7 @@ async function generateHotspots() {
       hotTopicsFetchedAt.value = hotTopicsAnalyzedAt.value
       try {
         const { data: opp } = await scanDailyOpportunities({ force_refresh: true })
-        opportunities.value = opp.items || []
+        opportunities.value = (await resolveOpportunityTask(opp)).items || []
       } catch (e) {
         console.warn('机会引擎刷新失败:', e)
       }

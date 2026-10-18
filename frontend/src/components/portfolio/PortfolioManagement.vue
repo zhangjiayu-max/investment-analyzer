@@ -1307,10 +1307,10 @@ const penetrationData = ref(null)
 const penetrationLoading = ref(false)
 const showPenetration = ref(false)
 
-async function loadPenetration() {
+async function loadPenetration(forceRefresh = false) {
   penetrationLoading.value = true
   try {
-    const { data } = await getPortfolioPenetration()
+    const { data } = await getPortfolioPenetration(forceRefresh)
     penetrationData.value = data
   } catch (e) {
     penetrationData.value = { error: e.message }
@@ -1332,7 +1332,7 @@ function handlePenetration() {
       title: '刷新持仓穿透',
       message: '将重新从 akshare 拉取基金持仓数据并计算穿透结果，首次加载可能需要 30-60 秒，是否继续？',
       danger: false,
-      onConfirm: () => { confirm.value.visible = false; loadPenetration() }
+      onConfirm: () => { confirm.value.visible = false; loadPenetration(true) }
     }
   } else {
     loadPenetration()
@@ -2219,10 +2219,10 @@ async function viewModeRecord(record) {
   }
 }
 
-async function loadDiversification() {
+async function loadDiversification(forceRefresh = false) {
   diversificationLoading.value = true
   try {
-    const { data } = await getPortfolioDiversification()
+    const { data } = await getPortfolioDiversification(forceRefresh)
     diversificationData.value = data
     diverShowMcp.value = false
   } catch (e) {
@@ -3780,7 +3780,7 @@ function txDisplayAmount(tx) {
         <div class="analysis-panel-header">
           <h3>持仓分散度分析</h3>
           <div class="analysis-panel-actions">
-            <button class="btn-diver-refresh" @click="loadDiversification" :disabled="diversificationLoading">
+            <button class="btn-diver-refresh" @click="loadDiversification(true)" :disabled="diversificationLoading">
               <svg :class="['icon-spin', { 'spinning': diversificationLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
               </svg>
@@ -4358,7 +4358,7 @@ function txDisplayAmount(tx) {
               <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
               <AIActionButton
                 label="开始分析"
-                agent="AI 基金分析师"
+                agent="指定基金分析师"
                 icon="bot"
                 variant="primary"
                 :loading="modeLoading"
@@ -4368,7 +4368,7 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'fund-analysis'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
-                agent-name="AI 基金分析师"
+                agent-name="指定基金分析师"
                 :token-usage="aiTokenUsage"
                 :record-id="modeRecordId"
                 :created-at="new Date().toISOString()"

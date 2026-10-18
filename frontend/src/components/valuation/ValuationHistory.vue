@@ -1099,7 +1099,7 @@ defineExpose({ loadHistory })
           <p class="modal-warn">此操作将消耗 Token，确认继续？</p>
           <div class="modal-actions">
             <button class="btn btn-outline" @click="showConfirmRun = false">取消</button>
-            <button class="btn btn-primary" @click="handleRunAnalysis" title="使用「市场日报分析师」Agent 执行分析">确认分析</button>
+            <button class="btn btn-primary" @click="handleRunAnalysis" title="使用「指数深度分析师」Agent 执行分析">确认分析</button>
           </div>
         </div>
       </div>
