@@ -104,38 +104,66 @@ def save_health_score(score_date: str, total_score: int,
                       score_risk: int, advice: list = None,
                       detail: dict = None) -> int:
     conn = _get_conn()
-    conn.execute("""
-        INSERT OR REPLACE INTO health_scores
-        (score_date, total_score, score_quality, score_diversification,
-         score_valuation, score_behavior, score_risk, advice_json, detail_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        score_date, total_score, score_quality, score_diversification,
-        score_valuation, score_behavior, score_risk,
-        json.dumps(advice or [], ensure_ascii=False),
-        json.dumps(detail or {}, ensure_ascii=False),
-    ))
-    conn.commit()
-    conn.close()
-    return 0
+    try:
+        # 一天仅保留一份快照，兼容旧表没有日期唯一约束的数据库。
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM health_scores WHERE score_date = ?", (score_date,))
+        cursor = conn.execute("""
+            INSERT INTO health_scores
+            (score_date, total_score, score_quality, score_diversification,
+             score_valuation, score_behavior, score_risk, advice_json, detail_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (score_date, total_score, score_quality, score_diversification,
+              score_valuation, score_behavior, score_risk,
+              json.dumps(advice or [], ensure_ascii=False),
+              json.dumps(detail or {}, ensure_ascii=False)))
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def _health_score_dto(row) -> dict:
+    """历史与即时结果使用同一字段；保留旧列以兼容其他调用方。"""
+    result = dict(row)
+    def decode(value, expected, fallback):
+        try:
+            parsed = json.loads(value or "null")
+            return parsed if isinstance(parsed, expected) else fallback
+        except (ValueError, TypeError):
+            return fallback
+    result["date"] = result["score_date"]
+    result["scores"] = {key: result.get("score_" + key) for key in
+                        ("quality", "diversification", "valuation", "behavior", "risk")}
+    result["advice"] = decode(result.get("advice_json"), list, [])
+    result["details"] = decode(result.get("detail_json"), dict, {})
+    result["data_quality"] = result["details"].pop("_data_quality", {
+        "status": "unknown", "reasons": ["历史评分未记录数据覆盖率，请重新计算"],
+    })
+    result["summary"] = result["details"].pop("_summary", "")
+    return result
 
 
 def get_health_score(score_date: str) -> dict | None:
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM health_scores WHERE score_date = ?", (score_date,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            "SELECT * FROM health_scores WHERE score_date = ? ORDER BY id DESC LIMIT 1", (score_date,)
+        ).fetchone()
+        return _health_score_dto(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_health_scores(limit: int = 30) -> list[dict]:
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM health_scores ORDER BY score_date DESC LIMIT ?", (limit,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute("""SELECT * FROM health_scores WHERE id IN
+            (SELECT MAX(id) FROM health_scores GROUP BY score_date)
+            ORDER BY score_date DESC LIMIT ?""", (limit,)).fetchall()
+        return [_health_score_dto(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def save_bond_yield(trade_date: str, yield_10y: float, yield_3y: float = None) -> int:

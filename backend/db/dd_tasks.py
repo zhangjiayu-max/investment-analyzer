@@ -52,14 +52,16 @@ def get_dd_parse_task(task_id: int) -> dict | None:
     return d
 
 
-def find_running_task(image_path: str) -> dict | None:
+def find_running_task(image_path: str, parse_type: str | None = None) -> dict | None:
     """查找同一图片正在执行或最近完成的任务（去重用）。"""
     conn = _get_conn()
-    row = conn.execute("""
+    type_filter = " AND parse_type = ?" if parse_type else ""
+    params = (image_path, parse_type) if parse_type else (image_path,)
+    row = conn.execute(f"""
         SELECT * FROM dd_parse_tasks
-        WHERE image_path = ? AND status IN ('pending', 'parsing')
+        WHERE image_path = ? AND status IN ('pending', 'parsing'){type_filter}
         ORDER BY id DESC LIMIT 1
-    """, (image_path,)).fetchone()
+    """, params).fetchone()
     conn.close()
     if not row:
         return None

@@ -1,13 +1,14 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
-  listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase,
+  listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase, runEvalBatch,
   listEvalRuns, getEvalRunDetail, getEvalStats, listAgents,
   batchConvertBadCases, extractEvalFromConversations, runAutoRegression,
   listPromptVersions, savePromptVersion, activatePromptVersion, comparePrompt,
   listDailyReports, triggerDailyEval, autoGenerateEvalCases,
 } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
+import { trackFeatureClick, trackFeatureComplete } from '../../composables/useTracking'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import AppToast from '../layout/AppToast.vue'
 import { useToast } from '../../composables/useToast'
@@ -17,12 +18,42 @@ const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 // 异步任务：评测用例运行
-const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTaskError, start: startEvalTask, restore: restoreEvalTask, restoreFromServer: restoreEvalTaskFromServer } = useAsyncTask('eval_case')
+const { taskState: evalTaskState, taskResult: evalTaskResult, taskError: evalTaskError, start: startEvalTask, restore: restoreEvalTask, restoreFromServer: restoreEvalTaskFromServer } = useAsyncTask('eval_case_run')
 
 const loading = ref(false)
 const runningCases = ref(new Set()) // 正在运行的用例 ID 集合
 const expandedCases = ref(new Set()) // 展开详情的用例 ID 集合
 const activeTab = ref('cases')
+const { taskState: batchState, start: startBatch, restoreFromServer: restoreBatch } = useAsyncTask('eval_case_batch')
+const { taskState: dailyState, start: startDaily, restoreFromServer: restoreDaily } = useAsyncTask('eval_system_daily')
+const { taskState: compareState, start: startCompare, restoreFromServer: restoreCompare } = useAsyncTask('eval_system_compare')
+const evalBusy = computed(() => [evalTaskState.value, batchState.value].some(s => ['submitting','running'].includes(s)))
+function confirmAction(title, message, action, danger = false) {
+  confirm.value = { visible:true,title,message,danger,onConfirm:() => { confirm.value.visible=false; action() } }
+}
+function taskFailure(err) { runningCases.value.clear(); showToast('任务失败: ' + err, 'error') }
+function onEvalComplete(result) {
+  runningCases.value.clear()
+  if (result?.ok) { showToast('评测运行完成','success'); trackFeatureComplete('eval_run','eval-suite') }
+  else if (result?.skipped) showToast(result.reason || '已跳过评分，请查看运行记录','warning')
+  else showToast('评测失败: ' + (result?.error || '请查看运行记录'),'error')
+  Promise.all([loadRuns(),loadStats(),loadCases()])
+}
+function onBatchComplete(result) {
+  runningCases.value.clear()
+  showToast(`批次完成：达标 ${result?.passed || 0} / ${result?.total || 0}，低分 ${result?.failed || 0}，错误 ${result?.errors || 0}，跳过 ${result?.skipped || 0}`,result?.failed || result?.errors ? 'warning':'success')
+  if ((result?.passed || 0) + (result?.failed || 0) > 0 && !result?.errors) trackFeatureComplete('eval_run','eval-suite')
+  regressionResult.value = result
+  loadAll()
+}
+function onDailyComplete(result) {
+  const report = result?.report || result
+  if (report?.total_cases) showToast(`评测完成：${report.total_cases} 条，均分 ${report.avg_score}/25`,'success')
+  else showToast(report?.message || '没有有效评分，请查看评测配置或失败记录','warning')
+  loadDailyReports(); loadRuns(); loadStats()
+}
+function onCompareComplete(result) { abResult.value=result; showToast(`对比完成：${result.paired_count} 对有效样本`,'success'); loadRuns(); loadStats() }
+
 
 // 移动端布局状态
 const isMobile = ref(false)
@@ -68,9 +99,9 @@ async function loadAgents() {
   try {
     const { data } = await listAgents()
     const agents = data.agents || []
-    agents.forEach(agent => {
+    agents.filter(agent => agent.is_specialist && agent.agent_key).forEach(agent => {
       // 用 agent_key（如 valuation_expert）作为 value
-      const key = agent.agent_key || agent.name.toLowerCase().replace(/\s+/g, '_')
+      const key = agent.agent_key
       if (!analysisTypeOptions.value.find(o => o.value === key)) {
         analysisTypeOptions.value.push({ value: key, label: `${agent.icon || '🤖'} ${agent.name}` })
       }
@@ -125,7 +156,7 @@ async function loadAll() {
 // ── 进化操作 ──
 const converting = ref(false)
 const extracting = ref(false)
-const regressing = ref(false)
+const regressing = computed(() => ['submitting','running'].includes(batchState.value))
 const autoGenerating = ref(false)
 const regressionResult = ref(null)
 
@@ -138,7 +169,7 @@ const abResult = ref(null)
 
 // 每日评测状态
 const dailyReports = ref([])
-const dailyRunning = ref(false)
+const dailyRunning = computed(() => ['submitting','running'].includes(dailyState.value))
 
 async function loadPrompts() {
   try {
@@ -170,14 +201,8 @@ async function activatePrompt(p) {
 }
 
 async function doComparePrompt(p) {
-  try {
-    showToast('A/B 对比中...', 'info')
-    const { data } = await comparePrompt(p.id, p.agent_type)
-    abResult.value = data
-    showToast('对比完成', 'success')
-  } catch (e) {
-    showToast('对比失败: ' + (e.response?.data?.detail || e.message), 'error')
-  }
+  if (['submitting','running'].includes(compareState.value)) return
+  await startCompare(() => comparePrompt(p.id,p.agent_type),{ onComplete:onCompareComplete,onError:taskFailure })
 }
 
 async function loadDailyReports() {
@@ -193,16 +218,8 @@ async function loadDailyReports() {
 }
 
 async function doTriggerDailyEval() {
-  dailyRunning.value = true
-  try {
-    const { data } = await triggerDailyEval()
-    showToast(`评测完成：${data.report?.total_cases || 0} 条，均分 ${data.report?.avg_score || 0}/25`, 'success')
-    await loadDailyReports()
-  } catch (e) {
-    showToast('评测失败: ' + (e.response?.data?.detail || e.message), 'error')
-  } finally {
-    dailyRunning.value = false
-  }
+  if (dailyRunning.value) return
+  await startDaily(() => triggerDailyEval(),{ onComplete:onDailyComplete,onError:taskFailure })
 }
 
 async function doBatchConvert() {
@@ -241,18 +258,9 @@ async function doAutoGenerate() {
 }
 
 async function doAutoRegression() {
-  regressing.value = true
-  regressionResult.value = null
-  try {
-    const { data } = await runAutoRegression(20)
-    regressionResult.value = data
-    const msg = `回归完成：通过 ${data.passed}/${data.total}，失败 ${data.failed}` +
-      (data.degraded_count ? `，退化 ${data.degraded_count}` : '')
-    showToast(msg, data.failed > 0 ? 'warning' : 'success')
-    await loadAll()
-  } catch (e) {
-    showToast('回归失败: ' + (e.response?.data?.detail || e.message), 'error')
-  } finally { regressing.value = false }
+  if (evalBusy.value) return
+  trackFeatureClick('eval_run','eval-suite')
+  await startBatch(() => runAutoRegression(20),{ onComplete:onBatchComplete,onError:taskFailure })
 }
 
 function openCreate() {
@@ -314,6 +322,8 @@ function openEdit(c) {
 async function submitForm() {
   if (!form.value.name.trim()) return
   try {
+    const params = JSON.parse(form.value.input_params || '{}')
+    if (!params || Array.isArray(params) || typeof params !== 'object') throw new Error('参数必须为JSON对象')
     if (editingId.value) {
       await updateEvalCase(editingId.value, form.value)
       showToast('已更新', 'success')
@@ -330,38 +340,16 @@ async function submitForm() {
 }
 
 async function doRun(c) {
-  if (runningCases.value.has(c.id)) return
+  if (evalBusy.value) return
   runningCases.value.add(c.id)
-  try {
-    await start(() => runEvalCase(c.id), {
-      onComplete: (result) => {
-        if (result?.ok) {
-          showToast(`「${c.name}」运行完成`, 'success')
-        } else {
-          showToast(`「${c.name}」失败: ${result?.error || '未知错误'}`, 'error')
-        }
-        runningCases.value.delete(c.id)
-        Promise.all([loadRuns(), loadStats(), loadCases()])
-      },
-      onError: (err) => {
-        showToast(`「${c.name}」出错: ${err}`, 'error')
-        runningCases.value.delete(c.id)
-      }
-    })
-  } catch (e) {
-    showToast(`「${c.name}」出错: ${e.message}`, 'error')
-    runningCases.value.delete(c.id)
-  }
+  trackFeatureClick('eval_run','eval-suite')
+  await startEvalTask(() => runEvalCase(c.id),{ onComplete:onEvalComplete,onError:taskFailure })
 }
 
-// 批量运行所有用例
 async function runAll() {
-  if (runningCases.value.size > 0) return
-  showToast('开始批量运行...', 'info')
-  // 并发执行所有用例
-  const promises = cases.value.map(c => doRun(c))
-  await Promise.all(promises)
-  showToast('批量运行完成', 'success')
+  if (evalBusy.value || !cases.value.length) return
+  trackFeatureClick('eval_run','eval-suite')
+  await startBatch(() => runEvalBatch(cases.value.map(c => c.id)),{ onComplete:onBatchComplete,onError:taskFailure })
 }
 
 async function viewRunDetail(r) {
@@ -380,10 +368,12 @@ function formatDuration(ms) {
 }
 
 function runStatusIcon(r) {
-  if (r.error_msg) return '❌'
+  if (r.error_msg || r.score_status === 'error') return '❌'
+  if (r.score_status === 'skipped') return '⏭'
   if (r.score !== null && r.score > 0) return '✅'
   return '⏳'
 }
+function scoreStateLabel(r) { return { pending:'评分中...',skipped:'已跳过评分',error:'评分失败' }[r.score_status] || '待评分' }
 
 function scoreColor(score) {
   if (!score || score <= 0) return 'var(--color-text-muted)'
@@ -427,10 +417,12 @@ function isMarkdown(text) {
 const latestRuns = computed(() => runs.value.slice(0, 30))
 
 onMounted(async () => {
-  await restoreEvalTaskFromServer({
-    onComplete: () => { loadRuns() },
-    onError: (err) => { console.error('评测任务失败:', err) }
-  })
+  await Promise.all([
+    restoreEvalTaskFromServer({ onComplete:onEvalComplete,onError:taskFailure }),
+    restoreBatch({ onComplete:onBatchComplete,onError:taskFailure }),
+    restoreDaily({ onComplete:onDailyComplete,onError:taskFailure }),
+    restoreCompare({ onComplete:onCompareComplete,onError:taskFailure }),
+  ])
   loadAll()
   loadPrompts()
   mobileMq = window.matchMedia('(max-width: 768px)')
@@ -456,16 +448,16 @@ onUnmounted(() => {
         </button>
         <!-- 桌面端：4 个次级操作按钮 -->
         <template v-if="!isMobile">
-          <button class="btn-secondary btn-sm" @click="doAutoGenerate" :disabled="autoGenerating">
+          <button class="btn-secondary btn-sm" @click="confirmAction('自动生成用例', '从现有对话和反馈生成新用例？', doAutoGenerate)" :disabled="autoGenerating">
             {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
           </button>
-          <button class="btn-secondary btn-sm" @click="doBatchConvert" :disabled="converting">
+          <button class="btn-secondary btn-sm" @click="confirmAction('批量转化', '将未转化的 Bad Case 创建为评测用例？', doBatchConvert)" :disabled="converting">
             {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
           </button>
-          <button class="btn-secondary btn-sm" @click="doExtractConversations" :disabled="extracting">
+          <button class="btn-secondary btn-sm" @click="confirmAction('提取对话', '从真实对话提取用例并生成质量标准？', doExtractConversations)" :disabled="extracting">
             {{ extracting ? '提取中...' : '💬 对话→用例' }}
           </button>
-          <button class="btn-secondary btn-sm" @click="doAutoRegression" :disabled="regressing">
+          <button class="btn-secondary btn-sm" @click="confirmAction('自动回归', '执行真实 Agent 回归并评分，最多20条？', doAutoRegression)" :disabled="regressing">
             {{ regressing ? '回归中...' : '🚀 自动回归' }}
           </button>
         </template>
@@ -476,16 +468,16 @@ onUnmounted(() => {
           </button>
           <Transition name="fade">
             <div v-if="showMoreMenu" class="more-dropdown" @click="showMoreMenu = false">
-              <button class="more-item" @click="doAutoGenerate" :disabled="autoGenerating">
+              <button class="more-item" @click="confirmAction('自动生成用例', '从现有对话和反馈生成新用例？', doAutoGenerate)" :disabled="autoGenerating">
                 {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
               </button>
-              <button class="more-item" @click="doBatchConvert" :disabled="converting">
+              <button class="more-item" @click="confirmAction('批量转化', '将未转化的 Bad Case 创建为评测用例？', doBatchConvert)" :disabled="converting">
                 {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
               </button>
-              <button class="more-item" @click="doExtractConversations" :disabled="extracting">
+              <button class="more-item" @click="confirmAction('提取对话', '从真实对话提取用例并生成质量标准？', doExtractConversations)" :disabled="extracting">
                 {{ extracting ? '提取中...' : '💬 对话→用例' }}
               </button>
-              <button class="more-item" @click="doAutoRegression" :disabled="regressing">
+              <button class="more-item" @click="confirmAction('自动回归', '执行真实 Agent 回归并评分，最多20条？', doAutoRegression)" :disabled="regressing">
                 {{ regressing ? '回归中...' : '🚀 自动回归' }}
               </button>
             </div>
@@ -520,7 +512,7 @@ onUnmounted(() => {
     <div v-if="regressionResult" class="regression-result editorial-card">
       <div class="regression-head editorial-card-header">
         <strong class="title">回归结果</strong>
-        <span class="meta font-jet">PASS <span class="font-jet">{{ regressionResult.passed }}</span>/<span class="font-jet">{{ regressionResult.total }}</span> · FAIL <span class="font-jet">{{ regressionResult.failed }}</span><template v-if="regressionResult.degraded_count"> · 退化 <span class="font-jet">{{ regressionResult.degraded_count }}</span></template></span>
+        <span class="meta font-jet">PASS <span class="font-jet">{{ regressionResult.passed }}</span>/<span class="font-jet">{{ regressionResult.total }}</span> · FAIL <span class="font-jet">{{ regressionResult.failed }}</span> · ERROR {{ regressionResult.errors || 0 }} · SKIP {{ regressionResult.skipped || 0 }}<template v-if="regressionResult.degraded_count"> · 退化 <span class="font-jet">{{ regressionResult.degraded_count }}</span></template></span>
       </div>
       <div v-if="regressionResult.degraded?.length" class="degraded-list">
         <div v-for="d in regressionResult.degraded" :key="d.case_id" class="degraded-item">
@@ -529,7 +521,8 @@ onUnmounted(() => {
       </div>
       <div class="regression-details">
         <div v-for="r in regressionResult.results" :key="r.case_id" class="regression-row">
-          <span :class="['regression-status', r.status]">{{ r.status }}</span>
+          <span :class="['regression-status', r.status]">{{ r.skipped ? 'skipped' : r.status || 'error' }}</span>
+          <span>{{ r.name || `用例 #${r.case_id}` }}</span>
           <span class="regression-score font-jet">{{ r.score ?? '-' }}</span>
           <span v-if="r.dimensions" class="regression-dims font-jet">
             数据{{ r.dimensions.data_accuracy }} / 逻辑{{ r.dimensions.logic }} /
@@ -559,7 +552,7 @@ onUnmounted(() => {
     <div v-if="activeTab === 'cases'" class="tab-content">
       <div class="section-header">
         <div class="section-actions">
-          <button class="btn-secondary btn-sm" @click="runAll" :disabled="runningCases.size > 0">
+          <button class="btn-secondary btn-sm" @click="confirmAction('批量运行', `运行全部 ${cases.length} 条用例？任务将在后台执行。`, runAll)" :disabled="evalBusy">
             {{ runningCases.size > 0 ? `运行中 (${runningCases.size})` : '▶ 全部运行' }}
           </button>
         </div>
@@ -639,7 +632,7 @@ onUnmounted(() => {
               <button class="btn-secondary btn-xs" @click="toggleCaseDetail(c.id)">
                 {{ expandedCases.has(c.id) ? '收起' : '📋 详情' }}
               </button>
-              <button class="btn-secondary btn-xs" :disabled="runningCases.has(c.id)" @click="doRun(c)">
+              <button class="btn-secondary btn-xs" :disabled="evalBusy" @click="confirmAction('运行评测', `运行「${c.name}」并进行质量评估？`, () => doRun(c))">
                 {{ runningCases.has(c.id) ? '⏳ 运行中' : '▶ 运行' }}
               </button>
               <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
@@ -733,7 +726,7 @@ onUnmounted(() => {
               <span v-if="r.score !== null && r.score > 0" class="run-score font-jet" :style="{ color: scoreColor(r.score) }">
                 {{ Number(r.score).toFixed(0) }}/10
               </span>
-              <span v-else class="run-score scoring">评分中...</span>
+              <span v-else class="run-score scoring">{{ scoreStateLabel(r) }}</span>
             </div>
           </div>
         </div>
@@ -868,19 +861,21 @@ onUnmounted(() => {
           <div class="prompt-header">
             <span class="prompt-type terminal-label">{{ p.agent_type }}</span>
             <span class="prompt-version font-jet">{{ p.version }}</span>
-            <span v-if="p.is_active" class="badge-active">当前版本</span>
+            <span v-if="p.is_current" class="badge-active">当前生产版本</span>
+            <span v-else-if="p.is_active" class="text-warning">与当前生产不同，请重新发布</span>
             <span class="prompt-score font-jet" v-if="p.eval_count > 0">均分: {{ p.avg_score?.toFixed(1) }}/25</span>
           </div>
           <p class="prompt-changelog" v-if="p.changelog">{{ p.changelog }}</p>
           <div class="prompt-actions">
-            <button v-if="!p.is_active" class="btn-primary btn-sm" @click="activatePrompt(p)">激活</button>
-            <button v-if="!p.is_active" class="btn-secondary btn-sm" @click="doComparePrompt(p)">A/B 对比</button>
+            <button v-if="!p.is_current" class="btn-primary btn-sm" @click="confirmAction('发布 Prompt', `将 ${p.agent_type} 的 ${p.version} 发布到实际 Agent 配置？`, () => activatePrompt(p))">激活</button>
+            <button v-if="!p.is_current" class="btn-secondary btn-sm" @click="confirmAction('A/B 评测', '使用相同类型用例实际运行两个 Prompt 版本并评分？', () => doComparePrompt(p))" :disabled="compareState === 'running' || compareState === 'submitting'">A/B 对比</button>
           </div>
         </div>
       </div>
       <!-- A/B 对比结果 -->
       <div v-if="abResult" class="ab-result card editorial-card">
         <h4 class="editorial-title">A/B 对比结果</h4>
+        <p class="text-muted">有效配对 {{ abResult.paired_count }}，失败或跳过 {{ abResult.failed_pairs }}。本地输入已核验一致，外部实时数据可能变化。</p>
         <div class="ab-scores">
           <div class="ab-side">
             <span class="ab-label terminal-label">当前版本 ({{ abResult.active_version }})</span>
@@ -899,7 +894,7 @@ onUnmounted(() => {
     <div v-if="activeTab === 'daily'" class="tab-content">
       <div class="section-header">
         <div class="section-actions">
-          <button class="btn-secondary btn-sm" @click="doTriggerDailyEval" :disabled="dailyRunning">
+          <button class="btn-secondary btn-sm" @click="confirmAction('每日评测', '抽取活跃用例执行每日评测？', doTriggerDailyEval)" :disabled="dailyRunning">
             {{ dailyRunning ? '评测中...' : '▶ 手动触发每日评测' }}
           </button>
         </div>

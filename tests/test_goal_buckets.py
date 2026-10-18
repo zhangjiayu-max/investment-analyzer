@@ -113,23 +113,26 @@ class GoalBucketTests(unittest.TestCase):
         )
 
         self.assertEqual(create_response.status_code, 200)
-        bucket_id = create_response.json()["id"]
+        self.assertEqual(create_response.json()["code"], 0)
+        bucket_id = create_response.json()["data"]["id"]
 
         list_response = client.get("/api/profile/buckets")
         self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(list_response.json()["items"][0]["name"], "机会资金")
-        self.assertEqual(list_response.json()["summary"]["count"], 1)
+        self.assertEqual(list_response.json()["data"]["items"][0]["name"], "机会资金")
+        self.assertEqual(list_response.json()["data"]["summary"]["count"], 1)
 
         update_response = client.put(
             f"/api/profile/buckets/{bucket_id}",
             json={"current_amount": 22000, "notes": "低估时分三笔"},
         )
         self.assertEqual(update_response.status_code, 200)
-        self.assertEqual(update_response.json()["item"]["current_amount"], 22000.0)
+        self.assertEqual(update_response.json()["data"]["item"]["current_amount"], 22000.0)
 
         delete_response = client.delete(f"/api/profile/buckets/{bucket_id}")
         self.assertEqual(delete_response.status_code, 200)
-        self.assertTrue(delete_response.json()["ok"])
+        self.assertEqual(delete_response.json()["code"], 0)
+        self.assertIsNone(delete_response.json()["data"])
+        self.assertEqual(client.get("/api/profile/buckets").json()["data"]["items"], [])
 
 
 if __name__ == "__main__":

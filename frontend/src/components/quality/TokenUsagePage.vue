@@ -39,6 +39,12 @@ const tabLoaded = ref({ overview: false, details: false, perf: false, trace: fal
 
 // ── 数据状态 ──
 const loading = ref(true)
+const error = ref('')
+const clearing = ref(false)
+let overviewRequest = 0
+let recordsRequest = 0
+let perfRequest = 0
+let traceRequest = 0
 const summary = ref({ today: {}, total_calls: 0, total_tokens: 0, avg_per_call: 0 })
 const daily = ref([])
 const byCaller = ref([])
@@ -62,6 +68,7 @@ const detailModel = ref('')
 
 // ── B2：全局时间范围选择器 ──
 const globalDays = ref(7)
+const rangeLabel = computed(() => globalDays.value === 1 ? '今日' : `近 ${globalDays.value} 天`)
 
 // ── Trace 查询 ──
 const traceInput = ref('')
@@ -141,11 +148,13 @@ function stopPolling() {
 
 // ── 数据加载 ──
 async function loadOverviewData() {
+  const request = ++overviewRequest
   loading.value = true
+  error.value = ''
   try {
     // B2 修复：各板块统一使用 globalDays 时间窗口
     const d = globalDays.value
-    const [r1, r2, r3, r4, r5, r6, r7, r8] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
       getTokenUsageSummary(d),
       getTokenUsageDaily(d),
       getTokenUsageByCaller(d),
@@ -153,8 +162,8 @@ async function loadOverviewData() {
       getTokenUsageCost(d),
       getTokenUsageHourly(),
       getTokenUsageBudget(),
-      getPerformanceStats(d),
     ])
+    if (request !== overviewRequest) return
     summary.value = r1.data
     daily.value = r2.data.items || []
     byCaller.value = r3.data.items || []
@@ -162,19 +171,20 @@ async function loadOverviewData() {
     costData.value = r5.data
     hourly.value = r6.data.items || []
     budgetData.value = r7.data
-    perfStats.value = r8.data
+    tabLoaded.value.overview = true
   } catch (e) {
-    console.error('Failed to load overview data:', e)
+    if (request === overviewRequest) error.value = '用量加载失败：' + e.message
   } finally {
-    loading.value = false
+    if (request === overviewRequest) loading.value = false
   }
 }
 
 // B2：全局时间范围切换时重新加载所有数据
 function loadAllData() {
   loadOverviewData()
-  if (tabLoaded.value.details) {
-    detailDays.value = globalDays.value
+  const changed = detailDays.value !== globalDays.value
+  detailDays.value = globalDays.value
+  if (tabLoaded.value.details && !changed) {
     page.value = 1
     loadRecords()
   }
@@ -182,26 +192,31 @@ function loadAllData() {
 }
 
 async function loadRecords() {
+  const request = ++recordsRequest
   try {
     // B1 修复：传入 caller/model 筛选参数，让下拉框真正生效
     const { data } = await getTokenUsageRecent(page.value, pageSize, detailDays.value, detailCaller.value, detailModel.value)
+    if (request !== recordsRequest) return
     records.value = data.records || []
     total.value = data.total || 0
   } catch (e) {
-    console.error('Failed to load records:', e)
+    if (request === recordsRequest) error.value = '明细加载失败：' + e.message
   }
 }
 
 async function loadPerfData() {
+  const request = ++perfRequest
+  const days = globalDays.value
   try {
     const [r1, r2] = await Promise.all([
-      getPerformanceStats(7),
-      getPerformanceByAgent(7),
+      getPerformanceStats(days),
+      getPerformanceByAgent(days),
     ])
+    if (request !== perfRequest) return
     perfStats.value = r1.data
     perfByAgent.value = r2.data.items || []
   } catch (e) {
-    console.error('Failed to load perf data:', e)
+    if (request === perfRequest) error.value = '性能加载失败：' + e.message
   }
 }
 
@@ -217,7 +232,8 @@ function switchTab(tab) {
     loadOverviewData()
     tabLoaded.value.overview = true
   } else if (tab === 'details' && !tabLoaded.value.details) {
-    loadRecords()
+    if (detailDays.value !== globalDays.value) detailDays.value = globalDays.value
+    else loadRecords()
     tabLoaded.value.details = true
   } else if (tab === 'perf' && !tabLoaded.value.perf) {
     loadPerfData()
@@ -228,17 +244,21 @@ function switchTab(tab) {
 // ── Trace 查询 ──
 async function searchTrace() {
   if (!traceInput.value.trim()) return
+  const request = ++traceRequest
+  error.value = ''
   traceLoading.value = true
   traceResult.value = null
   try {
     const { data } = await getTokenUsageTrace(traceInput.value.trim())
     // 后端返回聚合结构：{ trace_id, token_usage, tool_audit_logs, agent_runs, rag_logs }
-    traceResult.value = data || null
+    if (request === traceRequest) traceResult.value = data || null
   } catch (e) {
-    console.error('Failed to load trace:', e)
-    traceResult.value = null
+    if (request === traceRequest) {
+      error.value = '链路加载失败：' + e.message
+      traceResult.value = null
+    }
   } finally {
-    traceLoading.value = false
+    if (request === traceRequest) traceLoading.value = false
   }
 }
 
@@ -310,20 +330,14 @@ function hourlyLabel(tokens) {
   return (tokens / 1000).toFixed(1) + 'K'
 }
 
-// 今日费用
-const todayCost = computed(() => {
-  let cost = 0
-  for (const r of records.value) {
-    cost += calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0)
-  }
-  return cost
-})
+// 今日费用独立于明细分页。
+const todayCost = computed(() => costData.value.today_cost || 0)
 
 // 本周费用
-const weekCost = computed(() => costData.value.total_cost || 0)
+const weekCost = computed(() => costData.value.week_cost || 0)
 
-// 本月费用估算（按周费用 * 4.3）
-const monthCost = computed(() => (costData.value.total_cost || 0) * 4.3)
+// 本月实际累计费用（服务端按自然月聚合）。
+const monthCost = computed(() => costData.value.month_cost || 0)
 
 // Trace 汇总（聚合 token_usage + tool_audit_logs + agent_runs + rag_logs）
 const traceSummary = computed(() => {
@@ -451,13 +465,23 @@ function confirmClearTokenUsage() {
     message: '确定要清空所有 Token 用量记录吗？此操作不可撤销。',
     danger: true,
     onConfirm: async () => {
-      confirm.value.visible = false
+      if (clearing.value) return
+      clearing.value = true
+      error.value = ''
       try {
-        await clearTokenUsage()
+        const { data } = await clearTokenUsage()
+        if (data.ok === false) throw new Error(data.message || '清空失败')
+        records.value = []
+        total.value = 0
+        traceResult.value = null
         tabLoaded.value = { overview: false, details: false, perf: false, trace: false }
-        loadOverviewData()
+        await loadOverviewData()
+        if (activeTab.value === 'details') await loadRecords()
       } catch (e) {
-        console.error('Failed to clear token usage:', e)
+        error.value = '清空失败：' + e.message
+      } finally {
+        clearing.value = false
+        confirm.value.visible = false
       }
     }
   }
@@ -547,7 +571,7 @@ function expandGroup(group) {
         </select>
       </div>
       <div style="display: flex; gap: 0.5rem; margin-left: auto;">
-        <button class="btn-outline btn-sm" @click="loadOverviewData" :disabled="loading">
+        <button class="btn-outline btn-sm" @click="loadAllData" :disabled="loading || clearing">
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
           刷新
         </button>
@@ -556,12 +580,14 @@ function expandGroup(group) {
         </button>
       </div>
     </div>
+    <p v-if="error" role="alert" style="color: var(--color-danger)">{{ error }}</p>
 
     <ConfirmDialog
       :visible="confirm.visible"
       :title="confirm.title"
       :message="confirm.message"
       :danger="confirm.danger"
+      :loading="clearing"
       @confirm="confirm.onConfirm"
       @cancel="confirm.visible = false"
     />
@@ -608,7 +634,7 @@ function expandGroup(group) {
         <div class="cost-row">
           <span class="cost-item terminal-label">今日 <strong class="font-jet">{{ formatCost(todayCost) }}</strong></span>
           <span class="cost-item terminal-label">本周(7d) <strong class="font-jet">{{ formatCost(weekCost) }}</strong></span>
-          <span class="cost-item terminal-label">本月(估) <strong class="font-jet">{{ formatCost(monthCost) }}</strong></span>
+          <span class="cost-item terminal-label">本月累计 <strong class="font-jet">{{ formatCost(monthCost) }}</strong></span>
         </div>
       </div>
     </div>
@@ -657,12 +683,12 @@ function expandGroup(group) {
             <div class="summary-sub terminal-label">tokens / call</div>
           </div>
           <div class="summary-card editorial-card reveal-stagger">
-            <div class="summary-label terminal-label">近 30 天累计</div>
+            <div class="summary-label terminal-label">{{ rangeLabel }}累计</div>
             <div class="summary-value font-jet-lg">{{ (summary.total_tokens || 0).toLocaleString() }}</div>
             <div class="summary-sub terminal-label">tokens</div>
           </div>
           <div class="summary-card editorial-card reveal-stagger">
-            <div class="summary-label terminal-label">近 7 天费用</div>
+            <div class="summary-label terminal-label">{{ rangeLabel }}费用</div>
             <div class="summary-value font-jet-lg num-gold">{{ formatCost(costData.total_cost || 0) }}</div>
             <div class="summary-sub terminal-label">CNY</div>
           </div>
@@ -671,7 +697,7 @@ function expandGroup(group) {
         <!-- 近 30 天双色堆叠柱状图 -->
         <div class="card chart-card editorial-card">
           <div class="chart-header editorial-card-header">
-            <h4 class="chart-title title">近 30 天趋势</h4>
+            <h4 class="chart-title title">{{ rangeLabel }}趋势</h4>
             <div class="chart-legend meta">
               <span class="legend-item"><span class="legend-dot" style="background: var(--color-primary-600)"></span> Prompt tokens</span>
               <span class="legend-item"><span class="legend-dot" style="background: rgba(59, 130, 246, 0.4)"></span> Completion tokens</span>
@@ -706,7 +732,7 @@ function expandGroup(group) {
           <div class="card chart-card editorial-card">
             <div class="editorial-card-header">
               <h4 class="chart-title title">按调用方分布</h4>
-              <span class="meta">近 7 天</span>
+              <span class="meta">{{ rangeLabel }}</span>
             </div>
             <div v-if="byCaller.length === 0" class="chart-empty">暂无数据</div>
             <div v-else class="caller-list">
@@ -727,7 +753,7 @@ function expandGroup(group) {
           <div class="card chart-card editorial-card">
             <div class="editorial-card-header">
               <h4 class="chart-title title">按模型分布</h4>
-              <span class="meta">近 7 天</span>
+              <span class="meta">{{ rangeLabel }}</span>
             </div>
             <div v-if="byModel.length === 0" class="chart-empty">暂无数据</div>
             <div v-else class="model-list">
@@ -903,7 +929,7 @@ function expandGroup(group) {
       <div class="card perf-section editorial-card">
         <div class="editorial-card-header">
           <h4 class="chart-title title">Agent 性能监控</h4>
-          <span class="meta">近 7 天</span>
+          <span class="meta">{{ rangeLabel }}</span>
         </div>
 
         <!-- 性能概览 -->

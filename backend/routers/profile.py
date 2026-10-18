@@ -7,7 +7,7 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent.kyc import (
     get_kyc_questionnaire, get_kyc_profile, submit_kyc_answers,
@@ -51,8 +51,8 @@ class ProfileUpdateRequest(BaseModel):
     preferences_json: str | None = None
     feedback_summary: str | None = None
     # 个人财务画像 2.0
-    monthly_income: float | None = None
-    monthly_expense: float | None = None
+    monthly_income: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    monthly_expense: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     monthly_surplus: float | None = None
     emergency_fund_months: float | None = None
     target_equity_ratio: float | None = None

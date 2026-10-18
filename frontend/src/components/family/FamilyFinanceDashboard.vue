@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, ref } from 'vue'
 import { getFinanceDashboard, getFinanceTrend } from '../../api'
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import LineChart from '../charts/LineChart.vue'
 import ExpenseManager from './ExpenseManager.vue'
+import HouseholdCashflowCard from './HouseholdCashflowCard.vue'
 
 const { showToast } = useToast()
 
@@ -13,9 +14,12 @@ const data = ref(null)
 const trend = ref(null)
 const trendLoading = ref(false)
 const expenseOpen = ref(false)
+let dashboardSequence = 0
+let trendSequence = 0
+let activatedBefore = false
 
 const nw = computed(() => data.value?.net_worth || {})
-const cf = computed(() => data.value?.cash_flow || {})
+const cf = computed(() => data.value?.cash_flow || null)
 const debt = computed(() => data.value?.debt || {})
 const goals = computed(() => data.value?.goals || {})
 const alloc = computed(() => data.value?.allocation || {})
@@ -26,7 +30,7 @@ function money(value) {
   return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 function pct(value) {
-  return `${(Number(value || 0) * 100).toFixed(1)}%`
+  return value == null ? '待确认' : `${(Number(value) * 100).toFixed(1)}%`
 }
 function pnlClass(value) {
   return Number(value) >= 0 ? 'positive' : 'negative'
@@ -39,28 +43,33 @@ function progressColor(pct) {
 }
 
 async function load() {
+  const sequence = ++dashboardSequence
   loading.value = true
   try {
     const { data: res } = await getFinanceDashboard()
+    if (sequence !== dashboardSequence) return
     data.value = res
   } catch (e) {
+    if (sequence !== dashboardSequence) return
+    data.value = null
     showToast('加载财务总览失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
-    loading.value = false
+    if (sequence === dashboardSequence) loading.value = false
   }
   // 异步加载趋势
-  loadTrend()
+  if (sequence === dashboardSequence) loadTrend()
 }
 
 async function loadTrend() {
+  const sequence = ++trendSequence
   trendLoading.value = true
   try {
     const { data: res } = await getFinanceTrend(12)
-    trend.value = res
+    if (sequence === trendSequence) trend.value = res
   } catch (e) {
     console.error('加载趋势失败:', e)
   } finally {
-    trendLoading.value = false
+    if (sequence === trendSequence) trendLoading.value = false
   }
 }
 
@@ -85,6 +94,9 @@ const trendSeries = computed(() => {
 })
 
 onMounted(load)
+onActivated(() => { if (activatedBefore) load(); activatedBefore = true })
+onDeactivated(() => { ++dashboardSequence; ++trendSequence })
+onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
 </script>
 
 <template>
@@ -120,11 +132,11 @@ onMounted(load)
 
       <!-- 六大模块 -->
       <div class="dashboard-grid">
-        <!-- 1. 净值总览 -->
+        <!-- 1. 资产总览 -->
         <section class="card net-worth-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="wallet" size="18" />
-            <h3 class="title"><span class="term-with-tip">净值总览<span class="term-tip">家庭总资产减去负债后的净值，含持仓浮盈亏与收益率趋势</span></span></h3>
+            <h3 class="title"><span class="term-with-tip">资产总览<span class="term-tip">已登记现金与基金资产汇总；负债余额未完整登记，不能据此确认家庭净资产</span></span></h3>
           </div>
           <div class="card-body">
             <div class="hero-metric">
@@ -156,48 +168,19 @@ onMounted(load)
           </div>
         </section>
 
-        <!-- 2. 现金流 -->
-        <section class="card cashflow-card reveal-stagger editorial-card">
-          <div class="card-head editorial-card-header">
-            <Icon name="trending-up" size="18" />
-            <h3 class="title"><span class="term-with-tip">现金流<span class="term-tip">月度收入支出情况，含月结余、结余率与备用金覆盖月数</span></span></h3>
-          </div>
-          <div class="card-body">
-            <div class="metric-grid three-col">
-              <div class="metric-item">
-                <span class="terminal-label">月收入</span>
-                <strong class="font-jet">¥{{ money(cf.monthly_income) }}</strong>
-              </div>
-              <div class="metric-item">
-                <span class="terminal-label">月支出</span>
-                <strong class="font-jet">¥{{ money(cf.monthly_expense) }}</strong>
-                <small class="cashflow-source">{{ cf.expense_source === 'records' ? '本月已记录' : '画像估算' }}</small>
-              </div>
-              <div class="metric-item">
-                <span class="terminal-label">月结余</span>
-                <strong class="font-jet" :class="pnlClass(cf.monthly_surplus)">¥{{ money(cf.monthly_surplus) }}</strong>
-              </div>
-              <div class="metric-item">
-                <span class="terminal-label">结余率</span>
-                <strong class="font-jet">{{ pct(cf.surplus_rate) }}</strong>
-              </div>
-              <div class="metric-item">
-                <span class="terminal-label">备用金覆盖</span>
-                <strong class="font-jet">{{ cf.emergency_fund_months || '-' }} 个月</strong>
-              </div>
-            </div>
-          </div>
-        </section>
+        <!-- 2. 现金流：与资金桶、健康诊断共用相同口径 -->
+        <HouseholdCashflowCard :cashflow="cf" />
 
         <!-- 3. 负债 -->
         <section class="card debt-card reveal-stagger editorial-card">
           <div class="card-head editorial-card-header">
             <Icon name="credit-card" size="18" />
-            <h3 class="title"><span class="term-with-tip">负债<span class="term-tip">当前负债余额与负债收入比，反映家庭杠杆水平</span></span></h3>
+            <h3 class="title"><span class="term-with-tip">负债<span class="term-tip">已登记月供与收入的比例；月供不能推算贷款本金，负债余额待录入</span></span></h3>
           </div>
           <div class="card-body">
-            <div v-if="debt.debt_summary" class="debt-summary">{{ debt.debt_summary }}</div>
-            <div v-else class="no-data">暂无负债信息</div>
+            <div v-if="debt.liabilities_status === 'unknown' || data.household_diagnosis?.liabilities_status === 'unknown'" class="debt-summary">负债余额未录入，当前未知；月供仅反映现金支出。</div>
+            <div v-else-if="debt.debt_summary" class="debt-summary">{{ debt.debt_summary }}</div>
+            <div v-else class="no-data">负债余额未录入，当前未知</div>
             <div class="metric-grid two-col">
               <div class="metric-item">
                 <span class="terminal-label">月供</span>
@@ -357,6 +340,7 @@ onMounted(load)
         </div>
       </section>
     </template>
+    <HouseholdCashflowCard v-if="!loading && !data" :cashflow="null" />
     <ExpenseManager v-model:open="expenseOpen" @updated="load" />
   </div>
 </template>

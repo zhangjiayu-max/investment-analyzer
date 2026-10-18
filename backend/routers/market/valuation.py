@@ -12,7 +12,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 
-from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, LIUYI_IMAGES_DIR
 from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
     list_valuation_indexes, list_index_freshness, get_index_info, save_index_info,
@@ -28,6 +27,7 @@ from services.image_parser import DDImageParser, LiuyiImageParser
 logger = logging.getLogger(__name__)
 from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest, ParseDDBatchRequest
 from services.valuation_parser import parse_single_valuation
+from services.valuation.image_paths import resolve_valuation_image, valuation_image_location
 
 router = APIRouter(prefix="/api/valuation", tags=["valuation"])
 
@@ -67,16 +67,8 @@ async def parse_valuation_batch(req: ParseBatchRequest):
 @router.post("/parse-dd")
 async def parse_dd_image(req: ParseDDRequest):
     """解析螺丝钉估值表图片（多指数表格数据）。"""
-    img_path = Path(req.path)
-    if not img_path.is_absolute():
-        for base in [DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-            candidate = base / img_path
-            if candidate.exists():
-                img_path = candidate
-                break
-        else:
-            img_path = DD_IMAGES_DIR / req.path
-    if not req.path or not img_path.exists():
+    img_path = resolve_valuation_image(req.path, "dd_images")
+    if not req.path or not img_path.is_file():
         raise HTTPException(400, f"图片路径无效: {img_path}")
 
     dd_parser = DDImageParser(model_type=req.model_type)
@@ -86,11 +78,7 @@ async def parse_dd_image(req: ParseDDRequest):
     # 解析成功后持久化到数据库
     if result.get("ok"):
         # 计算相对路径
-        try:
-            rel_path = f"data/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
-        except ValueError:
-            rel_path = f"data/dd_images/{req.path}"
-        image_url = f"/static/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
+        rel_path, image_url = valuation_image_location(img_path)
         dd_id = save_dd_valuation(result, rel_path, image_url)
         result["dd_id"] = dd_id
 
@@ -102,23 +90,15 @@ async def parse_dd_image(req: ParseDDRequest):
 @router.post("/parse-dd-async")
 async def parse_dd_image_async(req: ParseDDRequest):
     """异步解析螺丝钉估值表图片。立即返回 task_id，后台执行解析。"""
-    img_path = Path(req.path)
-    if not img_path.is_absolute():
-        for base in [DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-            candidate = base / img_path
-            if candidate.exists():
-                img_path = candidate
-                break
-        else:
-            img_path = DD_IMAGES_DIR / req.path
-    if not req.path or not img_path.exists():
+    img_path = resolve_valuation_image(req.path, "dd_images")
+    if not req.path or not img_path.is_file():
         raise HTTPException(400, f"图片路径无效: {img_path}")
 
     str_path = str(img_path)
 
     # 去重：检查是否已有正在运行的任务
     from db.dd_tasks import find_running_task, create_dd_parse_task
-    existing = find_running_task(str_path)
+    existing = find_running_task(str_path, parse_type="dd")
     if existing:
         return {"task_id": existing["id"], "status": existing["status"], "dedup": True}
 
@@ -149,26 +129,17 @@ async def parse_dd_batch_async(req: ParseDDBatchRequest):
 
     tasks = []
     for path in req.paths:
-        img_path = Path(path)
-        if not img_path.is_absolute():
-            for base in [DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-                candidate = base / img_path
-                if candidate.exists():
-                    img_path = candidate
-                    break
-            else:
-                img_path = DD_IMAGES_DIR / path
-
+        img_path = resolve_valuation_image(path, "dd_images")
         str_path = str(img_path)
         name = Path(path).name
 
         # 去重
-        existing = find_running_task(str_path)
+        existing = find_running_task(str_path, parse_type="dd")
         if existing:
             tasks.append({"task_id": existing["id"], "image_path": str_path, "status": existing["status"], "dedup": True})
             continue
 
-        if not img_path.exists():
+        if not path or not img_path.is_file():
             tasks.append({"task_id": None, "image_path": str_path, "status": "error", "error": "文件不存在"})
             continue
 
@@ -184,22 +155,8 @@ async def parse_dd_batch_async(req: ParseDDBatchRequest):
 @router.post("/parse-liuyi")
 async def parse_liuyi_image(req: ParseDDRequest):
     """解析六亿估值表图片（多指数表格数据，格式与螺丝钉一致）。"""
-    from config import ROOT
-    img_path = Path(req.path)
-    if not img_path.is_absolute():
-        # 兼容 DB 中存储的 "data/liuyi_images/..." 完整相对路径
-        root_candidate = ROOT / req.path
-        if root_candidate.exists():
-            img_path = root_candidate
-        else:
-            for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-                candidate = base / img_path
-                if candidate.exists():
-                    img_path = candidate
-                    break
-            else:
-                img_path = LIUYI_IMAGES_DIR / req.path
-    if not req.path or not img_path.exists():
+    img_path = resolve_valuation_image(req.path, "liuyi_images")
+    if not req.path or not img_path.is_file():
         raise HTTPException(400, f"图片路径无效: {img_path}")
 
     liuyi_parser = LiuyiImageParser(model_type=req.model_type)
@@ -207,11 +164,7 @@ async def parse_liuyi_image(req: ParseDDRequest):
     result["source_path"] = str(img_path)
 
     if result.get("ok"):
-        try:
-            rel_path = f"data/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
-        except ValueError:
-            rel_path = f"data/liuyi_images/{req.path}"
-        image_url = f"/static/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
+        rel_path, image_url = valuation_image_location(img_path)
         liuyi_id = save_liuyi_valuation(result, rel_path, image_url)
         result["liuyi_id"] = liuyi_id
 
@@ -221,22 +174,14 @@ async def parse_liuyi_image(req: ParseDDRequest):
 @router.post("/parse-liuyi-async")
 async def parse_liuyi_image_async(req: ParseDDRequest):
     """异步解析六亿估值表图片。立即返回 task_id，后台执行解析。"""
-    img_path = Path(req.path)
-    if not img_path.is_absolute():
-        for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-            candidate = base / img_path
-            if candidate.exists():
-                img_path = candidate
-                break
-        else:
-            img_path = LIUYI_IMAGES_DIR / req.path
-    if not req.path or not img_path.exists():
+    img_path = resolve_valuation_image(req.path, "liuyi_images")
+    if not req.path or not img_path.is_file():
         raise HTTPException(400, f"图片路径无效: {img_path}")
 
     str_path = str(img_path)
 
     from db.dd_tasks import find_running_task, create_dd_parse_task
-    existing = find_running_task(str_path)
+    existing = find_running_task(str_path, parse_type="liuyi")
     if existing:
         return {"task_id": existing["id"], "status": existing["status"], "dedup": True}
 
@@ -256,25 +201,16 @@ async def parse_liuyi_batch_async(req: ParseDDBatchRequest):
 
     tasks = []
     for path in req.paths:
-        img_path = Path(path)
-        if not img_path.is_absolute():
-            for base in [LIUYI_IMAGES_DIR, DD_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-                candidate = base / img_path
-                if candidate.exists():
-                    img_path = candidate
-                    break
-            else:
-                img_path = LIUYI_IMAGES_DIR / path
-
+        img_path = resolve_valuation_image(path, "liuyi_images")
         str_path = str(img_path)
         name = Path(path).name
 
-        existing = find_running_task(str_path)
+        existing = find_running_task(str_path, parse_type="liuyi")
         if existing:
             tasks.append({"task_id": existing["id"], "image_path": str_path, "status": existing["status"], "dedup": True})
             continue
 
-        if not img_path.exists():
+        if not path or not img_path.is_file():
             tasks.append({"task_id": None, "image_path": str_path, "status": "error", "error": "文件不存在"})
             continue
 
@@ -396,15 +332,6 @@ async def list_dd_valuations_api():
     return {"records": list_dd_valuations()}
 
 
-@router.get("/dd/{dd_id}")
-async def get_dd_valuation_api(dd_id: int):
-    """获取单条螺丝钉估值记录详情。"""
-    record = get_dd_valuation(dd_id)
-    if not record:
-        raise HTTPException(404, "记录不存在")
-    return record
-
-
 @router.get("/dd/indexes")
 async def get_dd_indexes(dd_id: int = None):
     """获取螺丝钉估值表中的指数列表。
@@ -420,7 +347,7 @@ async def get_dd_indexes(dd_id: int = None):
     else:
         # 获取最新记录
         records = list_dd_valuations()
-        record = records[0] if records else None
+        record = get_dd_valuation(records[0]["id"]) if records else None
 
     if not record:
         raise HTTPException(404, "未找到螺丝钉估值记录")
@@ -442,6 +369,15 @@ async def get_dd_indexes(dd_id: int = None):
         "image_url": record.get("image_url"),
         "indexes": parsed_data.get("data", []) if parsed_data else [],
     }
+
+
+@router.get("/dd/{dd_id}")
+async def get_dd_valuation_api(dd_id: int):
+    """获取单条螺丝钉估值记录详情。"""
+    record = get_dd_valuation(dd_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    return record
 
 
 # ── 统一查询 ──────────────────────────────────────
@@ -605,321 +541,13 @@ def _pick_best_metric_for_index(conn, index_code: str) -> str | None:
 
 
 def _scan_super_value_impl(min_score: float = 40, top_n: int | None = None) -> dict:
-    """超性价比扫描核心逻辑（从 get_super_value_indexes 抽取，供工具/HTTP 共用）。
-
-    评分维度：
-    - 当前估值水位（30分）：percentile 越低越好
-    - 连续下跌期数（25分）：连续 N 期 percentile 下降
-    - 近期跌幅（20分）：最近 7 期 percentile 降幅
-    - Z-score 偏离（15分）：zscore 越低越低估
-    - 趋势加速（10分）：近期跌幅 > 前期跌幅
-
-    Args:
-        min_score: 最低分数阈值，低于此值的指数不返回（默认40）
-        top_n: 只返回前 N 个候选（None=全部）
-
-    Returns:
-        {
-            "opportunities": [...],   # 按分数降序
-            "scan_time": "YYYY-MM-DD HH:MM",
-            "total_scanned": int,
-            "skipped_stale": int,
-            "stale_threshold_days": int,
-            "data_range": "date1 ~ date2"
-        }
-    """
-    from collections import defaultdict
+    """生成同口径候选快照；两个深度入口共享此服务。"""
+    from services.valuation.opportunity_screener import scan_snapshot
     conn = _get_conn()
-
-    # 拉所有指数代码，逐个挑选最合适的 metric_type
-    idx_rows = conn.execute("""
-        SELECT DISTINCT index_code FROM index_valuations WHERE percentile IS NOT NULL
-    """).fetchall()
-    index_metric_map = {}  # code -> metric_type
-    for r in idx_rows:
-        code = r["index_code"]
-        m = _pick_best_metric_for_index(conn, code)
-        if m:
-            index_metric_map[code] = m
-
-    if not index_metric_map:
+    try:
+        return scan_snapshot(conn, min_score, top_n, max_stale_days=SUPER_VALUE_MAX_STALE_DAYS)
+    finally:
         conn.close()
-        return {
-            "opportunities": [],
-            "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "total_scanned": 0,
-            "skipped_stale": 0,
-            "stale_threshold_days": SUPER_VALUE_MAX_STALE_DAYS,
-            "data_range": "无数据",
-        }
-
-    # 按挑选出的 metric_type 拉数据
-    # 同一指数只用一个数据源（螺丝钉 > 雷牛牛）
-    rows = conn.execute("""
-        SELECT index_code, index_name, snapshot_date, percentile, current_value, zscore,
-               source_image, metric_type,
-               CASE
-                 WHEN source_image LIKE '%dd_%' THEN 1  -- 螺丝钉优先
-                 ELSE 2  -- 雷牛牛
-               END as source_priority
-        FROM index_valuations
-        WHERE percentile IS NOT NULL
-        ORDER BY index_code, source_priority, snapshot_date
-    """).fetchall()
-    conn.close()
-
-    index_data = defaultdict(list)
-    index_source = {}      # code -> 数据源名
-    index_metric = {}      # code -> 实际使用的 metric_type（与 index_metric_map 一致）
-    for r in rows:
-        d = dict(r)
-        code = d["index_code"]
-        target_metric = index_metric_map.get(code)
-        if not target_metric or d["metric_type"] != target_metric:
-            continue
-        try:
-            d["percentile"] = float(d["percentile"]) if d["percentile"] is not None else None
-            d["current_value"] = float(d["current_value"]) if d["current_value"] is not None else None
-            d["zscore"] = float(d["zscore"]) if d["zscore"] is not None else None
-        except (ValueError, TypeError):
-            continue
-        if d["percentile"] is None:
-            continue
-        source = "螺丝钉" if "dd_" in (d.get("source_image") or "") else "雷牛牛"
-        if code not in index_source:
-            index_source[code] = source
-            index_metric[code] = target_metric
-        if index_source[code] == source:
-            index_data[code].append(d)
-
-    today = date.today()
-    opportunities = []
-    skipped_stale = 0
-
-    for code, records in index_data.items():
-        if len(records) < 3:
-            continue  # 数据太少，跳过
-
-        name = records[0]["index_name"]
-        latest = records[-1]
-        current_pct = latest["percentile"]
-        current_val = latest["current_value"]
-        zscore = latest.get("zscore")
-        metric_type = index_metric.get(code, "市盈率")
-
-        # 确保是数值类型
-        try:
-            current_pct = float(current_pct) if current_pct is not None else None
-            current_val = float(current_val) if current_val is not None else None
-            zscore = float(zscore) if zscore is not None else None
-        except (ValueError, TypeError):
-            continue
-
-        if current_pct is None:
-            continue
-
-        # 数据时效过滤：latest_date 距今 >10 天直接跳过
-        try:
-            latest_dt = datetime.strptime(latest["snapshot_date"], "%Y-%m-%d").date()
-            stale_days = (today - latest_dt).days
-        except (ValueError, TypeError):
-            stale_days = 999
-        if stale_days > SUPER_VALUE_MAX_STALE_DAYS:
-            skipped_stale += 1
-            continue
-
-        # ── 维度 1：当前估值水位（30分）──
-        if current_pct < 5:
-            score_valuation = 30
-            level = "极度低估"
-        elif current_pct < 10:
-            score_valuation = 27
-            level = "极度低估"
-        elif current_pct < 20:
-            score_valuation = 22
-            level = "低估"
-        elif current_pct < 30:
-            score_valuation = 16
-            level = "偏低"
-        elif current_pct < 50:
-            score_valuation = 8
-            level = "适中"
-        else:
-            score_valuation = 0
-            level = "偏高" if current_pct < 70 else "高估"
-
-        # ── 维度 2：连续下跌期数（25分）──
-        consecutive_drop = 0
-        for i in range(len(records) - 1, 0, -1):
-            if records[i]["percentile"] < records[i - 1]["percentile"]:
-                consecutive_drop += 1
-            else:
-                break
-
-        if consecutive_drop >= 6:
-            score_consecutive = 25
-        elif consecutive_drop >= 5:
-            score_consecutive = 22
-        elif consecutive_drop >= 4:
-            score_consecutive = 18
-        elif consecutive_drop >= 3:
-            score_consecutive = 14
-        elif consecutive_drop >= 2:
-            score_consecutive = 10
-        elif consecutive_drop >= 1:
-            score_consecutive = 5
-        else:
-            score_consecutive = 0
-
-        # ── 维度 3：近 7 期跌幅（20分）──
-        drop_7d = 0
-        if len(records) >= 7:
-            pct_7d_ago = records[-7]["percentile"]
-            drop_7d = pct_7d_ago - current_pct  # 正数表示下跌
-
-        if drop_7d > 15:
-            score_drop = 20
-        elif drop_7d > 10:
-            score_drop = 17
-        elif drop_7d > 5:
-            score_drop = 13
-        elif drop_7d > 3:
-            score_drop = 9
-        elif drop_7d > 1:
-            score_drop = 5
-        else:
-            score_drop = 0
-
-        # ── 维度 4：Z-score 偏离（15分）──
-        if zscore is not None:
-            if zscore < -2:
-                score_zscore = 15
-            elif zscore < -1.5:
-                score_zscore = 12
-            elif zscore < -1:
-                score_zscore = 9
-            elif zscore < -0.5:
-                score_zscore = 5
-            else:
-                score_zscore = 0
-        else:
-            score_zscore = 0
-
-        # ── 维度 5：趋势加速（10分）──
-        score_accel = 0
-        drop_trend = "平稳"
-        if len(records) >= 7:
-            recent_3d_avg = (records[-4]["percentile"] - current_pct) / 3 if len(records) >= 4 else 0
-            recent_7d_avg = drop_7d / 7
-            if recent_3d_avg > recent_7d_avg * 1.3 and recent_3d_avg > 0.5:
-                score_accel = 10
-                drop_trend = "加速下跌"
-            elif recent_3d_avg > recent_7d_avg and recent_3d_avg > 0.3:
-                score_accel = 6
-                drop_trend = "温和下跌"
-            elif recent_3d_avg > 0:
-                score_accel = 3
-                drop_trend = "缓慢下跌"
-            else:
-                drop_trend = "企稳"
-
-        # ── 总分 ──
-        total_score = score_valuation + score_consecutive + score_drop + score_zscore + score_accel
-
-        # 只保留达到阈值的
-        if total_score < min_score:
-            continue
-
-        # 计算「连续走低期数」对应的实际日期窗口
-        window_start_date = None
-        window_days = None
-        if consecutive_drop > 0:
-            start_idx = max(0, len(records) - 1 - consecutive_drop)
-            window_start_date = records[start_idx]["snapshot_date"]
-            try:
-                start_dt = datetime.strptime(window_start_date, "%Y-%m-%d").date()
-                end_dt = datetime.strptime(latest["snapshot_date"], "%Y-%m-%d").date()
-                window_days = (end_dt - start_dt).days
-            except (ValueError, TypeError):
-                window_days = None
-
-        # 标签
-        tags = []
-        if consecutive_drop >= 3:
-            tags.append(f"连续{consecutive_drop}期走低")
-        if current_pct < 10:
-            tags.append("极度低估")
-        if zscore is not None and zscore < -1:
-            tags.append(f"Z-score {zscore:+.2f}")
-        if drop_7d > 5:
-            tags.append(f"7期跌{drop_7d:.1f}%")
-        if drop_trend == "加速下跌":
-            tags.append("趋势加速")
-
-        # 摘要
-        metric_short = "PE" if metric_type == "市盈率" else ("PB" if metric_type == "市净率" else ("PS" if "市销率" in metric_type else "股息率"))
-        pct_str = f"{current_pct:.1f}%" if current_pct < 10 else f"{current_pct:.0f}%"
-        summary_parts = [f"{name} [{metric_short}] {latest.get('current_value', '')}，百分位 {pct_str}"]
-        if consecutive_drop > 0:
-            if window_days is not None and window_days > 0:
-                summary_parts.append(f"连续 {consecutive_drop} 期走低（{window_start_date}→{latest['snapshot_date']}，跨{window_days}天）")
-            else:
-                summary_parts.append(f"连续 {consecutive_drop} 期走低")
-        if zscore is not None and zscore < -0.5:
-            summary_parts.append(f"Z-score {zscore:+.2f}")
-        if drop_trend in ("加速下跌", "温和下跌"):
-            summary_parts.append(f"趋势{drop_trend}")
-
-        # 数据新鲜度标签
-        data_freshness = "fresh" if stale_days <= 3 else ("aging" if stale_days <= 7 else "stale")
-
-        opportunities.append({
-            "index_name": name,
-            "index_code": code,
-            "score": total_score,
-            "score_breakdown": {
-                "valuation": {"score": score_valuation, "max": 30, "detail": f"百分位{current_pct:.1f}% → {level}"},
-                "consecutive": {"score": score_consecutive, "max": 25, "detail": f"连续{consecutive_drop}期走低"},
-                "drop_7d": {"score": score_drop, "max": 20, "detail": f"7期跌幅{drop_7d:.1f}%"},
-                "zscore": {"score": score_zscore, "max": 15, "detail": f"Z-score {zscore:+.2f}" if zscore else "无数据"},
-                "acceleration": {"score": score_accel, "max": 10, "detail": drop_trend},
-            },
-            "current_percentile": round(current_pct, 2),
-            "current_value": current_val,
-            "zscore": round(zscore, 2) if zscore is not None else None,
-            "consecutive_drop_days": consecutive_drop,
-            "consecutive_window": {
-                "start_date": window_start_date,
-                "end_date": latest["snapshot_date"],
-                "span_days": window_days,
-            },
-            "drop_7d": round(drop_7d, 2) if drop_7d else 0,
-            "drop_trend": drop_trend,
-            "valuation_level": level,
-            "tags": tags,
-            "summary": "，".join(summary_parts),
-            "latest_date": latest["snapshot_date"],
-            "data_source": index_source.get(code, "未知"),
-            "data_points": len(records),
-            "metric_type": metric_type,
-            "metric_short": metric_short,
-            "data_freshness": data_freshness,
-            "stale_days": stale_days,
-        })
-
-    # 按分数降序排列
-    opportunities.sort(key=lambda x: x["score"], reverse=True)
-    if top_n is not None:
-        opportunities = opportunities[:top_n]
-
-    return {
-        "opportunities": opportunities,
-        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "total_scanned": len(index_data),
-        "skipped_stale": skipped_stale,
-        "stale_threshold_days": SUPER_VALUE_MAX_STALE_DAYS,
-        "data_range": f"{rows[0]['snapshot_date']} ~ {rows[-1]['snapshot_date']}" if rows else "无数据",
-    }
 
 
 @router.get("/super-value")
@@ -931,8 +559,7 @@ async def get_super_value_indexes():
       - 数据时效过滤：latest_date 距今 >10 天的指数直接跳过
       - 透出 metric_type 字段，前端标注 [PE]/[PB]
 
-    数据源优先级：螺丝钉(dd_valuations) > 雷牛牛(图片解析)
-    同一指数只用一个数据源，避免混用导致百分位不一致。
+    同机构同指标独立构建历史，优先最新可用序列；无分位数据只作覆盖参考。
     """
     return _scan_super_value_impl()
 
@@ -958,204 +585,98 @@ async def get_super_value_deep():
     # 1. 检查开关
     if not get_config_bool("agent.valuation_screener_enabled", False):
         # 开关关闭：降级返回纯规则评分（兼容前端）
-        return _scan_super_value_impl()
+        return {**_scan_super_value_impl(), "enabled": False, "status": "disabled",
+                "deep_analysis": [], "agent_meta": {"enabled": False, "status": "disabled",
+                "note": "估值机会筛选官已关闭，当前仅展示规则候选"}}
 
-    start_time = time.time()
-    top_n = get_config_int("agent.valuation_screener_top_n", 10)
-    online_threshold_days = get_config_int("agent.valuation_screener_online_threshold_days", 3)
-    tools_called = ["scan_super_value"]
-    online_counter = {"count": 0}  # 可变容器，供嵌套 async 函数修改
-
-    # 2. 规则评分筛选候选
-    scan_result = _scan_super_value_impl(min_score=40, top_n=top_n)
-    opportunities = scan_result.get("opportunities", [])
-    if not opportunities:
-        return {
-            **scan_result,
-            "deep_analysis": [],
-            "agent_meta": {
-                "agent_name": "估值机会筛选官",
-                "tools_called": tools_called,
-                "online_queries": 0,
-                "duration_ms": int((time.time() - start_time) * 1000),
-                "note": "无候选指数，跳过深度解读",
-            },
-        }
-
-    # 3. 对 top_n 候选补在线数据 + 预测信号（并行）
-    from db.valuations import fetch_online_valuation, normalize_index_code
+    from db import get_analysis_agent_by_name
+    from routers.analysis._agent_contract import require_analysis_agent, parse_analysis_response
+    from services.valuation.opportunity_screener import enrich_candidate, validate_interpretations
+    from db.valuations import fetch_online_valuation
     from services.valuation_forecast import mean_reversion_analysis, extreme_warning
 
-    async def _enrich_one(opp: dict) -> dict:
-        """为单个候选补在线数据 + 预测信号。"""
-        code = opp["index_code"]
-        metric_type = opp.get("metric_type", "市盈率")
-        enriched = {**opp}
+    try:
+        agent = require_analysis_agent("估值机会筛选官", get_analysis_agent_by_name)
+    except HTTPException:
+        # 部署尚未单独配置筛选官时，复用已有增强策略 Agent 的数据库提示词；不硬编码新 prompt。
+        agent = require_analysis_agent("增强策略分析师", get_analysis_agent_by_name)
+        agent = {**agent, "agent_name": "估值机会筛选官"}
+    start_time = time.time()
+    top_n = max(1, min(30, get_config_int("agent.valuation_screener_top_n", 10)))
+    online_threshold_days = get_config_int("agent.valuation_screener_online_threshold_days", 3)
+    scan_result = _scan_super_value_impl()
+    opportunities = scan_result["opportunities"]
+    tools_called = ["scan_super_value"]
+    if not opportunities:
+        return {**scan_result, "enabled": True, "status": "no_candidates", "deep_analysis": [],
+                "agent_meta": {"enabled": True, "status": "no_candidates", "note": "无候选指数，跳过深度解读"}}
 
-        # 3a. 在线补数据（仅库内数据过期时）
-        if opp.get("stale_days", 0) > online_threshold_days:
-            try:
-                normalized = normalize_index_code(code)
-                mt_online = "市盈率" if "市盈率" in metric_type else ("市净率" if "市净率" in metric_type else "市盈率")
-                online_data = await asyncio.to_thread(fetch_online_valuation, normalized, mt_online)
-                if online_data and online_data.get("current_value") is not None:
-                    enriched["online_pe"] = online_data.get("current_value")
-                    enriched["online_data_date"] = online_data.get("snapshot_date", "")
-                    enriched["online_source"] = online_data.get("source", "akshare")
-                    online_counter["count"] += 1
-            except Exception as e:
-                logger.debug(f"[super-value-deep] 在线补数据失败 {code}: {e}")
-                enriched["online_pe"] = None
-                enriched["online_data_date"] = ""
-        else:
-            enriched["online_pe"] = None
-            enriched["online_data_date"] = ""
-
-        # 3b. 预测信号
-        try:
-            mr = await asyncio.to_thread(mean_reversion_analysis, code, metric_type)
-            ew = await asyncio.to_thread(extreme_warning, code)
-            enriched["forecast_signal"] = ""
-            if mr and mr.get("signal"):
-                enriched["forecast_signal"] = mr["signal"]
-            elif ew and ew.get("signal"):
-                enriched["forecast_signal"] = ew["signal"]
-            enriched["mean_reversion"] = mr
-            enriched["extreme_warning"] = ew
-        except Exception as e:
-            logger.debug(f"[super-value-deep] 预测信号失败 {code}: {e}")
-            enriched["forecast_signal"] = ""
-            enriched["mean_reversion"] = None
-            enriched["extreme_warning"] = None
-
-        return enriched
-
-    # 并行 enrich（最多 top_n 个）
-    enriched_opps = await asyncio.gather(*[_enrich_one(o) for o in opportunities[:top_n]], return_exceptions=False)
-    tools_called.append("query_online_valuation")
-    tools_called.append("query_valuation_forecast")
-
-    # 4. LLM 综合解读
-    candidate_lines = []
-    for o in enriched_opps:
-        line = (
-            f"- {o['index_name']}({o['index_code']}): 规则评分{o['score']}, "
-            f"百分位{o.get('current_percentile', 'N/A')}%, Z-score{o.get('zscore', 'N/A')}, "
-            f"连续下跌{o.get('consecutive_drop_days', 0)}期, 7期跌幅{o.get('drop_7d', 0)}%, "
-            f"趋势{o.get('drop_trend', '未知')}, 数据源{o.get('data_source', '未知')}, "
-            f"数据新鲜度{o.get('data_freshness', 'unknown')}(距今{o.get('stale_days', 0)}天)"
-        )
-        if o.get("online_pe") is not None:
-            line += f"\n  在线最新: {o.get('metric_type', 'PE')}={o['online_pe']} (日期:{o.get('online_data_date', 'N/A')})"
-        if o.get("forecast_signal"):
-            line += f"\n  预测信号: {o['forecast_signal']}"
-        candidate_lines.append(line)
-    candidate_text = "\n".join(candidate_lines)
-
-    prompt = f"""你是估值机会筛选官，负责对超性价比指数做深度解读。
-
-## 工作流程
-你已收到规则评分候选列表（含在线补数据和预测信号），请综合判断每个指数的：
-1. 机会类型：真低估 / 价值陷阱 / 趋势性下行
-2. 催化剂：什么事件可能触发反弹（政策/业绩/资金轮动）
-3. 操作建议：立即买入 / 分批建仓 / 观望 / 回避
-4. 置信度：high / medium / low
-
-## 红线
-- 不可修改 rule_score（规则评分是客观基础）
-- 不可编造估值数据（在线查询失败时标注"数据缺失"并降低 confidence）
-- 不可对候选列表外的指数做解读
-
-## 输出格式（严格JSON，不要markdown代码块）
-{{
-  "deep_analysis": [
-    {{
-      "index_name": "指数名",
-      "index_code": "代码",
-      "rule_score": 85,
-      "online_pe": 15.2,
-      "online_data_date": "2026-08-03",
-      "forecast_signal": "均值回归",
-      "opportunity_type": "真低估",
-      "catalysts": ["催化剂1", "催化剂2"],
-      "action": "分批建仓",
-      "action_detail": "2-3句操作建议",
-      "confidence": "high"
-    }}
-  ],
-  "overall_summary": "整体市场低估情况概述"
-}}
-
-## 候选指数数据
-{candidate_text}
-
-请基于以上数据给出专业分析。"""
-
+    semaphore = asyncio.Semaphore(4)
+    async def enrich(opp):
+        async with semaphore:
+            return await enrich_candidate(opp, fetch_online_valuation, mean_reversion_analysis, extreme_warning,
+                                          online_threshold_days=online_threshold_days)
+    enriched = await asyncio.gather(*(enrich(o) for o in opportunities[:top_n]))
+    enrichment_map = {o["index_code"]: o for o in enriched}
+    full_opportunities = [enrichment_map.get(o["index_code"], o) for o in opportunities]
+    tools_called.extend(["query_online_valuation", "query_valuation_forecast"])
+    candidate_text = json.dumps({"snapshot_id": scan_result["snapshot_id"],
+        "as_of_date": scan_result["as_of_date"], "cutoff_date": scan_result["cutoff_date"],
+        "candidates": enriched}, ensure_ascii=False)
+    # 身份及投资分析原则来自 analysis_agents；这里只定义接口输出约束。
+    prompt = ("基于候选快照输出JSON，字段 deep_analysis 数组及 overall_summary 字符串。"
+              "仅解读候选；每项 index_code、opportunity_type(真低估/价值陷阱/趋势性下行)、"
+              "action(立即买入/分批建仓/观望/回避)、confidence(high/medium/low)、"
+              "catalysts(字符串数组)、action_detail(字符串)。"
+              "催化剂仅为未来条件假设，未核验前不得声称已发生或编造今日事件。"
+              "区分历史评分与在线核验，观测分位变化单位为百分点，不能当价格跌幅或保证收益。\n" + candidate_text)
     llm_start = time.time()
-    deep_analysis: list = []
-    overall_summary = ""
-    token_usage = 0
-    response = None
+    deep_analysis, overall_summary, warnings = [], "", []
+    token_usage, status, error = 0, "success", ""
+    trace_id = f"svd_{uuid.uuid4().hex[:12]}"
     try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(lambda: _call_llm(
-                caller="valuation_screener",
-                model=MODEL_AUX,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=get_config_float("llm.temperature_default", 0.3),
-                max_tokens=get_config_int("llm.max_tokens_report", 8192),
-            )),
-            timeout=120,
-        )
-        content = response.choices[0].message.content or "{}"
-        token_usage = response.usage.total_tokens if response.usage else 0
-        # 提取 JSON
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-        else:
-            parsed = json.loads(content)
-        deep_analysis = parsed.get("deep_analysis", [])
+        from db.agent_analysis_log import create_analysis_log
+        create_analysis_log(trace_id=trace_id, agent_id=agent["id"], agent_name="估值机会筛选官",
+            analysis_type="super_value_deep", source_table="index_valuations", source_id=None,
+            query=candidate_text[:300], input_summary=f"超性价比深度解读:{len(enriched)}只候选")
+    except Exception as exc:
+        logger.warning("创建深度分析日志失败: %s", exc)
+    try:
+        response = await asyncio.wait_for(asyncio.to_thread(lambda: _call_llm(
+            caller="valuation_screener", model=MODEL_AUX,
+            messages=[{"role": "system", "content": agent["system_prompt"]}, {"role": "user", "content": prompt}],
+            temperature=get_config_float("llm.temperature_default", 0.3),
+            max_tokens=get_config_int("llm.max_tokens_report", 8192))), timeout=120)
+        _, parsed = parse_analysis_response(response, "overall_summary", "deep_analysis")
+        deep_analysis, warnings = validate_interpretations(parsed.get("deep_analysis", []), enriched)
+        if not deep_analysis:
+            raise ValueError("模型未返回有效候选解读")
         overall_summary = parsed.get("overall_summary", "")
-    except Exception as e:
-        logger.warning(f"[super-value-deep] LLM 解读失败: {e}")
+        if not isinstance(overall_summary, str):
+            raise ValueError("overall_summary 必须是字符串")
+        token_usage = response.usage.total_tokens if response.usage else 0
+        if warnings:
+            status = "partial"
+    except Exception as exc:
+        logger.warning("[super-value-deep] LLM 解读失败: %s", exc)
+        status, error = "error", str(exc)
         deep_analysis = []
-        overall_summary = f"LLM 解读失败: {e}"
-
-    # 5. 记录分析日志
+        overall_summary = f"LLM 解读失败: {exc}"
     try:
-        from db.agent_analysis_log import create_analysis_log, complete_analysis_log
-        _trace_id = f"svd_{uuid.uuid4().hex[:12]}"
-        create_analysis_log(
-            trace_id=_trace_id, agent_id=None, agent_name="估值机会筛选官",
-            analysis_type="super_value_deep", source_table="index_valuations",
-            source_id=None, query=candidate_text[:300],
-            input_summary=f"超性价比深度解读:{len(enriched_opps)}只候选",
-        )
-        complete_analysis_log(
-            trace_id=_trace_id, status="success",
-            result_summary=overall_summary[:200] if overall_summary else f"解读{len(deep_analysis)}只",
-            token_usage=token_usage,
-            duration_ms=int((time.time() - llm_start) * 1000),
-        )
-    except Exception as _e:
-        logger.debug(f"[super-value-deep] 分析日志记录失败: {_e}")
-
-    duration_ms = int((time.time() - start_time) * 1000)
-
-    return {
-        **scan_result,
-        "opportunities": enriched_opps,
-        "deep_analysis": deep_analysis,
-        "overall_summary": overall_summary,
-        "agent_meta": {
-            "agent_name": "估值机会筛选官",
-            "tools_called": tools_called,
-            "online_queries": online_counter["count"],
-            "duration_ms": duration_ms,
-            "llm_duration_ms": int((time.time() - llm_start) * 1000),
-        },
-    }
+        from db.agent_analysis_log import complete_analysis_log
+        complete_analysis_log(trace_id=trace_id, status="done" if status == "success" else status,
+            token_usage=token_usage, duration_ms=int((time.time()-llm_start)*1000), error_msg=error or None)
+    except Exception as exc:
+        logger.warning("完成深度分析日志失败: %s", exc)
+    return {**scan_result, "opportunities": full_opportunities,
+            "enabled": True, "status": status, "error": error or None,
+            "deep_analysis": deep_analysis, "overall_summary": overall_summary,
+            "validation_warnings": warnings,
+            "agent_meta": {"agent_name": "估值机会筛选官", "enabled": True, "status": status,
+                "tools_called": tools_called, "analyzed_count": len(enriched),
+                "online_queries": sum(o["current_verification"]["status"] == "available" for o in enriched),
+                "duration_ms": int((time.time()-start_time)*1000),
+                "llm_duration_ms": int((time.time()-llm_start)*1000)}}
 
 
 @router.get("/enhanced-strategy")
@@ -1177,70 +698,11 @@ async def get_enhanced_strategy():
     agent_id = agent["id"]
     system_prompt = agent["system_prompt"]
 
-    conn = _get_conn()
-
-    # 1. 获取所有指数的估值数据
-    rows = conn.execute("""
-        SELECT index_code, index_name, snapshot_date, percentile, current_value, zscore,
-               source_image,
-               CASE WHEN source_image LIKE '%dd_%' THEN 1 ELSE 2 END as source_priority
-        FROM index_valuations
-        WHERE metric_type = '市盈率' AND percentile IS NOT NULL
-        ORDER BY index_code, source_priority, snapshot_date
-    """).fetchall()
-    conn.close()
-
-    # 按指数分组，同一指数只用优先级最高的数据源
-    from collections import defaultdict
-    index_data = defaultdict(list)
-    index_source = {}
-    for r in rows:
-        d = dict(r)
-        code = d["index_code"]
-        try:
-            d["percentile"] = float(d["percentile"]) if d["percentile"] is not None else None
-            d["current_value"] = float(d["current_value"]) if d["current_value"] is not None else None
-            d["zscore"] = float(d["zscore"]) if d["zscore"] is not None else None
-        except (ValueError, TypeError):
-            continue
-        if d["percentile"] is None:
-            continue
-        source = "螺丝钉" if "dd_" in (d.get("source_image") or "") else "雷牛牛"
-        if code not in index_source:
-            index_source[code] = source
-        if index_source[code] == source:
-            index_data[code].append(d)
-
-    # 2. 筛选出值得分析的指数（当前百分位 < 30% 或近期跌幅 > 5%）
-    candidates = []
-    for code, records in index_data.items():
-        if len(records) < 3:
-            continue
-        latest = records[-1]
-        pct = latest["percentile"]
-        if pct is None or pct >= 30:
-            continue
-        # 计算近期跌幅
-        drop_7d = 0
-        if len(records) >= 7:
-            drop_7d = records[-7]["percentile"] - pct
-        # 计算连续下跌天数
-        consecutive_drop = 0
-        for i in range(len(records) - 1, 0, -1):
-            if records[i]["percentile"] < records[i - 1]["percentile"]:
-                consecutive_drop += 1
-            else:
-                break
-        candidates.append({
-            "code": code,
-            "name": latest["index_name"],
-            "percentile": round(pct, 2),
-            "current_value": latest["current_value"],
-            "zscore": round(latest.get("zscore") or 0, 2),
-            "consecutive_drop": consecutive_drop,
-            "drop_7d": round(drop_7d, 2),
-            "data_source": index_source.get(code, ""),
-        })
+    scan_result = _scan_super_value_impl()
+    candidates = [{**c, "code": c["index_code"], "name": c["index_name"],
+                   "percentile": c["current_percentile"],
+                   "consecutive_drop": c["consecutive_drop_days"]}
+                  for c in scan_result["opportunities"]]
 
     # 2.5 为每个候选指数附加 PE/PB 背离预警和数据覆盖年限
     from services.valuation import check_pe_pb_divergence, get_index_history_years, get_history_years_warning
@@ -1266,16 +728,16 @@ async def get_enhanced_strategy():
             })
 
     if not candidates:
-        return {"strategies": [], "message": "当前没有明显低估的指数"}
+        return {**scan_result, "enabled": True, "strategies": [], "status": "no_candidates", "message": "当前没有达到规则阈值的低估候选"}
 
     # 3. 获取新闻和宏观数据（用于 LLM 判断催化剂）
     news_text = ""
     try:
         from mcp.yingmi_client import get_yingmi_client
         mcp = get_yingmi_client()
-        raw = await asyncio.to_thread(
+        raw = await asyncio.wait_for(asyncio.to_thread(
             lambda: mcp.call_tool("SearchFinancialNews", {"keyword": "A股 政策 板块", "pageSize": 5})
-        )
+        ), timeout=20)
         if isinstance(raw, dict):
             items = []
             for c in raw.get("content", []):
@@ -1283,7 +745,9 @@ async def get_enhanced_strategy():
                     parsed = json.loads(c["text"])
                     if parsed.get("success") and parsed.get("data", {}).get("items"):
                         for item in parsed["data"]["items"]:
-                            items.append(f"- {item.get('title', '')}: {item.get('summary', '')[:80]}")
+                            published = item.get("publish_time") or item.get("publishTime") or item.get("date") or item.get("time") or "日期缺失"
+                            url = item.get("url") or item.get("link") or "链接缺失"
+                            items.append(f"- {item.get('title', '')} ({published}, {url}): {item.get('summary', '')[:80]}")
             news_text = "\n".join(items[:5])
     except Exception:
         news_text = "暂无新闻"
@@ -1293,7 +757,7 @@ async def get_enhanced_strategy():
     try:
         from db.knowledge import search_knowledge
         # 搜索与低估指数相关的知识
-        knowledge_results = search_knowledge("低估 估值 百分位 价值投资", limit=5)
+        knowledge_results = await asyncio.to_thread(search_knowledge, "低估 估值 百分位 价值投资", limit=5)
         if knowledge_results:
             knowledge_lines = []
             for k in knowledge_results:
@@ -1302,76 +766,18 @@ async def get_enhanced_strategy():
     except Exception as e:
         logger.warning(f"知识库检索失败: {e}")
 
-    # 5. 构建 LLM prompt
-    candidate_lines = []
-    for c in candidates:
-        line = (f"- {c['name']}({c['code']}): 百分位{c['percentile']}%, Z-score{c['zscore']}, "
-                f"连续下跌{c['consecutive_drop']}天, 7日跌幅{c['drop_7d']}%")
-        # 附加风险提示
-        warnings = c.get("valuation_warnings", [])
-        for w in warnings:
-            line += f"\n  ⚠️ {w['message']}"
-        if c.get("recommended_metric"):
-            line += f"\n  📊 建议参考{c['recommended_metric']}百分位"
-        if c.get("history_years") and c["history_years"] < 5:
-            line += f"\n  📅 数据仅覆盖{c['history_years']}年"
-        candidate_lines.append(line)
-    candidate_text = "\n".join(candidate_lines)
-
-    prompt = f"""你是一位资深的 A 股投资策略分析师。以下是一批当前估值较低的指数，请对每个指数进行深度分析。
-
-## 分析框架
-
-对每个指数，判断以下维度：
-
-1. **机会类型**：
-   - 真低估：基本面健康，只是短期回调，大概率会修复
-   - 价值陷阱：基本面恶化（行业衰退、政策打压、盈利下滑），低估可能是合理的
-   - 趋势性下行：长期逻辑变了（如消费降级、人口老龄化），短期不会反转
-
-2. **预期恢复时间**：
-   - 短期（1-3个月）：有明确催化剂（政策利好、业绩拐点、资金轮动）
-   - 中期（3-12个月）：需要等待基本面改善
-   - 长期（1年以上）：行业周期底部，需要耐心等待
-
-3. **催化剂**：什么事件可能触发反弹？
-   - 政策面：降准降息、行业扶持政策、财政刺激
-   - 基本面：盈利拐点、库存周期见底、需求回暖
-   - 资金面：北向资金流入、板块轮动、估值修复
-
-4. **建议操作**：
-   - 立即买入：极度低估 + 催化剂明确 + 基本面健康
-   - 分批建仓：低估 + 催化剂不明确但基本面尚可
-   - 观望：低估但基本面不确定
-   - 回避：价值陷阱或趋势性下行
-
-## 输出格式（严格JSON）
-
-{{
-  "strategies": [
-    {{
-      "index_name": "指数名",
-      "index_code": "代码",
-      "opportunity_type": "真低估|价值陷阱|趋势性下行",
-      "recovery_time": "短期(1-3月)|中期(3-12月)|长期(1年+)",
-      "catalysts": ["催化剂1", "催化剂2"],
-      "risk_factors": ["风险因素1"],
-      "action": "立即买入|分批建仓|观望|回避",
-      "action_detail": "具体操作建议（2-3句话）",
-      "confidence": "high|medium|low"
-    }}
-  ],
-  "overall_summary": "一段话总结当前市场低估板块的整体情况和投资建议"
-}}
-
-## 待分析指数
-{candidate_text}
-
-## 今日新闻（供参考）
-{news_text}
-{knowledge_context}
-
-请基于以上数据和知识库参考，结合你对 A 股市场的理解，给出专业分析。"""
+    # 分析原则来自已配置 Agent；此处只构造候选证据和结构契约。
+    candidate_text = json.dumps({"snapshot_id": scan_result["snapshot_id"],
+        "as_of_date": scan_result["as_of_date"], "cutoff_date": scan_result["cutoff_date"],
+        "candidates": candidates}, ensure_ascii=False)
+    prompt = ("输出JSON，字段 strategies 数组及 overall_summary 字符串。每项只解读候选代码："
+              "index_code、opportunity_type(真低估/价值陷阱/趋势性下行)、"
+              "action(立即买入/分批建仓/观望/回避)、confidence(high/medium/low)、"
+              "recovery_time(短期(1-3月)/中期(3-12月)/长期(1年+))、"
+              "catalysts与risk_factors字符串数组、action_detail字符串。"
+              "催化剂仅为未来条件假设，未核验前不得声称已发生或编造今日事件。"
+              "指标分位变化为百分点，并非价格变化，低估不保证反转。\n"
+              + candidate_text + "\n新闻证据：\n" + news_text + knowledge_context)
 
     # 5. 加载 agent 配置
     from db import get_analysis_agent_by_name, create_analysis_history
@@ -1408,6 +814,18 @@ async def get_enhanced_strategy():
             timeout=120,
         )
         content, parsed = parse_analysis_response(response, "overall_summary", "strategies")
+        from services.valuation.opportunity_screener import validate_interpretations
+        strategies, validation_warnings = validate_interpretations(parsed.get("strategies", []), candidates)
+        if not strategies:
+            raise ValueError("模型未返回有效候选策略")
+        if not isinstance(parsed.get("overall_summary", ""), str):
+            raise ValueError("overall_summary 必须是字符串")
+        parsed = {"strategies": strategies, "overall_summary": parsed.get("overall_summary", ""),
+                  "snapshot_id": scan_result["snapshot_id"], "as_of_date": scan_result["as_of_date"],
+                  "cutoff_date": scan_result["cutoff_date"], "candidate_snapshot": scan_result,
+                  "validation_warnings": validation_warnings}
+        if validation_warnings:
+            llm_status = "partial"
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         logger.warning(f"增强策略 LLM 分析失败: {e}")
@@ -1427,7 +845,7 @@ async def get_enhanced_strategy():
             "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage, status, error_msg) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (agent_id or 0, "增强策略分析师", system_prompt[:500], news_text[:500],
-             json.dumps(parsed, ensure_ascii=False)[:2000], tokens, llm_status,
+             json.dumps(parsed, ensure_ascii=False), tokens, llm_status,
              llm_error_msg[:500] if llm_status == "error" else ""),
         )
         _es_conn.commit()
@@ -1435,7 +853,7 @@ async def get_enhanced_strategy():
         _es_conn.close()
     except Exception as e:
         logger.warning(f"记录增强策略分析历史失败: {e}")
-        if llm_status == "success":
+        if llm_status in ("success", "partial"):
             try:
                 complete_analysis_log(trace_id=_es_trace_id, status="error", duration_ms=llm_duration, error_msg=str(e))
             except Exception:
@@ -1465,7 +883,7 @@ async def get_enhanced_strategy():
     try:
         complete_analysis_log(
             trace_id=_es_trace_id,
-            status="done" if llm_status == "success" else "error",
+            status="done" if llm_status == "success" else llm_status,
             duration_ms=llm_duration,
             token_usage=tokens,
             error_msg=llm_error_msg if llm_status == "error" else None,
@@ -1491,6 +909,10 @@ async def get_enhanced_strategy():
                 s["history_years"] = c["history_years"]
 
     return {
+        **scan_result,
+        "enabled": True,
+        "status": "partial" if validation_warnings else "success",
+        "validation_warnings": validation_warnings,
         "strategies": parsed.get("strategies", []),
         "overall_summary": parsed.get("overall_summary", ""),
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M"),

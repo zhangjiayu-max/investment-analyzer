@@ -42,9 +42,9 @@ def list_articles(status: str = None) -> list[dict]:
         ) stats ON a.id = stats.article_id
     """
     if status:
-        rows = conn.execute(base + " WHERE a.status = ? ORDER BY a.publish_time DESC", (status,)).fetchall()
+        rows = conn.execute(base + " WHERE a.status = ? ORDER BY a.id DESC", (status,)).fetchall()
     else:
-        rows = conn.execute(base + " ORDER BY a.publish_time DESC").fetchall()
+        rows = conn.execute(base + " ORDER BY a.id DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

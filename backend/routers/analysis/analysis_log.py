@@ -15,6 +15,7 @@ from db.config import get_config_bool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-log"])
+_eval_tasks = set()
 
 
 @router.get("/api/analysis/log/list")
@@ -153,22 +154,31 @@ async def evaluate_analysis_log_api(log_id: int):
     if not output or len(output.strip()) < 50:
         raise HTTPException(400, "分析结果为空或过短，无法评估")
 
+    from db.eval import claim_governance_task
+    from db.agent_analysis_log import set_analysis_eval_state
+    from db.async_tasks import update_async_task
+    submitted = claim_governance_task('analysis_log_eval','analysis_log',{'log_id':log_id})
+    if submitted['reused']:
+        return submitted
+    task_id = submitted['task_id']
+    set_analysis_eval_state(log_id,'running',task_id=task_id)
     async def _run_eval():
         try:
             from agent.eval.eval_scorer import evaluate_llm_output
-            result = await evaluate_llm_output(
-                query=log.get("query") or log.get("input_summary") or "",
-                output=output,
-                context=log.get("input_summary") or "",
-                target_type="analysis_log",
-                target_id=log_id,
-                analysis_type=log.get("analysis_type", "") or "",
-            )
-            overall = result.get("overall_score", 0)
-            update_eval_result(log_id, float(overall))
-            logger.info(f"分析记录评估完成 log_id={log_id} score={overall}")
-        except Exception as e:
-            logger.warning(f"分析记录评估失败 log_id={log_id}: {e}")
-
-    asyncio.create_task(_run_eval())
-    return {"ok": True, "message": "评估已提交，稍后刷新查看结果"}
+            result = await asyncio.to_thread(lambda: asyncio.run(evaluate_llm_output(
+                query=log.get('query') or log.get('input_summary') or '',output=output,
+                context=log.get('input_summary') or '',target_type='analysis_log',target_id=log_id,
+                analysis_type=log.get('analysis_type',''))))
+            score = result.get('overall_score',0)
+            if score <= 0:
+                raise RuntimeError(result.get('overall_reason') or '评估失败')
+            update_eval_result(log_id,float(score))
+            update_async_task(task_id,status='done',result={'ok':True,'log_id':log_id,'score':score})
+        except Exception as exc:
+            set_analysis_eval_state(log_id,'error',str(exc),task_id)
+            update_async_task(task_id,status='error',error_msg=str(exc))
+            logger.warning('分析记录评估失败 log_id=%s: %s',log_id,exc)
+    task = asyncio.create_task(_run_eval())
+    _eval_tasks.add(task)
+    task.add_done_callback(_eval_tasks.discard)
+    return submitted

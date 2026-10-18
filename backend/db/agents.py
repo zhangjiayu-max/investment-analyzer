@@ -407,12 +407,7 @@ def _init_preset_agents(conn):
             VALUES (?, ?, ?, ?, ?, ?)
         """, (agent["name"], agent["description"], agent["system_prompt"],
               agent["knowledge_scope"], agent["icon"], agent["is_preset"]))
-        # 更新已存在的预设 Agent 的 system_prompt
-        conn.execute("""
-            UPDATE agents SET description=?, system_prompt=?, knowledge_scope=?, icon=?
-            WHERE name=? AND is_preset=1
-        """, (agent["description"], agent["system_prompt"], agent["knowledge_scope"],
-              agent["icon"], agent["name"]))
+        # 已存在的配置由用户与版本管理维护，启动只补缺失默认行。
 
 
 def _init_wealth_specialists(conn):
@@ -967,12 +962,12 @@ def _init_wealth_specialists(conn):
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, 0)
         """, (s["agent_key"], s["name"], s["description"], system_prompt,
               s["knowledge_scope"], s["icon"], tools_json))
-        # 更新已存在的内容（幂等）
+        # 老版本预设行只补专家身份及首次工具映射，保留已发布的用户配置。
         conn.execute("""
-            UPDATE agents SET description=?, system_prompt=?, knowledge_scope=?, icon=?, tools=?, is_specialist=1, agent_key=?
+            UPDATE agents SET tools=CASE WHEN COALESCE(is_specialist,0)=0 THEN ? ELSE tools END,
+                is_specialist=1, agent_key=?
             WHERE name=?
-        """, (s["description"], system_prompt, s["knowledge_scope"], s["icon"],
-              tools_json, s["agent_key"], s["name"]))
+        """, (tools_json, s["agent_key"], s["name"]))
 
     # P1 Step2：为非硬编码的 specialist 补 kyc_dimensions 裁剪配置（仅当 knowledge_scope 不含该字段时）
     # 避免覆盖用户已自定义的配置；按专家职责裁剪可减少 token 浪费 + 噪声

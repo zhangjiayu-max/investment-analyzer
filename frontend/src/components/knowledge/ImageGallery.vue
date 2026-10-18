@@ -254,22 +254,22 @@ function confirmViBatchParse(date, items) {
       viBatchProgress.value = { done: 0, total: items.length }
       try {
         // 限制并发数为 3，避免占用所有浏览器连接
-        const responses = await asyncPool(3, items, async (img) => {
+        const results = await asyncPool(3, items, async (img) => {
           try {
             // 自动判断图片类型：如果是螺丝钉估值表，调用 DD 解析
             const isLiuyiImage = img.path.includes('liuyi_images') || img.name.includes('六亿') || img.name.includes('liuyi')
             const isDDImage = img.path.includes('dd_images') || img.name.includes('螺丝钉') || img.name.includes('dd')
             // TODO: DD 图片也应改用 parseDDImageAsync 异步模式
-          const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
-            const result = await parseFn(img.path)
-            return result
+            const parseFn = isLiuyiImage ? parseLiuyiImage : (isDDImage ? parseDDImage : parseAndSaveValuation)
+            // API 拦截器已拒绝业务失败；成功体不再包含顶层 ok。
+            await parseFn(img.path)
+            return { ok: true }
           } catch (e) {
-            return { data: { ok: false, error: e.message } }
+            return { ok: false, error: e.message }
           } finally {
             viBatchProgress.value.done++
           }
         })
-        const results = responses.map(r => r.data)
         const okCount = results.filter(r => r.ok).length
         const failCount = results.filter(r => !r.ok).length
         showToast(`批量识别完成：成功 ${okCount} 张${failCount > 0 ? '，失败 ' + failCount + ' 张' : ''}`, okCount > 0 ? 'success' : 'error')

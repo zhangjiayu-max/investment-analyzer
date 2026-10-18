@@ -1,6 +1,13 @@
 """Token 用量查询 + 性能监控。"""
 
+from datetime import date as date_type
+
 from db._conn import _get_conn
+
+
+def _window_modifier(days: int) -> str:
+    """近 N 个本地日历日，N=1 从今日零点起，与本地记账时间一致。"""
+    return f"-{max(1, int(days)) - 1} days"
 
 
 # ── Token 用量查询 ──────────────────────────────────────
@@ -12,9 +19,9 @@ def list_token_usage(days: int = 7, limit: int = 50, offset: int = 0, caller: st
     query = """
         SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at, trace_id
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
     """
-    params = [f"-{days} days"]
+    params = [_window_modifier(days)]
     if caller:
         query += " AND caller = ?"
         params.append(caller)
@@ -34,9 +41,9 @@ def count_token_usage(days: int = 7, caller: str = None, model: str = None) -> i
     query = """
         SELECT COUNT(*) as cnt
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
     """
-    params = [f"-{days} days"]
+    params = [_window_modifier(days)]
     if caller:
         query += " AND caller = ?"
         params.append(caller)
@@ -54,7 +61,7 @@ def get_today_token_total() -> int:
     row = conn.execute("""
         SELECT COALESCE(SUM(total_tokens), 0) as total
         FROM token_usage
-        WHERE date(created_at) = date('now', 'localtime') AND caller != 'embedding_index'
+        WHERE date(created_at) = date('now', 'localtime') AND COALESCE(caller, '') != 'embedding_index'
     """).fetchone()
     conn.close()
     return row[0] if row else 0
@@ -69,10 +76,10 @@ def get_token_usage_summary(days: int = 30) -> dict:
             COALESCE(SUM(prompt_tokens), 0) as total_prompt,
             COALESCE(SUM(completion_tokens), 0) as total_completion,
             COALESCE(SUM(total_tokens), 0) as total_tokens,
-            CASE WHEN COUNT(*) > 0 THEN COALESCE(SUM(total_tokens), 0) / COUNT(*) ELSE 0 END as avg_per_call
+            CASE WHEN COUNT(*) > 0 THEN 1.0 * COALESCE(SUM(total_tokens), 0) / COUNT(*) ELSE 0 END as avg_per_call
         FROM token_usage
-        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
-    """, (f"-{days} days",)).fetchone()
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
+    """, (_window_modifier(days),)).fetchone()
     conn.close()
     base = dict(row)
 
@@ -84,7 +91,7 @@ def get_token_usage_summary(days: int = 30) -> dict:
             COALESCE(SUM(completion_tokens), 0) as completion,
             COALESCE(SUM(total_tokens), 0) as total
         FROM token_usage
-        WHERE date(created_at) = date('now', 'localtime') AND caller != 'embedding_index'
+        WHERE date(created_at) = date('now', 'localtime') AND COALESCE(caller, '') != 'embedding_index'
     """).fetchone()
     conn.close()
 
@@ -126,10 +133,10 @@ def get_token_usage_by_caller(days: int = 7) -> list[dict]:
             COALESCE(SUM(completion_tokens), 0) as completion_tokens,
             COALESCE(SUM(total_tokens), 0) as total_tokens
         FROM token_usage
-        WHERE created_at >= datetime('now', ?)
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
         GROUP BY caller
         ORDER BY total_tokens DESC
-    """, (f"-{days} days",)).fetchall()
+    """, (_window_modifier(days),)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -141,12 +148,14 @@ def get_token_usage_daily(days: int = 30) -> list[dict]:
         SELECT
             date(created_at) as day,
             COUNT(*) as calls,
-            COALESCE(SUM(total_tokens), 0) as tokens
+            COALESCE(SUM(total_tokens), 0) as tokens,
+            COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0) as completion_tokens
         FROM token_usage
-        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
         GROUP BY date(created_at)
         ORDER BY day ASC
-    """, (f"-{days} days",)).fetchall()
+    """, (_window_modifier(days),)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -154,54 +163,58 @@ def get_token_usage_daily(days: int = 30) -> list[dict]:
 # ── 性能监控查询 ──────────────────────────────────────
 
 
-def get_performance_stats(days: int = 7) -> dict:
-    """获取 Agent 调用性能统计（平均耗时、最慢调用、成功率等）。"""
-    conn = _get_conn()
-    stats = conn.execute("""
-        SELECT
-            COUNT(*) as total_runs,
-            COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
-            COALESCE(MAX(duration_ms), 0) as max_duration_ms,
-            COUNT(CASE WHEN duration_ms > 30000 THEN 1 END) as slow_calls,
-            COUNT(DISTINCT agent_key) as unique_agents,
-            SUM(CASE WHEN COALESCE(status, 'success') = 'success' THEN 1 ELSE 0 END) as success_count,
-            SUM(CASE WHEN COALESCE(status, 'success') != 'success' THEN 1 ELSE 0 END) as error_count
-        FROM agent_runs
-        WHERE created_at >= datetime('now', ?)
-    """, (f"-{days} days",)).fetchone()
-    result = dict(stats)
-    total = result.get("total_runs", 0)
-    result["success_rate"] = round(result["success_count"] / total * 100, 1) if total > 0 else 0.0
-    conn.close()
+# 历史执行入口存在三种成功终态；运行中、排队中不能进入成功率分母。
+_SUCCESS = "COALESCE(status,'success') IN ('success','completed','done')"
+_FAILURE = "status IN ('error','failed','timeout','cancelled','canceled','aborted')"
+_ACTIVE = "status IN ('running','pending','queued','streaming','started')"
+_PERFORMANCE_COLUMNS = f"""
+    COALESCE(AVG(CASE WHEN {_SUCCESS} OR {_FAILURE} THEN duration_ms END),0) as avg_duration_ms,
+    COALESCE(MAX(CASE WHEN {_SUCCESS} OR {_FAILURE} THEN duration_ms END),0) as max_duration_ms,
+    COUNT(CASE WHEN ({_SUCCESS} OR {_FAILURE}) AND duration_ms > 30000 THEN 1 END) as slow_calls,
+    COUNT(CASE WHEN {_SUCCESS} THEN 1 END) as success_count,
+    COUNT(CASE WHEN {_FAILURE} THEN 1 END) as error_count,
+    COUNT(CASE WHEN {_ACTIVE} THEN 1 END) as active_count
+"""
+
+
+def _performance_result(row) -> dict:
+    result = dict(row)
+    terminal = result['success_count'] + result['error_count']
+    result['terminal_count'] = terminal
+    result['success_rate'] = round(result['success_count'] / terminal * 100, 1) if terminal else 0.0
     return result
+
+
+def get_performance_stats(days: int = 7) -> dict:
+    """全部运行量与终态性能，成功率只基于已终结任务。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(f"""
+            SELECT COUNT(*) as total_runs, COUNT(DISTINCT agent_key) as unique_agents,
+                   {_PERFORMANCE_COLUMNS}
+            FROM agent_runs
+            WHERE created_at >= datetime('now','localtime','start of day',?)
+        """, (_window_modifier(days),)).fetchone()
+        return _performance_result(row)
+    finally:
+        conn.close()
 
 
 def get_performance_by_agent(days: int = 7) -> list[dict]:
-    """按 Agent 分组统计性能（含成功率）。"""
+    """与概览使用同一终态定义和本地日历窗口。"""
     conn = _get_conn()
-    rows = conn.execute("""
-        SELECT
-            COALESCE(NULLIF(agent_key, ''), 'unknown') as agent_key,
-            COALESCE(NULLIF(agent_name, ''), '未知') as agent_name,
-            COUNT(*) as runs,
-            COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
-            COALESCE(MAX(duration_ms), 0) as max_duration_ms,
-            COALESCE(SUM(CASE WHEN duration_ms > 30000 THEN 1 ELSE 0 END), 0) as slow_calls,
-            SUM(CASE WHEN COALESCE(status, 'success') = 'success' THEN 1 ELSE 0 END) as success_count,
-            SUM(CASE WHEN COALESCE(status, 'success') != 'success' THEN 1 ELSE 0 END) as error_count
-        FROM agent_runs
-        WHERE created_at >= datetime('now', ?)
-        GROUP BY agent_key
-        ORDER BY runs DESC
-    """, (f"-{days} days",)).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        total = d.get("runs", 0)
-        d["success_rate"] = round(d["success_count"] / total * 100, 1) if total > 0 else 0.0
-        result.append(d)
-    conn.close()
-    return result
+    try:
+        rows = conn.execute(f"""
+            SELECT COALESCE(NULLIF(agent_key,''),'unknown') as agent_key,
+                   COALESCE(NULLIF(agent_name,''),'未知') as agent_name,
+                   COUNT(*) as runs, {_PERFORMANCE_COLUMNS}
+            FROM agent_runs
+            WHERE created_at >= datetime('now','localtime','start of day',?)
+            GROUP BY agent_key ORDER BY runs DESC
+        """, (_window_modifier(days),)).fetchall()
+        return [_performance_result(row) for row in rows]
+    finally:
+        conn.close()
 
 
 # ── 数据库索引优化 ──────────────────────────────────────
@@ -219,131 +232,93 @@ def ensure_indexes():
 
 # ── 费用估算 + 高级查询 ──────────────────────────────────────
 
-# A3 修复：统一定价表，以 infra/cost_tracker.py:MODEL_PRICES 为权威源
-# 避免两套价格表不一致导致 /token-usage/cost 与 /cost-governance/dashboard 金额冲突
-try:
-    from infra.cost_tracker import MODEL_PRICES as _RAW_PRICES
-    # 适配字段名：cost_tracker 用 input/output，本模块用 prompt/completion
-    MODEL_PRICING = {
-        k: {"prompt": v["input"], "completion": v["output"]}
-        for k, v in _RAW_PRICES.items()
-    }
-except ImportError:
-    # 兜底（与 infra/cost_tracker.py 保持一致）
-    MODEL_PRICING = {
-        "mimo": {"prompt": 0.3, "completion": 1.2},
-        "mimo-v2.6-pro": {"prompt": 0.3, "completion": 1.2},
-    }
+def _model_cost(model, prompt, completion) -> float:
+    from infra.cost_tracker import _get_price
+    price = _get_price(model)
+    return ((prompt or 0) * price['input'] + (completion or 0) * price['output']) / 1_000_000
 
 
 def get_cost_estimate(days: int = 7) -> dict:
-    """估算近 N 天的 API 费用。排除 embedding_index（非 LLM 调用）。"""
+    """所选窗口与今日/近7日/本月分别聚合，不依赖明细分页。"""
     conn = _get_conn()
-    rows = conn.execute("""
-        SELECT model,
-               SUM(prompt_tokens) as prompt,
-               SUM(completion_tokens) as completion
-        FROM token_usage
-        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
-        GROUP BY model
-    """, (f"-{days} days",)).fetchall()
-    conn.close()
-    total_cost = 0.0
-    by_model = []
-    for r in rows:
-        d = dict(r)
-        # A3 修复：模糊匹配模型名，与 cost_tracker 逻辑一致
-        model_lower = (d["model"] or "").lower()
-        pricing = None
-        for key, val in MODEL_PRICING.items():
-            if key in model_lower:
-                pricing = val
-                break
-        if not pricing:
-            pricing = {"prompt": 0.5, "completion": 2.0}  # 默认兜底，与 cost_tracker 一致
-        cost = (d["prompt"] / 1_000_000 * pricing["prompt"]) + (d["completion"] / 1_000_000 * pricing["completion"])
-        total_cost += cost
-        by_model.append({
-            "model": d["model"],
-            "prompt_tokens": d["prompt"],
-            "completion_tokens": d["completion"],
-            "cost": round(cost, 4)
-        })
-    return {"total_cost": round(total_cost, 2), "by_model": by_model}
+    try:
+        rows = conn.execute("""
+            SELECT model, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion
+            FROM token_usage
+            WHERE created_at >= datetime('now','localtime','start of day',?)
+              AND COALESCE(caller,'') != 'embedding_index'
+            GROUP BY model
+        """, (_window_modifier(days),)).fetchall()
+        periods = conn.execute("""
+            SELECT model,
+                SUM(CASE WHEN created_at >= date('now','localtime') THEN prompt_tokens ELSE 0 END) as today_prompt,
+                SUM(CASE WHEN created_at >= date('now','localtime') THEN completion_tokens ELSE 0 END) as today_completion,
+                SUM(CASE WHEN created_at >= date('now','localtime','-6 days') THEN prompt_tokens ELSE 0 END) as week_prompt,
+                SUM(CASE WHEN created_at >= date('now','localtime','-6 days') THEN completion_tokens ELSE 0 END) as week_completion,
+                SUM(CASE WHEN created_at >= date('now','localtime','start of month') THEN prompt_tokens ELSE 0 END) as month_prompt,
+                SUM(CASE WHEN created_at >= date('now','localtime','start of month') THEN completion_tokens ELSE 0 END) as month_completion
+            FROM token_usage
+            WHERE created_at >= MIN(date('now','localtime','-6 days'), date('now','localtime','start of month'))
+              AND COALESCE(caller,'') != 'embedding_index'
+            GROUP BY model
+        """).fetchall()
+        by_model = [{"model": row['model'], "prompt_tokens": row['prompt'] or 0,
+                     "completion_tokens": row['completion'] or 0,
+                     "cost": round(_model_cost(row['model'], row['prompt'], row['completion']), 6)}
+                    for row in rows]
+        result = {'total_cost': round(sum(_model_cost(r['model'], r['prompt'], r['completion']) for r in rows), 6),
+                  'by_model': by_model, 'days': days, 'currency': 'CNY'}
+        for period in ('today', 'week', 'month'):
+            result[period + '_cost'] = round(sum(_model_cost(r['model'], r[period + '_prompt'], r[period + '_completion'])
+                                                for r in periods), 6)
+        return result
+    finally:
+        conn.close()
 
 
 def get_token_usage_hourly(date: str = None) -> list[dict]:
-    """按小时统计 token 用量。排除 embedding_index（非 LLM 调用）。"""
+    """日期校验及参数绑定，禁止将用户日期拼入 SQL。"""
+    target = date_type.fromisoformat(str(date)).isoformat() if date is not None else None
     conn = _get_conn()
-    if date:
-        target = f"date(created_at) = '{date}'"
-    else:
-        target = "date(created_at) = date('now', 'localtime')"
-    rows = conn.execute(f"""
-        SELECT
-            strftime('%H', created_at) as hour,
-            COUNT(*) as calls,
-            SUM(total_tokens) as tokens
-        FROM token_usage
-        WHERE {target} AND caller != 'embedding_index'
-        GROUP BY hour ORDER BY hour ASC
-    """).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute("""
+            SELECT strftime('%H', created_at) as hour, COUNT(*) as calls, SUM(total_tokens) as tokens
+            FROM token_usage
+            WHERE date(created_at) = COALESCE(?, date('now','localtime'))
+              AND COALESCE(caller,'') != 'embedding_index'
+            GROUP BY hour ORDER BY hour ASC
+        """, (target,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_trace_tokens(trace_id: str) -> dict:
-    """查询一次链路的完整调用明细：token_usage + tool_audit_logs + agent_runs + rag_logs。
-
-    覆盖对话链路与分散度/相关性等页面分析两类场景。任一表缺失不阻断查询。
-    """
-    if not trace_id:
-        return {"trace_id": "", "token_usage": [], "tool_audit_logs": [], "agent_runs": [], "rag_logs": []}
-    conn = _get_conn()
-
-    # 1. token_usage：LLM 调用消耗
-    token_rows = conn.execute("""
-        SELECT id, model, caller, prompt_tokens, completion_tokens, total_tokens, created_at
-        FROM token_usage
-        WHERE trace_id = ?
-        ORDER BY id ASC
-    """, (trace_id,)).fetchall()
-
-    # 2. tool_audit_logs：工具调用审计
-    tool_rows = conn.execute("""
-        SELECT id, tool_name, arguments, result_preview, success, error_category, duration_ms, created_at
-        FROM tool_audit_logs
-        WHERE trace_id = ?
-        ORDER BY id ASC
-    """, (trace_id,)).fetchall()
-
-    # 3. agent_runs：Agent 执行记录
-    agent_rows = conn.execute("""
-        SELECT id, conversation_id, message_id, agent_key, agent_name, query,
-               result, tool_calls, duration_ms, status, created_at
-        FROM agent_runs
-        WHERE trace_id = ?
-        ORDER BY id ASC
-    """, (trace_id,)).fetchall()
-
-    # 4. rag_logs：RAG 检索日志
-    rag_rows = conn.execute("""
-        SELECT id, conversation_id, message_id, query, keywords, content_types,
-               results_count, fts_count, chroma_count, freshness_filtered,
-               result_sources, result_times, created_at
-        FROM rag_logs
-        WHERE trace_id = ?
-        ORDER BY id ASC
-    """, (trace_id,)).fetchall()
-
-    conn.close()
-    return {
-        "trace_id": trace_id,
-        "token_usage": [dict(r) for r in token_rows],
-        "tool_audit_logs": [dict(r) for r in tool_rows],
-        "agent_runs": [dict(r) for r in agent_rows],
-        "rag_logs": [dict(r) for r in rag_rows],
+    """按精确 trace 聚合审计链；尚未产生过记录的可选表返回空数组。"""
+    fields = {
+        'token_usage': ['id','model','caller','prompt_tokens','completion_tokens','total_tokens','created_at'],
+        'tool_audit_logs': ['id','tool_name','arguments','result_preview','success','error_category','duration_ms','created_at'],
+        'agent_runs': ['id','conversation_id','message_id','agent_key','agent_name','query','result','tool_calls','duration_ms','status','created_at'],
+        'rag_logs': ['id','conversation_id','message_id','query','keywords','content_types','results_count','fts_count','chroma_count','freshness_filtered','result_sources','result_times','created_at'],
     }
+    result = {'trace_id': trace_id, **{table: [] for table in fields}}
+    if not trace_id:
+        return result
+    conn = _get_conn()
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table, wanted in fields.items():
+            if table not in tables:
+                continue
+            columns = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+            if 'trace_id' not in columns:
+                continue
+            projection = ','.join(name if name in columns else f'NULL AS {name}' for name in wanted)
+            rows = conn.execute(f'SELECT {projection} FROM {table} WHERE trace_id=? ORDER BY id ASC', (trace_id,)).fetchall()
+            result[table] = [dict(row) for row in rows]
+        return result
+    finally:
+        conn.close()
 
 
 def get_token_usage_by_model(days: int = 7) -> list[dict]:
@@ -355,8 +330,8 @@ def get_token_usage_by_model(days: int = 7) -> list[dict]:
                SUM(completion_tokens) as completion_tokens,
                SUM(total_tokens) as total_tokens
         FROM token_usage
-        WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
+        WHERE created_at >= datetime('now', 'localtime', 'start of day', ?) AND COALESCE(caller, '') != 'embedding_index'
         GROUP BY model ORDER BY total_tokens DESC
-    """, (f"-{days} days",)).fetchall()
+    """, (_window_modifier(days),)).fetchall()
     conn.close()
     return [dict(r) for r in rows]

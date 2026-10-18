@@ -284,6 +284,10 @@ def get_index_valuation(index_code: str = "000300") -> dict:
         df = ak.stock_zh_index_value_csindex(symbol=index_code)
         if df is not None and not df.empty:
             latest = df.iloc[-1]
+            # 保留行情源快照日期；抓取时间不能充当估值截至日期。
+            raw_date = latest.get("日期") or latest.get("交易日期") or latest.get("date")
+            if raw_date is not None:
+                result["date"] = str(raw_date)[:10]
             result["pe"] = _to_float(latest.get("市盈率1"))
             result["dividend_yield"] = _to_float(latest.get("股息率1"))
             index_name = latest.get("指数中文简称")

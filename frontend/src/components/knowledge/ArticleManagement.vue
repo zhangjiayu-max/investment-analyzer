@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted, computed } from 'vue'
 import {
   syncArticles, fetchArticles, fetchArticle, addArticle,
   downloadArticleImages, analyzeArticleImages, getAnalyzeStatus, cancelAnalyze, reanalyzeImage, getReanalyzeStatus,
@@ -22,7 +22,6 @@ const recordStatusFilter = ref('all')
 const recordMetricFilter = ref('all')
 const analyzingRecordId = ref(null)
 const cancelling = ref(false)
-const reanalyzePoller = ref(null)
 
 // 添加文章
 const addUrl = ref('')
@@ -33,22 +32,14 @@ async function handleAddArticle() {
   adding.value = true
   try {
     const { data } = await addArticle(url)
-    if (data.ok) {
-      showToast('已提交，正在解析下载分析...', 'success')
-      addUrl.value = ''
-      await loadArticles()
-      // 自动打开新文章详情
-      const { data: detail } = await fetchArticle(data.article_id)
-      if (detail) openArticle(detail)
-      // 启动轮询等待分析完成
-      startAddPolling(data.article_id)
-    } else {
-      showToast(data.message || '文章已存在', 'warning')
-      if (data.article_id) {
-        const { data: detail } = await fetchArticle(data.article_id)
-        if (detail) openArticle(detail)
-      }
-    }
+    showToast('已提交，正在解析下载分析...', 'success')
+    addUrl.value = ''
+    statusFilter.value = ''
+    searchQuery.value = ''
+    await loadArticles()
+    // 统一协议成功时已移除 ok，业务失败由 API 拦截器抛出。
+    await openArticle({ id: data.article_id })
+    startAddPolling(data.article_id)
   } catch (e) {
     showToast('添加失败: ' + e.message, 'error')
   } finally {
@@ -157,10 +148,12 @@ const filteredArticles = computed(() => {
   return list
 })
 
-const poller = ref(null)
+const poller = shallowRef(null)
+let detailRequestId = 0
 onMounted(() => loadArticles())
 onUnmounted(() => {
-  if (poller.value) clearInterval(poller.value)
+  detailRequestId++
+  clearPoller()
   clearReanalyzePoller()  // 清除所有重分析轮询
   if (addPoller) { clearInterval(addPoller); addPoller = null }
 })
@@ -187,13 +180,16 @@ async function handleSync() {
 }
 
 async function openArticle(article) {
+  const requestId = ++detailRequestId
   clearPoller()
   clearReanalyzePoller()
   analyzingRecordId.value = null
+  cancelling.value = false
   selectedArticle.value = article
   records.value = []
   try {
     const { data } = await fetchArticle(article.id)
+    if (requestId !== detailRequestId) return
     if (data.analysis_records?.length) records.value = data.analysis_records
     selectedArticle.value = data
     // 同步列表中的状态
@@ -209,6 +205,7 @@ async function openArticle(article) {
       startAnalyzePolling(data.id)
     }
   } catch (e) {
+    if (requestId !== detailRequestId) return
     console.error('Failed to load article detail:', e)
     selectedArticle.value = article
   }
@@ -218,10 +215,10 @@ function startAnalyzePolling(id) {
   clearPoller()
   let prevDone = 0
   let prevRecordId = null
-  poller.value = setInterval(async () => {
+  const timer = setInterval(async () => {
     try {
       const { data: st } = await getAnalyzeStatus(id)
-      if (!selectedArticle.value || selectedArticle.value.id !== id) { clearPoller(); return }
+      if (poller.value !== timer || selectedArticle.value?.id !== id) return
       selectedArticle.value.status = st.status
       syncArticleInList(id, { status: st.status })
 
@@ -232,6 +229,7 @@ function startAnalyzePolling(id) {
         prevRecordId = curRecordId
         prevDone = st.progress?.done || 0
         const { data: detail } = await fetchArticle(id)
+        if (poller.value !== timer || selectedArticle.value?.id !== id) return
         if (detail.analysis_records) records.value = detail.analysis_records
         syncArticleInList(id, {
           success_count: detail.success_count,
@@ -246,8 +244,11 @@ function startAnalyzePolling(id) {
         cancelling.value = false
         await openArticle(selectedArticle.value)
       }
-    } catch { clearPoller(); analyzingRecordId.value = null }
+    } catch {
+      if (poller.value === timer) { clearPoller(); analyzingRecordId.value = null }
+    }
   }, 1500)
+  poller.value = timer
 }
 
 function clearPoller() {
@@ -256,32 +257,34 @@ function clearPoller() {
 
 async function handleDownload(id) {
   try {
-    const { data } = await downloadArticleImages(id)
-    if (!data.ok) { showToast(data.message || '下载失败', 'error'); return }
-    selectedArticle.value.status = 'downloading'
+    await downloadArticleImages(id)
     syncArticleInList(id, { status: 'downloading' })
+    if (selectedArticle.value?.id !== id) return
+    selectedArticle.value.status = 'downloading'
 
     clearPoller()
-    poller.value = setInterval(async () => {
+    const timer = setInterval(async () => {
       try {
         const { data: art } = await fetchArticle(id)
+        if (poller.value !== timer || selectedArticle.value?.id !== id) return
         selectedArticle.value.status = art.status
         syncArticleInList(id, { status: art.status })
         if (art.status === 'downloaded' || art.status === 'error') {
           clearPoller()
           await openArticle(selectedArticle.value)
         }
-      } catch { clearPoller() }
+      } catch { if (poller.value === timer) clearPoller() }
     }, 2000)
+    poller.value = timer
   } catch (e) { showToast('下载失败: ' + e.message, 'error') }
 }
 
 async function handleAnalyze(id) {
   try {
-    const { data } = await analyzeArticleImages(id)
-    if (!data.ok) { showToast(data.message || '分析失败', 'error'); return }
-    selectedArticle.value.status = 'analyzing'
+    await analyzeArticleImages(id)
     syncArticleInList(id, { status: 'analyzing' })
+    if (selectedArticle.value?.id !== id) return
+    selectedArticle.value.status = 'analyzing'
     startAnalyzePolling(id)
   } catch (e) { showToast('分析失败: ' + e.message, 'error') }
 }
@@ -290,12 +293,7 @@ async function handleCancelAnalyze(id) {
   if (cancelling.value) return
   cancelling.value = true
   try {
-    const { data } = await cancelAnalyze(id)
-    if (!data.ok) {
-      showToast(data.message || '取消失败', 'error')
-      cancelling.value = false
-      return
-    }
+    await cancelAnalyze(id)
     // 立即更新按钮为"取消中"状态，轮询会检测到后端完成并刷新
     // 超时保护：如果 30 秒后后端还没响应，重置状态
     setTimeout(() => { cancelling.value = false }, 30000)
@@ -307,16 +305,15 @@ async function handleCancelAnalyze(id) {
 
 // 支持多个并发分析任务
 const analyzingRecords = ref(new Set())
-const reanalyzePollers = ref({})
+const reanalyzePollers = shallowRef({})
 
 async function handleReanalyze(recordId) {
   if (analyzingRecords.value.has(recordId)) return  // 该记录已在分析中
+  const articleId = selectedArticle.value?.id
+  const requestId = detailRequestId
   try {
-    const { data } = await reanalyzeImage(recordId)
-    if (!data.ok) {
-      await openArticle(selectedArticle.value)
-      return
-    }
+    await reanalyzeImage(recordId)
+    if (requestId !== detailRequestId) return
     // 立即在 UI 上显示"分析中"状态
     analyzingRecords.value.add(recordId)
     const rec = records.value.find(r => r.id === recordId)
@@ -324,9 +321,10 @@ async function handleReanalyze(recordId) {
     showToast('重新分析已开始，后台执行中...', 'success')
 
     // 轮询状态
-    reanalyzePollers.value[recordId] = setInterval(async () => {
+    const timer = setInterval(async () => {
       try {
         const { data: st } = await getReanalyzeStatus(recordId)
+        if (reanalyzePollers.value[recordId] !== timer) return
         if (st.status === 'analyzing') {
           const r2 = records.value.find(r => r.id === recordId)
           if (r2) r2.status = 'analyzing'
@@ -335,13 +333,19 @@ async function handleReanalyze(recordId) {
         if (st.status === 'success' || st.status === 'error' || st.status === 'timeout') {
           clearReanalyzePoller(recordId)
           analyzingRecords.value.delete(recordId)
-          await openArticle(selectedArticle.value)
+          // 刷新结果时保留其他图片的并发重试轮询。
+          const { data } = await fetchArticle(articleId)
+          if (requestId !== detailRequestId) return
+          selectedArticle.value = data
+          records.value = data.analysis_records || []
+          syncArticleInList(articleId, data)
         }
       } catch {
         clearReanalyzePoller(recordId)
         analyzingRecords.value.delete(recordId)
       }
     }, 1500)
+    reanalyzePollers.value[recordId] = timer
   } catch (e) {
     showToast('重新分析失败: ' + e.message, 'error')
     clearReanalyzePoller(recordId)

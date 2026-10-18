@@ -15,6 +15,10 @@ from collections import Counter
 logger = logging.getLogger(__name__)
 
 
+class VisionOutputTruncatedError(RuntimeError):
+    """模型输出未完成，不能把已返回的部分行当作完整估值表。"""
+
+
 def extract_dominant_color(image_path: str) -> str | None:
     """提取图片的主要背景颜色，用于判断估值区域。"""
     try:
@@ -69,6 +73,8 @@ def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
         ]}],
         temperature=get_config_float('llm.temperature_vision', 0.1),
         max_tokens=get_config_int('llm.max_tokens_vision', 4000),
+        # 结构化抄表将输出预算留给数据，避免长篇推理挤占表格行并增加超时。
+        extra_body={"thinking": {"type": "disabled"}},
     )
     if resp.usage:
         try:
@@ -76,6 +82,8 @@ def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
             _record_token_usage(resp.usage, resp.model or model, "image_parse", trace_id=trace_id)
         except Exception:
             pass
+    if getattr(resp.choices[0], "finish_reason", None) == "length":
+        raise VisionOutputTruncatedError("视觉模型输出被截断，请分块识别图片或提高视觉输出 token 上限")
     text = (resp.choices[0].message.content or '').strip()
     if text:
         return text
@@ -101,6 +109,13 @@ def _call_vision(prompt: str, img_b64: str, mime: str, model: str = "", trace_id
         try:
             return _openai_chat(prompt, img_b64, mime, effective_model, base_url, api_key, trace_id=trace_id)
         except Exception as e:
+            if isinstance(e, VisionOutputTruncatedError):
+                raise
+            if getattr(e, "status_code", None) in (401, 403):
+                raise RuntimeError(
+                    f"图片解析鉴权失败（{e.status_code}）：请检查系统配置 vision.mimo.api_key 与 base_url 是否匹配；"
+                    "留空整组视觉配置可继承环境中的 MiMo 配置"
+                ) from e
             last_err = e
             if attempt < 2:
                 time.sleep(2)
@@ -402,12 +417,15 @@ class ImageParser:
             elif "股息" in metric_name: metric_key = "股息率统计指标"
             elif "风险" in metric_name: metric_key = "风险溢价统计指标"
 
+        # 文本兜底保留显式单位，避免 0.5% 被写入层按 0~1 比例放大为 50%。
+        percentile_text = _tv("分位点")
+        percentile = percentile_text if percentile_text and "%" in percentile_text else _nv("分位点")
         return {
             "指数名称": idx, "指数代码": cod,
             "当前点位": _nv("当前点位"), "涨跌幅": _tv("涨跌幅"),
             "背景颜色": _tv("背景颜色"),
             metric_key: {
-                "当前值": _nv("当前值"), "分位点": _nv("分位点"),
+                "当前值": _nv("当前值"), "分位点": percentile,
                 "危险值": _nv("危险值"), "中位数": _nv("中位数"),
                 "机会值": _nv("机会值"), "最大值": _nv("最大值"),
                 "最小值": _nv("最小值"), "平均值": _nv("平均值"),
@@ -419,22 +437,29 @@ class ImageParser:
 # ── DDImageParser（螺丝钉估值表）────────────────────
 
 class DDImageParser:
+    _parse_prompt = DD_PARSE_PROMPT
+    _crop_prompt = DD_PARSE_PROMPT_CROP
+
     def __init__(self, model_type: str = "", trace_id: str = ""):
         self.model_type = model_type or IMAGE_PARSER_MODEL_TYPE
         self._trace_id = trace_id
 
     def parse(self, image_path: str) -> dict:
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
         ext = image_path.rsplit(".", 1)[-1].lower()
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        raw = _call_vision(DD_PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
-        data = _extract_json(raw)
-        result = self._normalize(data)
-        if not result.get("ok") or result.get("count", 0) == 0:
-            fallback = self._parse_cropped_regions(image_path, mime)
-            if fallback.get("ok") and fallback.get("count", 0) > 0:
-                result = fallback
+        from PIL import Image
+        with Image.open(image_path) as image:
+            width, height = image.size
+        if height > self._max_crop_height(width):
+            # 长表即使全图返回少量行也会 ok=True，必须在调用模型前主动分块。
+            result = self._parse_cropped_regions(image_path, mime)
+        else:
+            with open(image_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+            raw = _call_vision(self._parse_prompt, img_b64, mime, trace_id=self._trace_id)
+            result = self._normalize(_extract_json(raw))
+            if not result.get("ok") or result.get("count", 0) == 0:
+                result = self._parse_cropped_regions(image_path, mime)
         if result.get("ok"):
             need_bg = any(not item.get("background_color") for item in result.get("data", []))
             if need_bg:
@@ -445,37 +470,92 @@ class DDImageParser:
                             item["background_color"] = bg
         return result
 
-    def _parse_cropped_regions(self, image_path: str, mime: str) -> dict:
-        """整张长表失败时裁剪上/中/下三段分别解析后合并。"""
+    @staticmethod
+    def _max_crop_height(width: int) -> int:
+        """限制单块长宽比和高度，使多列表格适配视觉与输出预算。"""
+        return max(512, min(1200, int(width * 1.5)))
+
+    @staticmethod
+    def _overlap_row_key(item: dict) -> tuple:
+        """代码优先；无代码时用名称和数值，不让颜色别名产生重复行。"""
+        name = str(item.get('index_name') or '').strip()
+        code = str(item.get('index_code') or '').strip().upper()
+        if code:
+            return ('code', code, name)
+        numeric = ('pe', 'pb', 'pe_percentile', 'pb_percentile', 'index_temperature', 'dividend_yield', 'roe')
+        return ('values', name, *(item.get(key) for key in numeric))
+
+    def _parse_cropped_regions(self, image_path: str, mime: str, crop_prompt: str = None) -> dict:
+        """覆盖整表并重叠裁剪；任何分块失败都不能当成完整成功。"""
         try:
             from PIL import Image
         except ImportError:
             return {"ok": False, "error": "PIL 不可用", "data": [], "count": 0}
         try:
-            img = Image.open(image_path)
-            w, h = img.size
-            boxes = [
-                (0, 0, w, min(h, int(h * 0.36))),
-                (0, max(0, int(h * 0.34)), w, min(h, int(h * 0.84))),
-                (0, max(0, int(h * 0.82)), w, h),
-            ]
+            import math
             import io
-            merged, seen, update_date = [], set(), ""
-            for box in boxes:
-                buf = io.BytesIO()
-                img.crop(box).save(buf, format="PNG" if mime == "png" else "JPEG")
-                crop_b64 = base64.b64encode(buf.getvalue()).decode()
-                raw = _call_vision(DD_PARSE_PROMPT_CROP, crop_b64, mime, trace_id=self._trace_id)
-                partial = self._normalize(_extract_json(raw))
-                if partial.get("update_date") and not update_date:
-                    update_date = partial["update_date"]
-                for item in partial.get("data", []):
-                    k = item.get("index_name")
-                    if k and k not in seen:
-                        seen.add(k)
-                        merged.append(item)
-            return {"ok": bool(merged), "update_date": update_date, "market_temperature": None,
-                    "data": merged, "count": len(merged), "raw_json": json.dumps({"数据": merged}, ensure_ascii=False)}
+            merged, failed, previous_rows = [], [], {}
+            update_date, market_temperature = "", None
+            with Image.open(image_path) as img:
+                w, h = img.size
+                max_height = self._max_crop_height(w)
+                # 短图的全图识别失败时仍保留裁剪重试；避免尾块只剩脚注。
+                if h <= max_height:
+                    max_height = max(1, math.ceil(h * 0.6))
+                overlap = min(max_height // 4, max(48, w // 10))
+                count = max(1, math.ceil((h - overlap) / max(1, max_height - overlap)))
+                crop_height = math.ceil((h + (count - 1) * overlap) / count)
+                for index in range(count):
+                    top = index * (crop_height - overlap)
+                    bottom = min(h, top + crop_height)
+                    logger.info('[%s:%s] 分块 %s/%s 开始 y=%s:%s',
+                                type(self).__name__, self._trace_id, index + 1, count, top, bottom)
+                    try:
+                        buf = io.BytesIO()
+                        with img.crop((0, top, w, bottom)) as crop:
+                            if mime == 'png':
+                                crop.save(buf, format='PNG')
+                            else:
+                                with crop.convert('RGB') as rgb:
+                                    rgb.save(buf, format='JPEG')
+                        crop_b64 = base64.b64encode(buf.getvalue()).decode()
+                        prompt = self._parse_prompt if index == 0 else (crop_prompt or self._crop_prompt)
+                        raw = _call_vision(prompt, crop_b64, 'png' if mime == 'png' else 'jpeg', trace_id=self._trace_id)
+                        partial = self._normalize(_extract_json(raw))
+                        if not partial.get('ok') or not partial.get('data'):
+                            raise ValueError(partial.get('error') or '分块未识别到有效数据')
+                        if partial.get('update_date') and not update_date:
+                            update_date = partial['update_date']
+                        if partial.get('market_temperature') is not None and market_temperature is None:
+                            market_temperature = partial['market_temperature']
+                        current_rows = {}
+                        for item in partial['data']:
+                            # 仅消除相邻重叠块的相同行，不能全局按名称合并不同市场指数。
+                            signature = self._overlap_row_key(item)
+                            if signature in previous_rows:
+                                position = previous_rows[signature]
+                                for key, value in item.items():
+                                    if merged[position].get(key) is None and value is not None:
+                                        merged[position][key] = value
+                            else:
+                                position = len(merged)
+                                merged.append(item)
+                            current_rows[signature] = position
+                        previous_rows = current_rows
+                        logger.info('[%s:%s] 分块 %s/%s 完成 %s 行，累计 %s 行',
+                                    type(self).__name__, self._trace_id, index + 1, count, len(partial['data']), len(merged))
+                    except Exception as e:
+                        previous_rows = {}
+                        failed.append({'segment': index + 1, 'top': top, 'bottom': bottom, 'error': str(e)})
+                        logger.warning('[%s:%s] 分块 %s/%s 失败: %s',
+                                       type(self).__name__, self._trace_id, index + 1, count, e)
+            result = {'ok': bool(merged) and not failed, 'update_date': update_date,
+                      'market_temperature': market_temperature, 'data': merged, 'count': len(merged),
+                      'segments': count, 'failed_segments': failed, 'partial': bool(failed and merged)}
+            if failed:
+                result['error'] = f'{len(failed)}/{count} 个图片分块解析失败，请重试；已保留 {len(merged)} 行供检查'
+            result['raw_json'] = json.dumps(result, ensure_ascii=False)
+            return result
         except Exception as e:
             return {"ok": False, "error": f"裁剪解析失败: {e}", "data": [], "count": 0}
 
@@ -579,64 +659,8 @@ class DDImageParser:
 
 class LiuyiImageParser(DDImageParser):
     """六亿估值表解析器，继承 DDImageParser，仅换 prompt。"""
-
-    def parse(self, image_path: str) -> dict:
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-        ext = image_path.rsplit(".", 1)[-1].lower()
-        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-        # 六亿估值表：模型统一走 DB vision.mimo.model 配置，按列顺序提取完整数据
-        raw = _call_vision(LIUYI_PARSE_PROMPT, img_b64, mime, trace_id=self._trace_id)
-        data = _extract_json(raw)
-        result = self._normalize(data)
-        if not result.get("ok") or result.get("count", 0) == 0:
-            fallback = self._parse_cropped_regions(image_path, mime, crop_prompt=LIUYI_PARSE_PROMPT_CROP)
-            if fallback.get("ok") and fallback.get("count", 0) > 0:
-                result = fallback
-        if result.get("ok"):
-            need_bg = any(not item.get("background_color") for item in result.get("data", []))
-            if need_bg:
-                bg = extract_dominant_color(image_path)
-                if bg:
-                    for item in result.get("data", []):
-                        if not item.get("background_color"):
-                            item["background_color"] = bg
-        return result
-
-    def _parse_cropped_regions(self, image_path: str, mime: str, crop_prompt: str = None) -> dict:
-        """整张长表失败时裁剪上/中/下三段分别解析后合并。支持自定义 prompt。"""
-        effective_prompt = crop_prompt or LIUYI_PARSE_PROMPT_CROP
-        try:
-            from PIL import Image
-        except ImportError:
-            return {"ok": False, "error": "PIL 不可用", "data": [], "count": 0}
-        try:
-            img = Image.open(image_path)
-            w, h = img.size
-            boxes = [
-                (0, 0, w, min(h, int(h * 0.36))),
-                (0, max(0, int(h * 0.34)), w, min(h, int(h * 0.84))),
-                (0, max(0, int(h * 0.82)), w, h),
-            ]
-            import io
-            merged, seen, update_date = [], set(), ""
-            for box in boxes:
-                buf = io.BytesIO()
-                img.crop(box).save(buf, format="PNG" if mime == "png" else "JPEG")
-                crop_b64 = base64.b64encode(buf.getvalue()).decode()
-                raw = _call_vision(effective_prompt, crop_b64, mime, trace_id=self._trace_id)
-                partial = self._normalize(_extract_json(raw))
-                if partial.get("update_date") and not update_date:
-                    update_date = partial["update_date"]
-                for item in partial.get("data", []):
-                    k = item.get("index_name")
-                    if k and k not in seen:
-                        seen.add(k)
-                        merged.append(item)
-            return {"ok": bool(merged), "update_date": update_date, "market_temperature": None,
-                    "data": merged, "count": len(merged), "raw_json": json.dumps({"数据": merged}, ensure_ascii=False)}
-        except Exception as e:
-            return {"ok": False, "error": f"裁剪解析失败: {e}", "data": [], "count": 0}
+    _parse_prompt = LIUYI_PARSE_PROMPT
+    _crop_prompt = LIUYI_PARSE_PROMPT_CROP
 
 
 parser = ImageParser()

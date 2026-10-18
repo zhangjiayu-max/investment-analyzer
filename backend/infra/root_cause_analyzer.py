@@ -198,7 +198,7 @@ def analyze_root_cause(bad_case: dict) -> dict | None:
         return None
 
 
-def batch_analyze(limit: int = 50, force: bool = False) -> dict:
+def batch_analyze(limit: int = 50, force: bool = False, progress_callback=None) -> dict:
     """批量分析未标记根因的 Bad Case。
 
     参数:
@@ -229,36 +229,25 @@ def batch_analyze(limit: int = 50, force: bool = False) -> dict:
     from db.portfolio import list_all_bad_cases
     from db._conn import _get_conn
 
-    cases = list_all_bad_cases(limit=200)  # 多拿一些，后面过滤
-
-    # 过滤掉已有根因的（除非 force=True）
-    if not force:
-        conn = _get_conn()
-        analyzed_ids = set()
-
-        # 查已有根因的 analysis 记录
-        rows = conn.execute(
-            "SELECT id FROM portfolio_analysis_records WHERE root_cause != '' AND root_cause IS NOT NULL"
-        ).fetchall()
-        analyzed_ids.update(f"analysis_{r['id']}" for r in rows)
-
-        # 查已有根因的 feedback 记录
-        rows = conn.execute(
-            "SELECT id FROM llm_feedback WHERE root_cause != '' AND root_cause IS NOT NULL"
-        ).fetchall()
-        analyzed_ids.update(f"chat_{r['id']}" for r in rows)
-        conn.close()
-
-        cases = [c for c in cases if f"{c['source']}_{c['id']}" not in analyzed_ids]
-
-    cases = cases[:limit]
+    # 在数据库先筛未处理项，避免已处理的最近200条遮蔽旧案例。
+    conn = _get_conn()
+    condition = "" if force else " AND (root_cause IS NULL OR root_cause='')"
+    ids = conn.execute(f"""SELECT 'analysis' AS source,id,created_at FROM portfolio_analysis_records
+        WHERE feedback='unhelpful' {condition} UNION ALL
+        SELECT 'chat',id,created_at FROM llm_feedback WHERE rating='unhelpful' {condition}
+        ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
+    conn.close()
+    from db.eval import get_governance_bad_case
+    cases = [case for row in ids if (case := get_governance_bad_case(row['source'],row['id']))]
 
     total = len(cases)
     analyzed = 0
     failed = 0
     results = []
 
-    for case in cases:
+    for index,case in enumerate(cases):
+        if progress_callback:
+            progress_callback({'completed':index,'total':total,'source':case['source'],'case_id':case['id']})
         result = analyze_root_cause(case)
         if result:
             # 写入数据库

@@ -10,6 +10,7 @@ import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
 import { mobileMoreGroups, mobileTabs, getVisibleMobileMoreGroups } from '../mobileNavigation.js'
 import { useAppNavigation } from '../composables/useAppNavigation'
 import { isDevMode, setDevMode } from '../navigation.js'
+import { trackPageEnter, trackPageLeave } from '../composables/useTracking'
 
 // 懒加载组件：defineAsyncComponent 让 Vite 自动按动态 import 做代码分割
 // 首屏 JS 预计降 40%+，低频页面（系统管理/质量评测等）按需加载
@@ -55,6 +56,11 @@ const DecisionCenter = defineAsyncComponent(() => import('./decision/DecisionCen
 const FeatureUsagePage = defineAsyncComponent(() => import('./analysis/FeatureUsagePage.vue'))
 
 const { activePage } = useAppNavigation()
+watch(activePage, (next, previous) => {
+  if (previous) trackPageLeave(previous)
+  trackPageEnter(next || 'dashboard')
+}, { immediate: true })
+onUnmounted(() => trackPageLeave(activePage.value || 'dashboard'))
 const showMoreMenu = ref(false)
 const showNotificationCenter = ref(false)
 const devMode = ref(isDevMode())

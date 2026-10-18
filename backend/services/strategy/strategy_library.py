@@ -24,6 +24,7 @@ import statistics
 from datetime import datetime
 
 from db.valuations import get_valuation_history
+from db.config import get_config
 from db.backtest_results import save_backtest, list_backtests  # noqa: F401（list_backtests 供路由复用）
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def _calc_trade_cost(amount: float, trade_type: str, params: dict | None = None)
     # 滑点（双向，按金额估算）
     slippage = amount * slippage_rate
 
-    return round(commission + stamp_duty + transfer_fee + slippage, 2)
+    return min(amount, round(commission + stamp_duty + transfer_fee + slippage, 2))
 
 
 # ══════════════════════════════════════════════════════
@@ -132,6 +133,8 @@ def _empty_result(initial_cash: float) -> dict:
         "sharpe_ratio": 0.0,
         "volatility": 0.0,
         "nav_curve": [],
+        "unit_nav_curve": [],
+        "investor_return": 0.0,
         "trades": 0,
         "days": 0,
         "total_cost": 0.0,
@@ -244,19 +247,26 @@ def _execute_signals(signals: list[dict], nav_series: list[dict],
 
 def _build_result(strategy_name: str, nav_series: list[dict],
                   nav_curve: list[dict], total_invested: float,
-                  trades: int) -> dict:
+                  trades: int, unit_nav_curve: list[dict] | None = None) -> dict:
     """构建回测结果 + 计算 5 项核心指标（P3 增加 volatility）。"""
     if not nav_curve:
         return _empty_result(total_invested)
 
     values = [p["value"] for p in nav_curve]
     final_value = values[-1]
-    total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0.0
+    investor_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0.0
+    if unit_nav_curve is None:
+        unit_nav_curve = [{"date": point["date"], "value": point["value"] / total_invested}
+                          for point in nav_curve] if total_invested > 0 else []
+    unit_values = [point["value"] for point in unit_nav_curve]
+    total_return = unit_values[-1] - 1 if unit_values else 0.0
     days = _calc_days(nav_series)
     annual_return = _calc_annual_return(total_return, days)
-    max_drawdown = _calc_max_drawdown(values)
-    sharpe_ratio = _calc_sharpe(values)
-    volatility = _calc_volatility(values)
+    max_drawdown = _calc_max_drawdown([1.0] + unit_values)
+    # 按实际观察频率年化，周/月快照不冒充252个日收益观察。
+    periods_per_year = (len(unit_values) - 1) * 365 / days if days > 0 else 252
+    sharpe_ratio = _calc_sharpe(unit_values, periods_per_year)
+    volatility = _calc_volatility(unit_values, periods_per_year)
 
     return {
         "strategy": strategy_name,
@@ -268,6 +278,9 @@ def _build_result(strategy_name: str, nav_series: list[dict],
         "sharpe_ratio": round(sharpe_ratio, 4),
         "volatility": round(volatility, 4),
         "nav_curve": nav_curve,
+        "unit_nav_curve": unit_nav_curve,
+        "investor_return": round(investor_return, 4),
+        "return_method": "time_weighted_unit_nav",
         "trades": trades,
         "days": days,
         "total_cost": 0.0,
@@ -288,7 +301,9 @@ def _calc_days(nav_series: list[dict]) -> int:
 
 def _calc_annual_return(total_return: float, days: int) -> float:
     """年化收益率 = (1 + total_return) ** (365/days) - 1。"""
-    if days <= 0 or total_return <= -1:
+    if total_return <= -1:
+        return -1.0
+    if days <= 0:
         return 0.0
     return (1 + total_return) ** (365.0 / days) - 1
 
@@ -309,7 +324,7 @@ def _calc_max_drawdown(values: list[float]) -> float:
     return max_dd
 
 
-def _calc_sharpe(values: list[float]) -> float:
+def _calc_sharpe(values: list[float], periods_per_year: float = 252) -> float:
     """夏普比率 = (mean(daily_return) - rf) / std(daily_return) * sqrt(252)。
 
     rf（日频无风险利率）= 0.03 / 252。
@@ -326,11 +341,11 @@ def _calc_sharpe(values: list[float]) -> float:
     std_ret = statistics.pstdev(returns)
     if std_ret == 0:
         return 0.0
-    rf_daily = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
-    return (mean_ret - rf_daily) / std_ret * math.sqrt(TRADING_DAYS_PER_YEAR)
+    rf_period = RISK_FREE_RATE_ANNUAL / max(1, periods_per_year)
+    return (mean_ret - rf_period) / std_ret * math.sqrt(max(1, periods_per_year))
 
 
-def _calc_volatility(values: list[float]) -> float:
+def _calc_volatility(values: list[float], periods_per_year: float = 252) -> float:
     """年化波动率 = std(daily_return) * sqrt(252)。
 
     P3 Step1 新增。返回 0.0~1.0 的小数（如 0.18 表示 18%）。
@@ -344,7 +359,7 @@ def _calc_volatility(values: list[float]) -> float:
     if len(returns) < 2:
         return 0.0
     std_ret = statistics.pstdev(returns)
-    return std_ret * math.sqrt(TRADING_DAYS_PER_YEAR)
+    return std_ret * math.sqrt(max(1, periods_per_year))
 
 
 # ══════════════════════════════════════════════════════
@@ -391,13 +406,13 @@ class DCAStrategy(Strategy):
             ma60_list = _calc_ma(nav_values, 60)
 
         signals: list[dict] = []
-        last_buy_idx = -interval_days  # 让第一个数据点就能触发买入
+        last_buy_date = None
 
         for i, point in enumerate(nav_series):
-            # 按 interval_days 间隔触发
-            if i - last_buy_idx < interval_days:
+            current_date = datetime.strptime(point["date"], "%Y-%m-%d").date()
+            if last_buy_date is not None and (current_date - last_buy_date).days < interval_days:
                 continue
-            last_buy_idx = i
+            last_buy_date = current_date
 
             mult = 1.0
             reason = "固定定投"
@@ -457,6 +472,8 @@ class DCAStrategy(Strategy):
         total_invested = initial_cash
         trades = 1
         nav_curve: list[dict] = []
+        unit_nav_curve: list[dict] = []
+        fund_units = initial_cash  # 单位净值初值1，注资按当期单位净值申购单位。
 
         # 信号按日期索引
         sig_by_date: dict[str, list[dict]] = {}
@@ -474,6 +491,11 @@ class DCAStrategy(Strategy):
                 if sig.get("type") == "buy":
                     amount = float(sig.get("amount", 0))
                     if amount > 0:
+                        asset_before_flow = shares * nav
+                        unit_price = asset_before_flow / fund_units if fund_units > 0 else 1
+                        if unit_price <= 0:
+                            continue
+                        fund_units += amount / unit_price
                         total_invested += amount
                         # P0-5: 定投扣成本
                         cost = _calc_trade_cost(amount, "buy", self.params)
@@ -482,8 +504,9 @@ class DCAStrategy(Strategy):
                         trades += 1
 
             nav_curve.append({"date": d, "value": round(shares * nav, 2)})
+            unit_nav_curve.append({"date": d, "value": shares * nav / fund_units if fund_units > 0 else 0})
 
-        result = _build_result(self.name, nav_series, nav_curve, total_invested, trades)
+        result = _build_result(self.name, nav_series, nav_curve, total_invested, trades, unit_nav_curve)
         result["total_cost"] = round(total_cost, 2)
         return result
 
@@ -583,7 +606,7 @@ class TwoEightStrategy(Strategy):
       - 初始按 equity_ratio 买入股票，剩余为债券
       - 债券仓位：P3 Step4 优先用真实债基累计净值（与股票净值按日期对齐）；
         无 bond_code 或取数失败时回退到固定年化计息
-      - 每月 rebalance_day 再平衡到目标比例
+      - 每月 rebalance_day 再平衡到目标比例；真实债基缺报价时延至完整报价日
     """
 
     name = "two_eight"
@@ -704,7 +727,10 @@ class TwoEightStrategy(Strategy):
             try:
                 dt = datetime.strptime(str(d), "%Y-%m-%d")
                 month_key = f"{dt.year}-{dt.month:02d}"
-                if dt.day >= rebalance_day and month_key != last_month:
+                # 缺少真实债基当日价格时只沿用持仓估值，不虚构买卖；
+                # 不消耗当月再平衡机会，等下一完整报价日再执行。
+                bond_tradeable = not use_real_bond or bond_nav_by_date.get(d, 0) > 0
+                if dt.day >= rebalance_day and month_key != last_month and bond_tradeable:
                     last_month = month_key
                     total_value = equity_value + bond_value
                     target_equity = total_value * equity_ratio
@@ -752,8 +778,7 @@ class CoreSatelliteStrategy(Strategy):
 
     参数：
       core_ratio:  核心仓位比例（默认 0.6）
-      core_code:   核心指数代码（默认 000300，当前回测用 target_code 数据）
-      satellites:  卫星列表（预留，当前回测基于 target_code 的均线信号）
+      当前仅对同一 target_code 分设核心持有仓与卫星择时仓，不接受多标的参数。
       ma_short:    短期均线（默认 20）
       ma_long:     长期均线（默认 60）
 
@@ -918,8 +943,6 @@ STRATEGY_TEMPLATES = [
         "description": "核心仓位持有不动，卫星仓位按均线信号调仓",
         "params": {
             "core_ratio": {"type": "float", "default": 0.6, "description": "核心仓位比例"},
-            "core_code": {"type": "str", "default": "000300", "description": "核心指数代码"},
-            "satellites": {"type": "list", "default": [], "description": "卫星列表"},
             "ma_short": {"type": "int", "default": 20, "description": "短期均线窗口"},
             "ma_long": {"type": "int", "default": 60, "description": "长期均线窗口"},
         },
@@ -969,7 +992,7 @@ def _fetch_index_nav_series(target_code: str, start_date: str | None = None,
             nav = float(nav)
         except (TypeError, ValueError):
             continue
-        if nav <= 0:
+        if not math.isfinite(nav) or nav <= 0:
             continue
         # 日期过滤
         if start_date and str(d) < start_date:
@@ -1010,7 +1033,8 @@ def _fetch_fund_nav_series(fund_code: str, start_date: str | None = None,
     series: list[dict] = []
     for _, row in df.iterrows():
         try:
-            d = str(row.get("净值日期", ""))
+            d = str(row.get("净值日期", ""))[:10]
+            datetime.strptime(d, "%Y-%m-%d")
             # 优先用累计净值，回退到单位净值
             nav = row.get("累计净值")
             if nav is None or (isinstance(nav, float) and math.isnan(nav)):
@@ -1018,7 +1042,7 @@ def _fetch_fund_nav_series(fund_code: str, start_date: str | None = None,
             nav = float(nav) if nav is not None else None
         except (TypeError, ValueError):
             continue
-        if not d or nav is None or nav <= 0:
+        if not d or nav is None or not math.isfinite(nav) or nav <= 0:
             continue
         if start_date and d < start_date:
             continue
@@ -1094,13 +1118,89 @@ def _fund_to_index_code(fund_code: str) -> str | None:
         # 上证50
         "510050": "000016", "110003": "000016",
         # 创业板
-        "159915": "399006", "161022": "399006",
+        "159915": "399006",
         # 中证白酒
         "161725": "399997",
         # 中证红利
         "100032": "000922",
     }
     return _MAP.get(fund_code)
+
+
+MAX_SWEEP_COMBINATIONS = 256
+
+
+def _require_backtest_enabled():
+    if str(get_config("strategy_backtest.enabled", "true")).lower() != "true":
+        raise ValueError("策略回测已关闭，请在系统配置中启用")
+
+
+def validate_backtest_request(strategy_name: str, target_code: str, params: dict,
+                              start_date: str | None = None, end_date: str | None = None,
+                              initial_cash: float = 100000, target_type: str = "index"):
+    """严格校验公开参数，不接受静默无效的多标的设置。"""
+    if strategy_name not in STRATEGY_REGISTRY:
+        raise ValueError("未知策略")
+    if target_type not in {"index", "fund"}:
+        raise ValueError("target_type 必须为 index 或 fund")
+    if not isinstance(target_code, str) or not target_code.strip() or len(target_code) > 32:
+        raise ValueError("标的代码不能为空且不能超过32字符")
+    if not isinstance(params, dict):
+        raise ValueError("策略参数必须为对象")
+    def number(name, value, low, high, integer=False, exclusive=False):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} 必须为有效数字")
+        if not math.isfinite(value) or value < low or value > high or (exclusive and value == low) or (integer and value != int(value)):
+            raise ValueError(f"{name} 超出有效范围")
+    number("initial_cash", initial_cash, 0, 1e12, exclusive=True)
+    dates = []
+    for key, value in (("start_date", start_date), ("end_date", end_date)):
+        if value:
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%d").date()
+                if parsed.isoformat() != value:
+                    raise ValueError()
+                dates.append(parsed)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} 必须为 YYYY-MM-DD")
+    if len(dates) == 2 and dates[0] > dates[1]:
+        raise ValueError("开始日期不能晚于结束日期")
+    allowed = set(next(template for template in STRATEGY_TEMPLATES if template["name"] == strategy_name)["params"])
+    allowed.update({"cost_enabled", "commission_rate", "stamp_duty_rate", "transfer_fee_rate", "slippage_rate", "min_commission"})
+    unknown = set(params) - allowed
+    if unknown:
+        raise ValueError(f"不支持的参数: {', '.join(sorted(unknown))}")
+    bounds = {
+        "interval_days": (1, 3650, True, False), "amount": (0, 1e10, False, True),
+        "grid_steps": (1, 10000, True, False), "grid_pct": (0, 1, False, True),
+        "base_amount": (0, 1e12, False, True), "rebalance_day": (1, 28, True, False),
+        "equity_ratio": (0, 1, False, False), "core_ratio": (0, 1, False, False),
+        "bond_return_annual": (-.99, 1, False, False),
+        "ma_short": (1, 10000, True, False), "ma_long": (2, 10000, True, False),
+        **{name: (0, .1, False, False) for name in ("commission_rate", "stamp_duty_rate", "transfer_fee_rate", "slippage_rate")},
+        "min_commission": (0, 10000, False, False),
+    }
+    for key, value in params.items():
+        if key in bounds:
+            low, high, integer, exclusive = bounds[key]
+            number(key, value, low, high, integer, exclusive)
+    if "cost_enabled" in params and not isinstance(params["cost_enabled"], bool):
+        raise ValueError("cost_enabled 必须为布尔值")
+    if not isinstance(params.get("trigger", "fixed"), str) or params.get("trigger", "fixed") not in {"fixed", "ma", "valuation"}:
+        raise ValueError("无效的定投触发方式")
+    if strategy_name == "core_satellite" and float(params.get("ma_short", 20)) >= float(params.get("ma_long", 60)):
+        raise ValueError("短期均线必须小于长期均线")
+
+
+def _effective_params(strategy_name: str, params: dict) -> dict:
+    template = next(template for template in STRATEGY_TEMPLATES if template["name"] == strategy_name)
+    defaults = {name: spec["default"] for name, spec in template["params"].items()}
+    defaults.update(cost_enabled=True, commission_rate=DEFAULT_COMMISSION_RATE,
+                    stamp_duty_rate=DEFAULT_STAMP_DUTY_RATE, transfer_fee_rate=DEFAULT_TRANSFER_FEE_RATE,
+                    slippage_rate=DEFAULT_SLIPPAGE_RATE, min_commission=DEFAULT_MIN_COMMISSION)
+    return {**defaults, **params}
 
 
 def run_backtest(strategy_name: str, target_code: str, params: dict,
@@ -1130,6 +1230,9 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
     Returns:
         回测结果 dict。数据不足时返回 {"status": "error", ...}。
     """
+    _require_backtest_enabled()
+    validate_backtest_request(strategy_name, target_code, params, start_date, end_date, initial_cash, target_type)
+    params = _effective_params(strategy_name, params)
     # 1. 取历史净值（按 target_type 分流）
     nav_series = _fetch_nav_series(target_code, start_date, end_date, target_type=target_type)
     if len(nav_series) < 2:
@@ -1155,6 +1258,7 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
     result["status"] = "ok"
     result["target_code"] = target_code
     result["target_type"] = target_type
+    result["initial_cash"] = initial_cash
     result["strategy_name"] = strategy_name
     result["params"] = params
     result["start_date"] = nav_series[0]["date"]
@@ -1168,7 +1272,7 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
         start_date=nav_series[0]["date"],
         end_date=nav_series[-1]["date"],
     )
-    benchmark_return = 0.0
+    benchmark_return = None
     if benchmark_nav_curve:
         first_v = benchmark_nav_curve[0].get("value", 1.0)
         last_v = benchmark_nav_curve[-1].get("value", 1.0)
@@ -1196,8 +1300,11 @@ def run_backtest(strategy_name: str, target_code: str, params: dict,
             months=months,
         )
         result["backtest_id"] = backtest_id
+        result["save_status"] = "saved"
     except Exception as e:
         logger.warning(f"保存回测结果失败: {e}")
+        result["save_status"] = "error"
+        result["save_error"] = "回测已计算，但保存失败，请稍后重试"
 
     return result
 
@@ -1221,6 +1328,10 @@ def parameter_sweep(strategy_name: str, target_code: str,
     Returns:
         各参数组合的回测结果列表。数据不足时返回空列表。
     """
+    _require_backtest_enabled()
+    combos = _expand_param_combinations(param_ranges) or [{}]
+    for combo in combos:
+        validate_backtest_request(strategy_name, target_code, combo, start_date, end_date, initial_cash, target_type)
     # 取数据一次（避免重复查询）
     nav_series = _fetch_nav_series(target_code, start_date, end_date, target_type=target_type)
     if len(nav_series) < 2:
@@ -1231,15 +1342,13 @@ def parameter_sweep(strategy_name: str, target_code: str,
         return []
 
     # 展开参数组合
-    combos = _expand_param_combinations(param_ranges)
-    if not combos:
-        combos = [{}]
-
     results: list[dict] = []
     for combo in combos:
+        combo = _effective_params(strategy_name, combo)
         strategy = strategy_cls(combo)
         result = strategy.run(nav_series, initial_cash)
         result["params"] = combo
+        result["initial_cash"] = initial_cash
         result["strategy_name"] = strategy_name
         result["target_code"] = target_code
         result["target_type"] = target_type
@@ -1262,6 +1371,8 @@ def _expand_param_combinations(param_ranges: dict) -> list[dict]:
     """
     if not param_ranges:
         return []
+    if len(param_ranges) > 32:
+        raise ValueError("参数扫描字段过多")
 
     keys = list(param_ranges.keys())
     value_lists = [
@@ -1269,6 +1380,11 @@ def _expand_param_combinations(param_ranges: dict) -> list[dict]:
         for k in keys
     ]
 
+    combination_count = math.prod(len(values) for values in value_lists)
+    if combination_count > MAX_SWEEP_COMBINATIONS:
+        raise ValueError(f"参数扫描最多允许 {MAX_SWEEP_COMBINATIONS} 个组合")
+    if any(not values for values in value_lists):
+        raise ValueError("参数范围不能为空")
     combos: list[dict] = []
 
     def _recurse(idx: int, current: dict):

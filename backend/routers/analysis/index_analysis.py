@@ -2,8 +2,10 @@
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException
 
@@ -23,7 +25,7 @@ from services.rag import build_rag_context_with_details, log_rag_search  # 保�
 from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from ._shared import inject_rag_context, build_portfolio_facts_with_check
-from ._agent_contract import require_analysis_agent
+from ._agent_contract import require_analysis_agent, complete_text_analysis
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -31,71 +33,231 @@ router = APIRouter(tags=["analysis-index-analysis"])
 _background_tasks = set()
 
 
+def _date_status(value, stale_days=3):
+    """只接受来源日期，不用抓取时间填补缺失的截至日期。"""
+    try:
+        parsed = date.fromisoformat(str(value)[:10])
+        age = (date.today() - parsed).days
+        if age < 0:
+            return 'unknown'
+        return 'stale' if age > stale_days else 'fresh'
+    except (TypeError, ValueError):
+        return 'unknown'
+
+
 def _fetch_online_valuation_block(req, latest_local: dict | None) -> str:
-    """检查库内估值新鲜度，超过3天则补查在线最新估值。
-
-    受 tool.online_valuation_query_enabled 开关控制（默认 true）。
-    返回注入 prompt 的字符串块（带日期标注），无需补充则返回空字符串。
-    """
-    from datetime import datetime, timedelta
-    from db.config import get_config_bool, get_config_int
+    """按请求主指标补查；JSON 保留真实指标、日期和来源，禁止静默换指标。"""
+    from db.config import get_config_bool
+    if not get_config_bool('tool.online_valuation_query_enabled', True):
+        return ''
+    if req.metric_type not in ('市盈率', '市净率'):
+        return json.dumps({'warning': f'在线源不支持{req.metric_type}，未以其他指标替代'}, ensure_ascii=False)
+    stale_days = get_config_int('index_analysis.online_valuation_stale_days', 3)
+    if latest_local and _date_status(latest_local.get('snapshot_date'), stale_days) == 'fresh':
+        return ''
     try:
-        if not get_config_bool("tool.online_valuation_query_enabled", True):
-            return ""
-    except Exception:
-        return ""
-
-    # 新鲜度判定：库内无数据，或最新 snapshot_date 距今 > N 天
-    stale_days = get_config_int("index_analysis.online_valuation_stale_days", 3)
-    need_online = True
-    days_old = None
-    if latest_local and latest_local.get("snapshot_date"):
-        try:
-            snap = datetime.strptime(latest_local["snapshot_date"], "%Y-%m-%d")
-            days_old = (datetime.now() - snap).days
-            need_online = days_old > stale_days
-        except Exception:
-            pass
-
-    if not need_online:
-        return ""
-
-    # 调用 fetch_online_valuation 补一次最新估值
-    try:
-        from db.valuations import fetch_online_valuation, normalize_index_code
-        # metric_type 取库内最新记录的 metric_type，否则默认市净率
-        primary_metric = (latest_local or {}).get("metric_type") or "市净率"
-        # 兜底指标：akshare 部分指数只提供 PE 或 PB 之一，主指标查不到时尝试另一个
-        fallback_metric = "市盈率" if primary_metric == "市净率" else "市净率"
-        # 优先用带后缀代码（fetch_online_valuation 内部会 normalize）
-        code_to_query = req.index_code or (latest_local or {}).get("index_code", "")
-        if not code_to_query:
-            return ""
-        online = fetch_online_valuation(code_to_query, metric_type=primary_metric, timeout_ms=8000)
-        used_metric = primary_metric
-        if not online and fallback_metric:
-            online = fetch_online_valuation(code_to_query, metric_type=fallback_metric, timeout_ms=8000)
-            used_metric = fallback_metric
+        from db.valuations import fetch_online_valuation
+        online = fetch_online_valuation(req.index_code, metric_type=req.metric_type, timeout_ms=4000)
         if not online:
-            return f"\n[在线估值查询] 指数 {req.index_name or code_to_query} 未查到在线估值（库内最新 {latest_local.get('snapshot_date') if latest_local else '无'}，距今 {days_old} 天）。"
-        # 组装提示块
-        snap_date = online.get("snapshot_date") or online.get("date") or datetime.now().strftime("%Y-%m-%d")
-        val = online.get("current_value")
-        pct = online.get("percentile")
-        lines = [
-            f"[在线最新估值] 指数：{req.index_name or code_to_query}",
-            f"日期：{snap_date}（库内最新 {latest_local.get('snapshot_date') if latest_local else '无'}，距今 {days_old} 天，已自动补查在线数据）",
-            f"指标：{used_metric}，当前值：{val}，百分位：{pct}%",
-        ]
-        # 附加其他在线字段
-        for k in ("danger_value", "median", "opportunity_value", "zscore"):
-            if online.get(k) is not None:
-                lines.append(f"{k}: {online.get(k)}")
-        lines.append(f"数据源: {online.get('source', 'akshare_online')}")
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning(f"[index_analysis] 在线估值补充失败 {req.index_code}: {e}")
-        return ""
+            return json.dumps({'warning': f'{req.metric_type}在线估值未获取到'}, ensure_ascii=False)
+        # 缺失指标不能证明是请求指标，拒绝把未知口径冒充主指标。
+        if online.get('metric_type') != req.metric_type:
+            return json.dumps({'warning': f'在线估值返回指标{online.get("metric_type") or "未知"}与主指标不符，已排除'}, ensure_ascii=False)
+        return json.dumps({'online': online}, ensure_ascii=False, default=str)
+    except Exception as error:
+        return json.dumps({'warning': f'在线估值获取失败：{error}'}, ensure_ascii=False)
+
+
+def _empty_valuation_evidence(metric):
+    return {'primary_metric': metric, 'valuation_asof': None, 'freshness': 'missing',
+            'data_quality': 'insufficient', 'latest': None, 'online': None, 'sources': [], 'history_groups': [],
+            'history_observation_count': 0, 'warnings': [], 'news': []}
+
+
+def _valuation_source(row):
+    # 来源机构必须由显式元数据证明；图片文件名、文章 URL 不代表机构身份。
+    try:
+        raw = json.loads(row.get('raw_json') or '{}')
+    except (ValueError, TypeError):
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    provider = row.get('provider') or raw.get('provider') or row.get('source') or raw.get('source')
+    if provider in ('manual', 'online', 'unknown', 'index_valuations') or not isinstance(provider, str):
+        provider = None
+    return {'source': provider or '来源未标注', 'provider': provider,
+            'source_url': row.get('source_url') or None,
+            'source_image': row.get('source_image') or None,
+            'asof': row.get('snapshot_date') or row.get('date') or None,
+            'metric_type': row.get('metric_type'),
+            'unit': '%' if row.get('metric_type') == '股息率' else '倍'}
+
+
+def _sanitize_valuation_row(row):
+    """非法数值保留为缺失证据；低于1%的真实百分位不再次放大。"""
+    row = dict(row)
+    for field in ('current_value', 'percentile', 'current_point', 'change_pct', 'danger_value',
+                  'median', 'opportunity_value', 'max_value', 'min_value', 'avg_value', 'zscore'):
+        if field not in row:
+            continue
+        try:
+            value = float(row[field]) if not isinstance(row[field], bool) else math.nan
+        except (ValueError, TypeError, OverflowError):
+            value = math.nan
+        valid = math.isfinite(value)
+        if field == 'current_value':
+            valid = valid and value > 0
+        elif field == 'percentile':
+            valid = valid and 0 <= value <= 100
+        row[field] = value if valid else None
+    return row
+
+
+def _collect_valuation_evidence(req):
+    """主指标按来源分组；days 是观测条数上限，不解释为日历天数。"""
+    evidence = _empty_valuation_evidence(req.metric_type)
+    if not req.index_code:
+        evidence['warnings'].append('未指定指数代码，缺少主指标估值')
+        return evidence
+    latest = get_latest_valuation(req.index_code, metric_type=req.metric_type)
+    history = get_valuation_history(req.index_code, days=60, metric_type=req.metric_type)
+    # 即使上游数据不符合契约，也不能将别的指标混入主指标序列。
+    history = [_sanitize_valuation_row(row) for row in history if row.get('metric_type') == req.metric_type]
+    usable_history = [row for row in history if row.get('current_value') is not None and row.get('percentile') is not None
+                      and _date_status(row.get('snapshot_date')) != 'unknown']
+    if len(usable_history) < len(history):
+        evidence['warnings'].append('部分历史估值数值或日期无效，已从可用历史观测中排除')
+    history = usable_history
+    if latest:
+        latest = _sanitize_valuation_row(latest)
+    if latest and latest.get('metric_type') != req.metric_type:
+        latest = None
+        evidence['warnings'].append('库内最新估值指标不匹配，已排除')
+    grouped = {}
+    for row in sorted(history, key=lambda row: row.get('snapshot_date') or ''):
+        provenance = _valuation_source(row)
+        key = (req.metric_type, provenance['provider'])
+        grouped.setdefault(key, {'metric_type': req.metric_type, 'source': provenance['source'],
+                                  'comparable': provenance['provider'] is not None,
+                                  'observations': []})['observations'].append(row)
+    evidence['history_groups'] = list(grouped.values())
+    evidence['history_observation_count'] = len(history)
+    online_block = _fetch_online_valuation_block(req, latest)
+    if online_block:
+        online_result = json.loads(online_block)
+        if online_result.get('warning'):
+            evidence['warnings'].append(online_result['warning'])
+        evidence['online'] = _sanitize_valuation_row(online_result['online']) if online_result.get('online') else None
+    online = evidence['online']
+    candidates = [row for row in (latest, online) if row]
+    for row in candidates:
+        evidence['sources'].append(_valuation_source(row))
+    dated = [row for row in candidates if _date_status(row.get('snapshot_date') or row.get('date')) != 'unknown']
+    selected = max(dated, key=lambda row: row.get('snapshot_date') or row.get('date')) if dated else (latest or online)
+    evidence['latest'] = selected
+    if selected:
+        evidence['valuation_asof'] = selected.get('snapshot_date') or selected.get('date') or None
+        evidence['freshness'] = _date_status(evidence['valuation_asof'], get_config_int('index_analysis.online_valuation_stale_days', 3))
+        if selected.get('current_value') is None:
+            evidence['warnings'].append(f'{req.metric_type}当前值缺失或无效')
+        if selected.get('percentile') is None:
+            evidence['warnings'].append(f'{req.metric_type}历史分位缺失或无效，不可推算低估等级')
+        if (evidence['freshness'] == 'fresh' and selected.get('current_value') is not None
+                and selected.get('percentile') is not None):
+            evidence['data_quality'] = 'sufficient'
+        if evidence['freshness'] != 'fresh':
+            evidence['warnings'].append(f'主指标估值日期{evidence["valuation_asof"] or "未知"}，状态{evidence["freshness"]}；仅供历史参考')
+    else:
+        evidence['warnings'].append(f'{req.metric_type}估值缺失，数据不足，不能判断当前低估或给出买卖结论')
+    if online and _date_status(online.get('snapshot_date') or online.get('date')) == 'unknown':
+        evidence['warnings'].append('在线估值缺少有效来源日期，不能视为最新数据')
+    if any(not group['comparable'] for group in grouped.values()):
+        evidence['warnings'].append('部分估值来源未标注，不能确认历史口径一致，不得据此计算连续趋势')
+    if len(grouped) > 1:
+        evidence['warnings'].append('历史按指标与机构来源分组，跨来源百分位不拼接为连续趋势')
+    return evidence
+
+
+def _normalize_news_item(item, default_source):
+    return {'title': str(item.get('title') or '').strip(),
+            'summary': str(item.get('summary') or item.get('snippet') or '')[:500],
+            'url': item.get('url') or item.get('link') or item.get('newsUrl') or None,
+            'published_at': item.get('published_at') or item.get('publishTime') or item.get('publish_time') or item.get('time') or item.get('date') or None,
+            'source': item.get('source') or item.get('sources') or default_source}
+
+
+def _collect_index_news(req):
+    """保留财经搜索及 MCP 新闻原始日期、链接；无日期不能冒充今日新闻。"""
+    items, warnings, raw_context = [], [], []
+    index_label = req.index_name or req.index_code
+    try:
+        from tools import execute_tool
+        raw = execute_tool('web_search', {'query': f'{index_label} 最新消息 政策', 'max_results': 5})
+        if raw:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                rows = parsed if isinstance(parsed, list) else parsed.get('results', parsed.get('items', []))
+                items.extend(_normalize_news_item(item, 'web_search') for item in rows if isinstance(item, dict))
+                if isinstance(parsed, dict) and parsed.get('error'):
+                    warnings.append(f'新闻搜索失败：{parsed["error"]}')
+            except (ValueError, TypeError, AttributeError):
+                raw_context.append(str(raw))
+                warnings.append('部分新闻仅有文本，发布时间及链接未核验')
+    except Exception as error:
+        warnings.append(f'新闻搜索失败：{error}')
+    try:
+        from mcp.yingmi_client import get_yingmi_client
+        mcp = get_yingmi_client()
+        keywords = [index_label, 'A股 市场']
+        for word in keywords:
+            try:
+                raw = mcp.call_tool('SearchFinancialNews', {'keyword': word, 'pageSize': 3})
+                for content in raw.get('content', []) if isinstance(raw, dict) else []:
+                    if content.get('type') != 'text':
+                        continue
+                    parsed = json.loads(content['text'])
+                    if parsed.get('success'):
+                        rows = parsed.get('data', {}).get('items', [])
+                        items.extend(_normalize_news_item(item, '盈米 MCP') for item in rows if isinstance(item, dict))
+            except Exception as error:
+                warnings.append(f'MCP 新闻检索失败：{error}')
+    except Exception as error:
+        warnings.append(f'MCP 新闻不可用：{error}')
+    unique = {}
+    for item in items:
+        if item['title']:
+            unique.setdefault((item['title'], item['url']), item)
+    items = list(unique.values())[:12]
+    if not items:
+        warnings.append('新闻证据缺失，不能编造近期事件或政策')
+    elif not any(_date_status(item['published_at']) == 'fresh' for item in items):
+        warnings.append('未获取到日期可核验的近期新闻，历史新闻不能作为今日事件')
+    if any(not item['url'] or not item['published_at'] for item in items):
+        warnings.append('部分新闻缺少链接或发布时间，引用时需标明未核验')
+    context = '\n'.join(f'- {item["title"]}（来源：{item["source"]}；发布时间：{item["published_at"] or "未知"}；链接：{item["url"] or "缺失"}）：{item["summary"]}' for item in items)
+    return {'items': items, 'context': '\n'.join([context, *raw_context]).strip(), 'warnings': warnings}
+
+
+async def _bounded_data_call(label, call, timeout=8):
+    """同步外部检索在线程执行，等待有界；超时后晚到结果不会写回分析。"""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(call), timeout=timeout), ''
+    except asyncio.TimeoutError:
+        return None, f'{label}超时，相关数据缺失'
+    except Exception as error:
+        return None, f'{label}获取失败：{error}'
+
+
+def _analysis_history_dto(item):
+    """既有历史字段保留；新记录从估值上下文中恢复结构化证据。"""
+    item = dict(item)
+    try:
+        stored = json.loads(item.get('valuation_context') or '{}')
+        evidence = stored.get('evidence') if isinstance(stored, dict) else None
+    except (ValueError, TypeError):
+        evidence = None
+    item['evidence'] = evidence
+    item['metric_type'] = evidence.get('primary_metric') if evidence else None
+    return item
 
 
 @router.post("/api/analysis/run")
@@ -107,16 +269,32 @@ async def run_analysis(req: AnalysisRunRequest):
     )
 
     from db.async_tasks import start_analysis_task
+    req.index_code = req.index_code.strip()
+    req.index_name = req.index_name.strip()
+    initial_evidence = _empty_valuation_evidence(req.metric_type)
     started = start_analysis_task(
         "index_analysis", "index_deep_analysis",
-        {"index_code": req.index_code.strip(), "index_name": req.index_name.strip(), "agent_id": agent["id"]},
+        {"index_code": req.index_code, "index_name": req.index_name, "metric_type": req.metric_type, "agent_id": agent["id"]},
         "analysis_history", dict(index_code=req.index_code, index_name=req.index_name,
                                  agent_id=agent["id"], agent_name=agent["name"],
                                  prompt_used=agent.get("system_prompt", "")[:500],
-                                 news_context="", valuation_context="", result="", token_usage=0))
+                                 news_context="", valuation_context=json.dumps({"evidence": initial_evidence}, ensure_ascii=False), result="", token_usage=0))
+    started.update(index_code=req.index_code, metric_type=req.metric_type, evidence=initial_evidence)
     if started["reused"]:
+        # 幂等复用也返回原任务元数据，便于前端恢复对应指数/指标的轮询。
+        try:
+            existing_task = get_async_task(started["task_id"])
+            existing_result = existing_task.get("result") if existing_task else None
+            if isinstance(existing_result, str):
+                existing_result = json.loads(existing_result or "{}")
+            if isinstance(existing_result, dict):
+                started.update({k: existing_result[k] for k in ("index_code", "metric_type", "evidence") if k in existing_result})
+        except (ValueError, TypeError, KeyError):
+            pass
         return started
     history_id, async_task_id = started["id"], started["task_id"]
+    update_async_task(async_task_id, result={"history_id": history_id, "index_code": req.index_code,
+                                          "metric_type": req.metric_type, "evidence": initial_evidence})
     task = asyncio.create_task(_run_index_analysis_async(history_id, req.dict(), agent, async_task_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -165,41 +343,35 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
     except Exception as _e:
         logger.warning(f"create_analysis_log 失败: {_e}")
 
-    # 2. 获取估值数据（库内 + 在线兜底补最新）
-    valuation_context = ""
-    if req.index_code:
-        try:
-            latest = get_latest_valuation(req.index_code)
-            if latest:
-                valuation_context = json.dumps(latest, ensure_ascii=False, indent=2)
-            history = get_valuation_history(req.index_code, days=60)
-            if history:
-                valuation_context += f"\n\n近{len(history)}天估值历史趋势：\n" + json.dumps(history, ensure_ascii=False, indent=2)
-            # 数据新鲜度检查：库内最新估值超过3天，自动补一次在线最新估值
-            online_block = _fetch_online_valuation_block(req, latest)
-            if online_block:
-                valuation_context = online_block + ("\n\n" + valuation_context if valuation_context else "")
-        except Exception as e:
-            logger.warning(f"估值数据获取失败: {e}")
-
-    # 3. RAG 知识库检索
-    rag_context = ""
-    if req.index_name:
-        try:
-            rag_context = inject_rag_context(
-                base_query="指数分析 估值",
-                extra_keywords=req.index_name,
-                caller="index_analysis",
-            )
-        except Exception as e:
-            logger.warning(f"RAG 检索失败: {e}")
+    # 独立检索并行执行，工作线程避免阻塞 FastAPI 事件循环。
+    valuation_data, rag_data, news_data, holdings_data, facts_block = await asyncio.gather(
+        _bounded_data_call('估值', lambda: _collect_valuation_evidence(req), timeout=10),
+        _bounded_data_call('知识库', lambda: inject_rag_context(
+            base_query='指数分析 估值', extra_keywords=req.index_name, caller='index_analysis'), timeout=5),
+        _bounded_data_call('新闻', lambda: _collect_index_news(req), timeout=12),
+        _bounded_data_call('持仓', list_holdings, timeout=5),
+        # 事实层构建失败属于现有治理契约中的任务失败，交由外层终止边界处理。
+        asyncio.wait_for(asyncio.to_thread(build_portfolio_facts_with_check), timeout=5),
+    )
+    evidence = valuation_data[0] or _empty_valuation_evidence(req.metric_type)
+    news = news_data[0] or {'context': '', 'items': [], 'warnings': []}
+    evidence['news'] = news['items']
+    evidence['warnings'].extend(news['warnings'])
+    evidence['warnings'].extend(warning for _, warning in (valuation_data, rag_data, news_data, holdings_data) if warning)
+    if not rag_data[0]:
+        evidence['warnings'].append('知识库参考缺失')
+    if evidence['freshness'] == 'missing' and not evidence['warnings']:
+        evidence['warnings'].append('主指标估值缺失，数据不足')
+    evidence['generated_at'] = datetime.now().astimezone().isoformat(timespec='seconds')
+    valuation_context = json.dumps({'evidence': evidence}, ensure_ascii=False, indent=2, default=str)
+    rag_context = rag_data[0] or ''
+    news_context = news['context']
 
     # 4. 用户持仓数据
     portfolio_context = ""
-    facts_block = build_portfolio_facts_with_check()
 
     try:
-        all_holdings = list_holdings()
+        all_holdings = holdings_data[0] or []
         if all_holdings and (req.index_code or req.index_name):
             matched = [h for h in all_holdings if h.get("index_code") and h["index_code"] == req.index_code]
             if req.index_name:
@@ -230,66 +402,17 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
     except Exception as e:
         logger.warning(f"持仓数据获取失败: {e}")
 
-    # 5. 指数专属新闻
-    news_context = ""
-    try:
-        from tools import execute_tool
-        news_query = f"{index_label} 最新消息 政策" if req.index_name else "A股 今日行情 板块 热点"
-        news_result = execute_tool("web_search", {"query": news_query, "max_results": 5})
-        news_context = news_result if news_result else ""
-    except Exception as e:
-        logger.warning(f"akshare 新闻检索失败: {e}")
-
-    # YingMi MCP 搜索
-    try:
-        from mcp.yingmi_client import get_yingmi_client
-        mcp = get_yingmi_client()
-        search_keywords = [index_label] if index_label else []
-        name_lower = (req.index_name or "").lower()
-        if "恒生" in name_lower or "港" in name_lower:
-            search_keywords.extend(["港股科技", "南向资金", "港股通 科技"])
-        elif "科技" in name_lower or "信息" in name_lower or "电子" in name_lower:
-            search_keywords.extend(["科技板块", "半导体 AI"])
-        elif "消费" in name_lower:
-            search_keywords.extend(["消费板块", "白酒 食品"])
-        elif "医药" in name_lower or "生物" in name_lower:
-            search_keywords.extend(["医药板块", "创新药"])
-        elif "新能源" in name_lower or "光伏" in name_lower:
-            search_keywords.extend(["新能源", "光伏 锂电"])
-        elif "金融" in name_lower or "银行" in name_lower or "证券" in name_lower:
-            search_keywords.extend(["金融板块", "银行 券商"])
-        search_keywords.append("A股 市场")
-
-        mcp_items = []
-        seen_titles = set()
-        for kw in search_keywords[:3]:
-            try:
-                mcp_raw = await asyncio.to_thread(
-                    lambda _kw=kw: mcp.call_tool("SearchFinancialNews", {"keyword": _kw, "pageSize": 3})
-                )
-                if isinstance(mcp_raw, dict):
-                    for c in mcp_raw.get("content", []):
-                        if c.get("type") == "text":
-                            parsed = json.loads(c["text"])
-                            if parsed.get("success") and parsed.get("data", {}).get("items"):
-                                for item in parsed["data"]["items"]:
-                                    title = item.get("title", "").strip()
-                                    if title and title not in seen_titles:
-                                        seen_titles.add(title)
-                                        mcp_items.append(
-                                            f"- {title}（{item.get('sources', '')}）: {item.get('summary', '')[:120]}"
-                                        )
-            except Exception:
-                continue
-
-        if mcp_items:
-            mcp_news = "\n".join(mcp_items)
-            news_context = (news_context + "\n\n" + mcp_news).strip() if news_context else mcp_news
-    except Exception as e:
-        logger.warning(f"MCP 新闻检索失败: {e}")
-
     # 6. 拼装 prompt
     full_prompt = agent["system_prompt"]
+    full_prompt += (
+        f"\n\n## 本次证据使用约束\n主指标：{req.metric_type}。估值截至：{evidence['valuation_asof'] or '未知'}；"
+        f"新鲜度：{evidence['freshness']}。历史为观测记录数，不是连续天数。"
+        "禁止将不同指标、机构来源的百分位拼接为同一趋势；股息率高分位方向与PE/PB相反。"
+        "禁止编造估值、日期、今日行情或新闻。缺失、过期、日期未知的数据只能支持历史或条件分析，"
+        "不能据此断言当前低估、当前机会或给出确定的买卖结论。引用新闻须附原日期和链接；"
+        "新闻无日期则标注未核验。报告开头说明数据限制。\n"
+        + "\n".join(evidence['warnings'])
+    )
 
     # 注入组合约束（按字段语义分段标注，防止 LLM 把历史决策/市场数据误认为持仓）
     if facts_block:
@@ -336,8 +459,11 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
     if news_context:
         full_prompt += f"\n\n<latest_news>\n{index_label}相关新闻与政策：\n{news_context}\n</latest_news>"
 
+    # 在模型调用前保存确定性证据，模型失败时历史仍可审计数据时效与来源。
+    update_analysis_history(history_id, valuation_context=valuation_context, news_context=news_context)
     try:
-        response = await asyncio.to_thread(lambda: _call_llm(
+        result_text, token_usage = await asyncio.wait_for(complete_text_analysis(
+            _call_llm,
             caller="index_deep_analysis",
             model=MODEL_ANALYSIS,
             messages=[
@@ -347,24 +473,29 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
             temperature=get_config_float('llm.temperature_default', 0.3),
             max_tokens=get_config_int('llm.max_tokens_report', 8192),
             trace_id=trace_id,
-        ))
-        result_text = response.choices[0].message.content or ""
-        if not result_text.strip():
-            raise ValueError("模型未返回有效分析，请重试")
-        token_usage = response.usage.total_tokens if response.usage else 0
+        ), timeout=180)
+        source_names = ', '.join(dict.fromkeys(source['source'] for source in evidence['sources'])) or '缺失'
+        quality_label = '数据不足，仅供历史/条件分析' if evidence['data_quality'] != 'sufficient' else '证据截至日期如下'
+        evidence_header = (
+            f"> {quality_label}。主指标：{req.metric_type}；估值截至：{evidence['valuation_asof'] or '未知'}；来源：{source_names}。\n"
+        )
+        if evidence['warnings']:
+            evidence_header += '> 数据限制：' + '；'.join(evidence['warnings']) + '。\n'
+        result_text = evidence_header + '\n' + result_text
     except Exception as e:
-        logger.error(f"AI 分析失败: {e}")
-        update_analysis_history(history_id, status="error", error_msg=str(e))
+        error_msg = str(e) or "模型分析超时，请稍后重试"
+        logger.error(f"AI 分析失败: {error_msg}")
+        update_analysis_history(history_id, status="error", error_msg=error_msg)
         try:
             complete_analysis_log(
                 trace_id=trace_id, status="error",
                 duration_ms=int((time.time() - _start_ts) * 1000),
-                error_msg=str(e),
+                error_msg=error_msg,
             )
         except Exception as _e:
             logger.warning(f"complete_analysis_log 失败: {_e}")
         if async_task_id:
-            update_async_task(async_task_id, status="error", error_msg=str(e))
+            update_async_task(async_task_id, status="error", error_msg=error_msg)
         return
 
     update_analysis_history(
@@ -386,7 +517,7 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
     except Exception as _e:
         logger.warning(f"complete_analysis_log 失败: {_e}")
     if async_task_id:
-        update_async_task(async_task_id, status="done", result={"history_id": history_id, "result": result_text, "token_usage": token_usage}, token_usage=token_usage)
+        update_async_task(async_task_id, status="done", result={"history_id": history_id, "index_code": req.index_code, "metric_type": req.metric_type, "evidence": evidence, "result": result_text, "token_usage": token_usage}, token_usage=token_usage)
 
     async def _auto_evaluate():
         try:
@@ -407,7 +538,7 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
 @router.get("/api/analysis/history")
 async def get_analysis_history_api(index_code: str = "", limit: int = 50):
     """获取分析历史列表。"""
-    return {"history": list_analysis_history(index_code or None, limit)}
+    return {"history": [_analysis_history_dto(item) for item in list_analysis_history(index_code or None, limit)]}
 
 
 @router.get("/api/analysis/history/{history_id}")
@@ -416,7 +547,7 @@ async def get_analysis_history_detail_api(history_id: int):
     item = get_analysis_history_item(history_id)
     if not item:
         raise HTTPException(404, "记录不存在")
-    return item
+    return _analysis_history_dto(item)
 
 
 @router.get("/api/analysis/history/{history_id}/status")
@@ -425,8 +556,12 @@ async def get_analysis_history_status_api(history_id: int):
     item = get_analysis_history_status(history_id)
     if not item:
         raise HTTPException(404, "记录不存在")
+    item = _analysis_history_dto(item)
     return {
         "id": item["id"],
+        "index_code": item.get("index_code", ""),
+        "metric_type": item["metric_type"],
+        "evidence": item["evidence"],
         "status": item.get("status", "done"),
         "result": item.get("result", ""),
         "token_usage": item.get("token_usage", 0),
@@ -453,9 +588,11 @@ async def update_analysis_agent_api(agent_id: int, req: AnalysisAgentUpdateReque
     kwargs = {k: v for k, v in req.dict().items() if v is not None}
     if not kwargs:
         raise HTTPException(400, "无更新内容")
+    current = get_analysis_agent(agent_id, include_inactive=True)
+    if not current:
+        raise HTTPException(404, 'Agent 不存在')
     prompt_changed = False
     if 'system_prompt' in kwargs:
-        current = get_analysis_agent(agent_id)
         if current and kwargs['system_prompt'] != current.get('system_prompt'):
             save_prompt_version(agent_id, 'analysis', current['system_prompt'])
             prompt_changed = True

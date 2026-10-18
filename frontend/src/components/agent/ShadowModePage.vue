@@ -1,6 +1,8 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useToast } from '../../composables/useToast'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import { getShadowConfigs, createShadowConfig, toggleShadowConfig, deleteShadowConfig, getShadowRuns, getShadowStats } from '../../api'
 
 const { showToast } = useToast()
 
@@ -15,89 +17,81 @@ const activeTab = ref('configs') // 'configs' | 'runs' | 'stats'
 // 新建表单
 const form = ref({
   name: '',
-  agent_type: 'ai',
+  agent_type: 'chat',
   current_prompt: '',
   candidate_prompt: '',
   traffic_pct: 0.1,
 })
 
-const agentTypes = [
-  { value: 'ai', label: 'AI 分析' },
-  { value: 'panorama', label: '全景诊断' },
-  { value: 'deep_dive', label: '基金深度' },
-  { value: 'trade_review', label: '交易复盘' },
-  { value: 'orchestrator', label: '对话编排' },
-  { value: 'daily_report', label: '每日报告' },
-]
-
+const agentTypes = [{ value: 'chat', label: '普通 Agent 对话' }]
+const runtimeEnabled = ref(false)
+const loadError = ref('')
+const pending = ref(null)
+const actionRunning = ref(false)
+function confirmAction(message, action) { pending.value = { message, action } }
+async function applyAction() {
+  if (!pending.value || actionRunning.value) return
+  actionRunning.value = true
+  try { await pending.value.action(); pending.value = null }
+  catch (_) { /* 错误已由具体操作展示，保留确认框重试 */ }
+  finally { actionRunning.value = false }
+}
+function errorMessage(e) { return e.response?.data?.detail || e.message || '请求失败' }
 async function loadConfigs() {
   loading.value = true
+  loadError.value = ''
   try {
-    const resp = await fetch('/api/shadow/configs?active_only=false')
-    const data = await resp.json()
+    const { data } = await getShadowConfigs()
     configs.value = data.configs || []
-  } catch (e) { console.error(e) }
+    runtimeEnabled.value = data.enabled === true
+  } catch (e) { loadError.value = errorMessage(e); showToast(loadError.value, 'error') }
   finally { loading.value = false }
 }
-
+let runsRequest = 0
 async function loadRuns(configId) {
+  const request = ++runsRequest
   try {
-    const url = configId ? `/api/shadow/runs?config_id=${configId}&limit=50` : '/api/shadow/runs?limit=50'
-    const resp = await fetch(url)
-    const data = await resp.json()
-    runs.value = data.runs || []
-  } catch (e) { console.error(e) }
+    const { data } = await getShadowRuns(configId)
+    if (request === runsRequest) runs.value = data.runs || []
+  } catch (e) { if (request === runsRequest) { runs.value = []; loadError.value = errorMessage(e) } }
 }
-
+let statsRequest = 0
 async function loadStats(configId) {
+  const request = ++statsRequest
   try {
-    const url = configId ? `/api/shadow/stats?config_id=${configId}` : '/api/shadow/stats'
-    const resp = await fetch(url)
-    stats.value = await resp.json()
-  } catch (e) { console.error(e) }
+    const { data } = await getShadowStats(configId)
+    if (request === statsRequest) stats.value = data
+  } catch (e) { if (request === statsRequest) { stats.value = null; loadError.value = errorMessage(e) } }
 }
-
-async function createConfig() {
-  if (!form.value.name || !form.value.candidate_prompt) {
-    showToast('请填写名称和候选 Prompt', 'error')
-    return
-  }
-  try {
-    const resp = await fetch('/api/shadow/configs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form.value),
-    })
-    const data = await resp.json()
-    if (data.ok) {
+function createConfig() {
+  if (!form.value.name || !form.value.candidate_prompt) { showToast('请填写名称和候选 Prompt', 'error'); return }
+  confirmAction('创建后，在全局 Shadow 开关开启时会按比例运行候选 Prompt 并消耗模型额度，每日最多20次对照。', async () => {
+    try {
+      await createShadowConfig(form.value)
       showToast('创建成功', 'success')
       showCreateForm.value = false
-      form.value = { name: '', agent_type: 'ai', current_prompt: '', candidate_prompt: '', traffic_pct: 0.1 }
+      form.value = { name: '', agent_type: 'chat', current_prompt: '', candidate_prompt: '', traffic_pct: 0.1 }
       await loadConfigs()
-    }
-  } catch (e) { showToast('创建失败', 'error') }
+    } catch (e) { showToast(errorMessage(e), 'error'); throw e }
+  })
 }
-
-async function toggleConfig(config) {
-  try {
-    await fetch(`/api/shadow/configs/${config.id}/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_active: !config.is_active }),
-    })
-    config.is_active = config.is_active ? 0 : 1
-    showToast(config.is_active ? '已启用' : '已禁用', 'success')
-  } catch (e) { showToast('操作失败', 'error') }
+function toggleConfig(config) {
+  confirmAction(`${config.is_active ? '禁用' : '启用'}「${config.name}」对照实验？启用后会在全局开关开启时消耗模型额度。`, async () => {
+    try { await toggleShadowConfig(config.id, !config.is_active); await loadConfigs(); showToast('已更新', 'success') }
+    catch (e) { showToast(errorMessage(e), 'error'); throw e }
+  })
 }
-
-async function deleteConfig(id) {
-  if (!confirm('确定删除？相关执行记录也会被删除')) return
-  try {
-    await fetch(`/api/shadow/configs/${id}`, { method: 'DELETE' })
-    showToast('已删除', 'success')
-    await loadConfigs()
-  } catch (e) { showToast('删除失败', 'error') }
+function deleteConfig(id) {
+  confirmAction('删除此配置及全部相关执行记录？', async () => {
+    try {
+      await deleteShadowConfig(id)
+      if (selectedConfig.value?.id === id) selectedConfig.value = null
+      await Promise.all([loadConfigs(), loadRuns(selectedConfig.value?.id), loadStats(selectedConfig.value?.id)])
+      showToast('已删除', 'success')
+    } catch (e) { showToast(errorMessage(e), 'error'); throw e }
+  })
 }
+function formatScore(value) { return value == null ? '—' : Number(value).toFixed(1) }
 
 function selectConfig(c) {
   selectedConfig.value = c
@@ -126,11 +120,12 @@ onMounted(() => {
 </script>
 
 <template>
+  <ConfirmDialog :visible="!!pending" title="确认实验操作" :message="pending?.message || ''" :loading="actionRunning" @confirm="applyAction" @cancel="pending = null" />
   <div class="shadow-page bg-mesh">
     <div class="page-header">
       <div>
         <h2 class="page-title editorial-title-lg">Shadow Mode</h2>
-        <p class="page-desc editorial-subtitle">候选 Prompt 在生产环境静默运行、自动评分对比</p>
+        <p class="page-desc editorial-subtitle">普通 Agent 对话按比例对照候选 Prompt；发布与回滚请在 Agent 管理中人工操作</p>
       </div>
       <div class="header-actions">
         <button class="btn-primary btn-sm" @click="showCreateForm = !showCreateForm">
@@ -169,6 +164,8 @@ onMounted(() => {
       </div>
     </Transition>
 
+    <p>{{ runtimeEnabled ? '全局 Shadow 已开启' : '全局 Shadow 已关闭：配置保留，暂不产生对照调用' }}。每请求最多一个实验，每日最多20次。</p>
+    <p v-if="loadError" role="alert">加载失败：{{ loadError }}</p>
     <!-- 统计面板 -->
     <div v-if="stats" class="stats-bar">
       <div class="stat-card editorial-card reveal-stagger">
@@ -177,18 +174,18 @@ onMounted(() => {
       </div>
       <div class="stat-card editorial-card reveal-stagger">
         <span class="stat-value font-jet-lg">{{ stats.total_runs || 0 }}</span>
-        <span class="stat-label terminal-label">总运行次数</span>
+        <span class="stat-label terminal-label">总运行次数（有效 {{ stats.valid_runs || 0 }}）</span>
       </div>
       <div class="stat-card editorial-card reveal-stagger">
-        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_prod_score || 0) }">{{ (stats.avg_prod_score || 0).toFixed(1) }}</span>
+        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_prod_score || 0) }">{{ formatScore(stats.avg_prod_score) }}</span>
         <span class="stat-label terminal-label">Production 均分</span>
       </div>
       <div class="stat-card editorial-card reveal-stagger">
-        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_shadow_score || 0) }">{{ (stats.avg_shadow_score || 0).toFixed(1) }}</span>
+        <span class="stat-value font-jet-lg" :style="{ color: scoreColor(stats.avg_shadow_score || 0) }">{{ formatScore(stats.avg_shadow_score) }}</span>
         <span class="stat-label terminal-label">Shadow 均分</span>
       </div>
       <div class="stat-card editorial-card reveal-stagger">
-        <span class="stat-value font-jet-lg">{{ ((stats.shadow_win_rate || 0) * 100).toFixed(0) }}%</span>
+        <span class="stat-value font-jet-lg">{{ stats.shadow_win_rate == null ? '—' : (stats.shadow_win_rate * 100).toFixed(0) + '%' }}</span>
         <span class="stat-label terminal-label">Shadow 胜率</span>
       </div>
     </div>
@@ -211,6 +208,7 @@ onMounted(() => {
           <span class="config-type terminal-label">{{ agentTypes.find(t => t.value === c.agent_type)?.label || c.agent_type }}</span>
         </div>
         <div class="config-stats">
+          <span>{{ c.integrated ? '已接入普通 Agent 对话' : '此类型尚未接入生产执行' }}</span>
           <span><span class="font-jet">{{ c.run_count || 0 }}</span> 运行</span>
           <span v-if="c.avg_prod_score">Production: <span class="font-jet">{{ Number(c.avg_prod_score).toFixed(1) }}</span></span>
           <span v-if="c.avg_shadow_score">Shadow: <span class="font-jet">{{ Number(c.avg_shadow_score).toFixed(1) }}</span></span>
@@ -221,7 +219,7 @@ onMounted(() => {
           <button class="btn-link btn-danger" @click="deleteConfig(c.id)">删除</button>
         </div>
       </div>
-      <div v-if="!loading && configs.length === 0" class="empty-state">
+      <div v-if="!loading && !loadError && configs.length === 0" class="empty-state">
         <p>暂无 Shadow 配置</p>
         <p class="text-muted">点击「新建配置」开始测试候选 Prompt</p>
       </div>
@@ -243,25 +241,26 @@ onMounted(() => {
           <div class="score-item">
             <span class="score-label terminal-label">Production</span>
             <span class="score-value font-jet-lg" :style="{ color: scoreColor(r.production_score || 0) }">
-              {{ (r.production_score || 0).toFixed(1) }}
+              {{ formatScore(r.production_score) }}
             </span>
           </div>
           <div class="score-vs">vs</div>
           <div class="score-item">
             <span class="score-label terminal-label">Shadow</span>
             <span class="score-value font-jet-lg" :style="{ color: scoreColor(r.shadow_score || 0) }">
-              {{ (r.shadow_score || 0).toFixed(1) }}
+              {{ formatScore(r.shadow_score) }}
             </span>
           </div>
           <div class="score-winner terminal-label" v-if="r.shadow_score && r.production_score">
             {{ r.shadow_score > r.production_score + 0.5 ? 'SHADOW 胜' : r.production_score > r.shadow_score + 0.5 ? 'PRODUCTION 胜' : '持平' }}
           </div>
         </div>
+        <div>{{ ({scored:'评分完成', scoring_failed:'评分失败', execution_failed:'执行失败', running:'执行中', legacy_unverified:'历史评分未核验'})[r.status] || r.status }} {{ r.error_msg }}</div>
         <div v-if="r.score_reason" class="run-reason">{{ r.score_reason }}</div>
       </div>
-      <div v-if="runs.length === 0" class="empty-state">
+      <div v-if="!loadError && runs.length === 0" class="empty-state">
         <p>暂无执行记录</p>
-        <p class="text-muted">Shadow 运行需要接入到实际分析流程中才会产生数据</p>
+        <p class="text-muted">全局开关开启且普通 Agent 对话命中抽样后产生记录；其他类型尚未接入</p>
       </div>
     </div>
   </div>

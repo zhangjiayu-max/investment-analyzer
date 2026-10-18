@@ -6,7 +6,7 @@
       <div class="dh-summary">
         <span class="dot dot-green" /> <span class="font-jet">{{ greenCount }}</span> 正常
         <span class="dot dot-yellow" /> <span class="font-jet">{{ yellowCount }}</span> 注意
-        <span class="dot dot-red" /> <span class="font-jet">{{ redCount }}</span> 过期
+        <span class="dot dot-red" /> <span class="font-jet">{{ redCount }}</span> 异常
       </div>
     </div>
 
@@ -23,13 +23,20 @@
         v-for="(item, key) in items"
         :key="key"
         class="dh-card editorial-card reveal-stagger"
-        :class="statusClass(item.stale_days)"
+        :class="statusClass(item.status)"
       >
         <div class="dh-card-header">
           <span class="dh-card-name">{{ item.label }}</span>
         </div>
 
         <div class="dh-card-body">
+          <div class="dh-stat"><span>状态</span><span>{{ statusLabel(item.status) }}</span></div>
+          <template v-if="item.coverage">
+            <div class="dh-stat"><span>新鲜覆盖</span><span>{{ item.coverage.fresh }}/{{ item.coverage.expected }}</span></div>
+            <div v-for="row in item.coverage.items.filter(r => r.status !== 'fresh')" :key="row.key" class="dh-stat">
+              <span>{{ row.label || row.key }}</span><span>{{ statusLabel(row.status) }}</span>
+            </div>
+          </template>
           <div class="dh-stat">
             <span class="dh-stat-label terminal-label">记录数</span>
             <span class="dh-stat-value font-jet">{{ formatCount(item.count) }}</span>
@@ -40,7 +47,7 @@
           </div>
           <div class="dh-stat" v-if="item.stale_days !== undefined">
             <span class="dh-stat-label terminal-label">距今</span>
-            <span class="dh-stat-value font-jet" :class="statusClass(item.stale_days)">
+            <span class="dh-stat-value font-jet" :class="statusClass(item.status)">
               {{ formatDays(item.stale_days) }}
             </span>
           </div>
@@ -69,15 +76,17 @@ onMounted(async () => {
   }
 })
 
-const greenCount = computed(() => Object.values(items.value).filter(i => i.stale_days < 3).length)
-const yellowCount = computed(() => Object.values(items.value).filter(i => i.stale_days >= 3 && i.stale_days < 7).length)
-const redCount = computed(() => Object.values(items.value).filter(i => i.stale_days >= 7).length)
-
-function statusClass(days) {
-  if (days === undefined || days === null) return 'status-gray'
-  if (days < 3) return 'status-green'
-  if (days < 7) return 'status-yellow'
-  return 'status-red'
+const greenCount = computed(() => Object.values(items.value).filter(i => ['fresh', 'available'].includes(i.status)).length)
+const yellowCount = computed(() => Object.values(items.value).filter(i => ['partial', 'aging'].includes(i.status)).length)
+const redCount = computed(() => Object.values(items.value).filter(i => ['stale', 'invalid_date'].includes(i.status)).length)
+function statusClass(status) {
+  if (['fresh', 'available'].includes(status)) return 'status-green'
+  if (['partial', 'aging'].includes(status)) return 'status-yellow'
+  if (['stale', 'invalid_date', 'invalid'].includes(status)) return 'status-red'
+  return 'status-gray'
+}
+function statusLabel(status) {
+  return {fresh:'正常', available:'可用（资料不按更新时间过期）', partial:'部分可用', aging:'需更新', stale:'已过期', missing:'缺少数据', invalid:'日期异常', invalid_date:'日期异常', empty:'暂无记录'}[status] || status
 }
 
 function formatCount(n) {

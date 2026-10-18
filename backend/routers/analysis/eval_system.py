@@ -19,6 +19,8 @@ from db.eval import (
     save_eval_daily_report, get_eval_daily_report, list_eval_daily_reports, get_eval_trends,
 )
 from services.llm_service import _call_llm, MODEL_AUX
+from services.quality.eval_execution import execute_case, production_prompt, UnsupportedEvaluation, capture_data_evidence
+from db.eval import claim_governance_task
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,7 @@ async def run_llm_judge(case_type: str, expected_behavior: str,
             "score_format": 0,
             "score_total": 0,
             "judge_comments": "LLM Judge 已关闭",
+            "status": "skipped",
             "issues_found": [],
             "improvement_suggestions": [],
         }
@@ -101,12 +104,16 @@ async def run_llm_judge(case_type: str, expected_behavior: str,
             parsed = json.loads(content.strip())
         for key in ["score_data_accuracy", "score_actionability", "score_risk_warning",
                      "score_hallucination", "score_format"]:
-            parsed[key] = max(1, min(5, int(parsed.get(key, 3))))
+            value = parsed.get(key)
+            if type(value) is not int or not 1 <= value <= 5:
+                raise ValueError(f'Judge缺少有效评分字段: {key}')
+            parsed[key] = value
         parsed["score_total"] = (
             parsed["score_data_accuracy"] + parsed["score_actionability"] +
             parsed["score_risk_warning"] + parsed["score_hallucination"] +
             parsed["score_format"]
         )
+        parsed["status"] = "scored"
         return parsed
     except Exception as e:
         logger.error(f"[eval] LLM Judge 失败: {e}")
@@ -114,90 +121,65 @@ async def run_llm_judge(case_type: str, expected_behavior: str,
             "score_data_accuracy": 0, "score_actionability": 0,
             "score_risk_warning": 0, "score_hallucination": 0,
             "score_format": 0, "score_total": 0,
-            "judge_comments": f"评审失败: {e}",
+            "judge_comments": f"评审失败: {e}", "status":"error",
             "issues_found": [], "improvement_suggestions": [],
         }
 
 
 # ============ Agent 输出生成 ============
 
-async def _generate_agent_output(case: dict) -> str:
-    """根据用例类型生成 Agent 输出（用于评测）。"""
-    case_type = case.get("analysis_type", "panorama")
-    input_params = case.get("input_params", "{}")
+async def _generate_agent_output(case: dict, prompt_override: str = None) -> str:
+    result = await execute_case(case,prompt_override=prompt_override)
+    return str(result["result"])
 
-    type_prompts = {
-        "panorama": "请对以下投资组合进行全面诊断分析，包括集中度风险、估值水位、分散化程度，并给出加减仓建议。",
-        "deepdive": "请对持仓中最主要的基金进行深度分析，包括基金经理、历史业绩、持仓风格、估值水平。",
-        "fee": "请分析持仓基金的真实费率成本，计算年化费率和10年复利侵蚀，给出降费建议。",
-        "correlation": "请计算持仓基金之间的相关性，识别高相关对，计算有效持仓数，给出分散度优化建议。",
-        "trade-review": "请复盘最近的交易记录，分析买卖时机、仓位管理、盈亏原因。",
-    }
-    prompt = type_prompts.get(case_type, "请分析以下投资组合。")
-    full_prompt = f"""{prompt}
-
-输入参数：
-{input_params[:3000]}
-
-请按照标准分析格式输出。"""
-    try:
-        response = await asyncio.to_thread(lambda: _call_llm(
-            caller="eval_agent_gen",
-            model=MODEL_AUX,
-            messages=[{"role": "user", "content": full_prompt}],
-            temperature=0.3,
-            max_tokens=get_config_int("llm.max_tokens_analysis", 8000),
-        ))
-        return response.choices[0].message.content or ""
-    except Exception as e:
-        logger.error(f"[eval] 生成 Agent 输出失败: {e}")
-        return f"生成失败: {e}"
-
-
-# ============ 单条评测 ============
 
 async def _execute_single_eval(case_id: int, prompt_version: str = None,
-                               run_mode: str = "manual") -> dict:
-    """执行单条评测。"""
-    case = get_eval_case(case_id)
+                               run_mode: str = "manual", case_snapshot: dict = None) -> dict:
+    """执行真实 Agent 并使用指定的完整 Prompt，而非仅记录版本标签。"""
+    import time
+    case = dict(case_snapshot or get_eval_case(case_id) or {})
     if not case:
-        return {"error": f"用例 {case_id} 不存在"}
-
-    case_type = case.get("analysis_type", "panorama")
-    agent_output = await _generate_agent_output(case)
-
-    scores = await run_llm_judge(
-        case_type=case_type,
-        expected_behavior=case.get("expected_quality", ""),
-        input_params=case.get("input_params", "{}"),
-        agent_output=agent_output,
-    )
-
-    if not prompt_version:
-        active = get_active_prompt(case_type)
-        prompt_version = active["version"] if active else "default"
-
-    # 用现有 eval_runs 表存储
-    run_id = create_eval_run(
-        case_id=case_id,
-        analysis_type=case_type,
-        result_summary=scores.get("judge_comments", "")[:200],
-        result_data=json.dumps({
-            "agent_output": agent_output[:2000],
-            "scores": scores,
-            "prompt_version": prompt_version,
-            "run_mode": run_mode,
-        }, ensure_ascii=False),
-        score=scores["score_total"],
-    )
-
-    return {
-        "run_id": run_id,
-        "case_id": case_id,
-        "case_type": case_type,
-        "scores": scores,
-        "prompt_version": prompt_version,
-    }
+        return {"error":f"用例 {case_id} 不存在"}
+    kind = case["analysis_type"]
+    version_label = "production"
+    try:
+        prompt = production_prompt(kind)
+    except UnsupportedEvaluation as exc:
+        rid = create_eval_run(case_id,kind,str(exc),score_status='skipped',case_snapshot=case)
+        return {'run_id':rid,'case_id':case_id,'case_type':kind,'error':str(exc),'score_status':'skipped'}
+    if prompt_version is not None:
+        versions = list_prompt_versions(kind)
+        selected = next((v for v in versions if v['id']==prompt_version),None) if type(prompt_version) is int else next((v for v in versions if v['version']==str(prompt_version)),None)
+        if not selected:
+            raise ValueError("Prompt 版本不存在或不属于该 Agent 类型")
+        prompt, version_label = selected['prompt_content'],selected['version']
+    else:
+        active = get_active_prompt(kind)
+        if active:
+            version_label = active['version'] if active['prompt_content'] == prompt else 'production (unversioned)'
+    started = time.monotonic()
+    snapshot = {**case,"production_prompt":prompt,"prompt_version":version_label,"data_evidence":capture_data_evidence(case)}
+    try:
+        result = await execute_case(case,prompt_override=prompt if prompt else None)
+        output = str(result['result'])
+        scores = await run_llm_judge(case_type=kind,expected_behavior=case.get('expected_quality',''),input_params=case.get('input_params','{}'),agent_output=output)
+        state = scores.get('status') or ('scored' if scores.get('score_total',0)>0 else 'error')
+        run_id = create_eval_run(case_id,kind,scores.get('judge_comments','')[:200],
+            result_data=json.dumps({'agent_output':output,'execution':result,'scores':scores,
+                                     'prompt_version':version_label,'run_mode':run_mode},ensure_ascii=False),
+            score=scores['score_total'] if state=='scored' else None,score_max=25,
+            rubric_version='investment-five-dim-v1',score_status=state,
+            duration_ms=int((time.monotonic()-started)*1000),token_usage=result.get('token_usage',0),
+            case_snapshot=snapshot,prompt_version=version_label)
+        response = {'run_id':run_id,'case_id':case_id,'case_type':kind,'scores':scores,'prompt_version':version_label,'score_status':state}
+        if state != 'scored':
+            response['error'] = scores.get('judge_comments') or '未获得有效评分'
+        return response
+    except Exception as exc:
+        run_id = create_eval_run(case_id,kind,'评测失败',error_msg=str(exc),case_snapshot=snapshot,
+                                 prompt_version=version_label,score_max=25,
+                                 duration_ms=int((time.monotonic()-started)*1000))
+        return {'run_id':run_id,'case_id':case_id,'case_type':kind,'error':str(exc)}
 
 
 # ============ 每日评测 ============
@@ -322,13 +304,12 @@ async def delete_case_api(case_id: int):
 @router.post("/run")
 async def run_eval_api(data: EvalRunRequest):
     """运行单条评测用例（异步执行）。"""
-    # 幂等保护：已有 running 任务时直接返回该 task_id
-    existing = get_running_async_task("eval_system_run")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-
-    task_id = create_async_task("eval_system_run", caller="eval_system")
-    case_id = data.case_id
+    if not get_eval_case(data.case_id):
+        raise HTTPException(404,'用例不存在')
+    submitted = claim_governance_task('eval_system_run','eval_system',{'case_id':data.case_id})
+    if submitted['reused']:
+        return submitted
+    task_id,case_id = submitted['task_id'],data.case_id
 
     async def _run():
         try:
@@ -338,87 +319,55 @@ async def run_eval_api(data: EvalRunRequest):
             logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
             update_async_task(task_id, status="error", error_msg=str(e))
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"task_id": task_id, "status": "running"}
 
 
 async def _run_batch_eval(active_cases: list, version_a, version_b) -> dict:
-    """异步：批量执行 A/B 评测并汇总对比结果。"""
-    results_a, results_b = [], []
-    for case in active_cases[:5]:
-        ra = await _execute_single_eval(case["id"], prompt_version=version_a, run_mode="ab_test")
-        rb = await _execute_single_eval(case["id"], prompt_version=version_b, run_mode="ab_test")
-        results_a.append(ra)
-        results_b.append(rb)
-
-    scores_a = [r["scores"]["score_total"] for r in results_a if "error" not in r]
-    scores_b = [r["scores"]["score_total"] for r in results_b if "error" not in r]
-    avg_a = sum(scores_a) / len(scores_a) if scores_a else 0
-    avg_b = sum(scores_b) / len(scores_b) if scores_b else 0
-    wins_a = sum(1 for a, b in zip(scores_a, scores_b) if a > b)
-    wins_b = sum(1 for a, b in zip(scores_a, scores_b) if b > a)
-    ties = sum(1 for a, b in zip(scores_a, scores_b) if a == b)
-    total = len(scores_a)
-    win_rate_b = wins_b / total * 100 if total > 0 else 0
-
-    if win_rate_b > 60:
-        verdict = "新版胜出，建议上线"
-    elif win_rate_b < 40:
-        verdict = "旧版更优，建议保留"
-    else:
-        verdict = "差异不大，建议继续迭代"
-
-    return {
-        "status": "ok",
-        "comparison": {
-            "version_a": version_a, "version_b": version_b,
-            "avg_score_a": round(avg_a, 2), "avg_score_b": round(avg_b, 2),
-            "wins_a": wins_a, "wins_b": wins_b, "ties": ties,
-            "win_rate_b": round(win_rate_b, 1), "verdict": verdict,
-        },
-        "results_a": results_a, "results_b": results_b,
-    }
+    """旧批量 API 也使用相同的配对、输入证据和真实提示词执行流程。"""
+    versions = {v['id']:v for v in list_prompt_versions()}
+    active, target = versions.get(version_a),versions.get(version_b)
+    if not active or not target or active['agent_type'] != target['agent_type'] or active['id'] == target['id']:
+        raise ValueError('请选择同一Agent的两个不同Prompt版本')
+    return await _compare_prompt_versions(target,active,active_cases[:5])
 
 
 @router.post("/run-batch")
 async def run_batch_eval_api(data: EvalBatchRequest):
-    """批量 A/B 评测（异步执行）。"""
-    case_type = data.case_type
-    cases = list_eval_cases(analysis_type=case_type)
-    active_cases = [c for c in cases if c.get("is_active")]
-    if not active_cases:
-        raise HTTPException(400, "无可用评测用例")
-
-    # 幂等保护：已有 running 任务时直接返回该 task_id
-    existing = get_running_async_task("eval_system_batch")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-
-    task_id = create_async_task("eval_system_batch", caller="eval_system")
-    version_a = data.version_a
-    version_b = data.version_b
-
-    async def _run():
-        try:
-            result = await _run_batch_eval(active_cases, version_a, version_b)
-            update_async_task(task_id, status="done", result=result)
-        except Exception as e:
-            logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
-            update_async_task(task_id, status="error", error_msg=str(e))
-
-    asyncio.create_task(_run())
-    return {"task_id": task_id, "status": "running"}
+    """批量 A/B 评测；按版本和不可变用例内容进行任务去重。"""
+    versions = {v['id']:v for v in list_prompt_versions()}
+    active,target = versions.get(data.version_a),versions.get(data.version_b)
+    if not active or not target:
+        raise HTTPException(400,'请指定两个有效Prompt版本')
+    kind = target['agent_type']
+    if active['agent_type'] != kind or active['id'] == target['id'] or (data.case_type and data.case_type != kind):
+        raise HTTPException(400,'用例与两个Prompt版本必须属于同一Agent，且版本不同')
+    cases = list_eval_cases(analysis_type=kind,active_only=True)[:5]
+    if not cases:
+        raise HTTPException(400,'无可用评测用例')
+    submitted = claim_governance_task('eval_system_batch','eval_system',{'active':active['id'],'target':target['id'],'cases':cases})
+    if not submitted['reused']:
+        async def run():
+            try:
+                result = await _compare_prompt_versions(target,active,cases)
+                update_async_task(submitted['task_id'],status='done',result=result)
+            except Exception as exc:
+                update_async_task(submitted['task_id'],status='error',error_msg=str(exc))
+        task = asyncio.create_task(run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted
 
 
 @router.post("/daily")
 async def trigger_daily_eval_api():
     """触发每日评测（异步执行）。"""
-    # 幂等保护：已有 running 任务时直接返回该 task_id
-    existing = get_running_async_task("eval_system_daily")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-
-    task_id = create_async_task("eval_system_daily", caller="eval_system")
+    submitted = claim_governance_task('eval_system_daily','eval_system',{'date':datetime.now().strftime('%Y-%m-%d')})
+    if submitted['reused']:
+        return submitted
+    task_id = submitted['task_id']
 
     async def _run():
         try:
@@ -428,7 +377,9 @@ async def trigger_daily_eval_api():
             logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
             update_async_task(task_id, status="error", error_msg=str(e))
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"task_id": task_id, "status": "running"}
 
 
@@ -476,6 +427,12 @@ async def create_prompt_api(data: PromptVersionCreate):
 @router.get("/prompts")
 async def list_prompts_api(agent_type: str = None):
     versions = list_prompt_versions(agent_type=agent_type)
+    for version in versions:
+        try:
+            version['is_current'] = bool(version['is_active'] and version['prompt_content'] == production_prompt(version['agent_type']))
+        except (ValueError,KeyError):
+            version['is_current'] = False
+        version['publication_status'] = 'current' if version['is_current'] else 'drifted' if version['is_active'] else 'draft'
     return {"status": "ok", "versions": versions}
 
 
@@ -484,43 +441,59 @@ async def activate_prompt_api(version_id: int, data: PromptActivateRequest):
     agent_type = data.agent_type
     if not agent_type:
         raise HTTPException(400, "缺少 agent_type")
-    activate_prompt_version(version_id, agent_type)
+    if not activate_prompt_version(version_id, agent_type):
+        raise HTTPException(404,"版本不存在、类型不匹配或生产Agent不可用")
     return {"status": "ok"}
 
 
-@router.get("/prompts/{version_id}/compare")
-async def compare_prompt_api(version_id: int, case_type: str = None):
-    versions = list_prompt_versions()
-    target = next((v for v in versions if v["id"] == version_id), None)
-    if not target:
-        raise HTTPException(404, "版本不存在")
-    active = get_active_prompt(target["agent_type"])
-    if not active:
-        raise HTTPException(400, "该类型无活跃版本，无法对比")
-
-    cases = get_random_active_cases(5)
-    if not cases:
-        raise HTTPException(400, "无可用评测用例")
-
-    results_active, results_target = [], []
+async def _compare_prompt_versions(target: dict, active: dict, cases: list[dict]) -> dict:
+    results_active,results_target = [],[]
+    evidence_pairs = []
     for case in cases:
-        ra = await _execute_single_eval(case["id"], prompt_version=active["version"], run_mode="ab_test")
-        rt = await _execute_single_eval(case["id"], prompt_version=target["version"], run_mode="ab_test")
-        results_active.append(ra)
-        results_target.append(rt)
+        before = capture_data_evidence(case)
+        results_active.append(await _execute_single_eval(case['id'],active['id'],'ab_test',case_snapshot=case))
+        results_target.append(await _execute_single_eval(case['id'],target['id'],'ab_test',case_snapshot=case))
+        after = capture_data_evidence(case)
+        evidence_pairs.append({'case_id':case['id'],'before':before,'after':after})
+        if before['hash'] != after['hash']:
+            results_target[-1]['error'] = '本地输入在A/B执行间发生变化，样本不可比较'
+    paired = [(a,b) for a,b in zip(results_active,results_target) if 'error' not in a and 'error' not in b]
+    if not paired:
+        raise RuntimeError('没有成对有效评分，无法比较版本')
+    return dict(status='ok',active_version=active['version'],target_version=target['version'],
+                avg_active=round(sum(a['scores']['score_total'] for a,b in paired)/len(paired),2),
+                avg_target=round(sum(b['scores']['score_total'] for a,b in paired)/len(paired),2),
+                paired_count=len(paired),failed_pairs=len(cases)-len(paired),data_evidence=evidence_pairs,external_data_frozen=False,
+                results_active=results_active,results_target=results_target)
 
-    scores_active = [r["scores"]["score_total"] for r in results_active if "error" not in r]
-    scores_target = [r["scores"]["score_total"] for r in results_target if "error" not in r]
 
-    return {
-        "status": "ok",
-        "active_version": active["version"],
-        "target_version": target["version"],
-        "avg_active": round(sum(scores_active) / len(scores_active), 2) if scores_active else 0,
-        "avg_target": round(sum(scores_target) / len(scores_target), 2) if scores_target else 0,
-        "results_active": results_active,
-        "results_target": results_target,
-    }
+@router.post("/prompts/{version_id}/compare")
+async def compare_prompt_api(version_id: int, case_type: str = None):
+    target = next((v for v in list_prompt_versions() if v['id']==version_id),None)
+    if not target:
+        raise HTTPException(404,'版本不存在')
+    if case_type and case_type != target['agent_type']:
+        raise HTTPException(400,'用例类型与Prompt不匹配')
+    active = get_active_prompt(target['agent_type'])
+    if active and active['prompt_content'] != production_prompt(target['agent_type']):
+        raise HTTPException(400,'历史活跃版本与当前生产Prompt不同，请先重新显式激活版本')
+    if not active or active['id']==target['id']:
+        raise HTTPException(400,'请选择不同于当前活跃版本的候选版本')
+    cases = list_eval_cases(analysis_type=target['agent_type'],active_only=True)[:5]
+    if not cases:
+        raise HTTPException(400,'该类型无可用评测用例')
+    submitted = claim_governance_task('eval_system_compare','eval_system',{'target':version_id,'active':active['id'],'cases':cases})
+    if not submitted['reused']:
+        async def run():
+            try:
+                result = await _compare_prompt_versions(target,active,cases)
+                update_async_task(submitted['task_id'],status='done',result=result)
+            except Exception as exc:
+                update_async_task(submitted['task_id'],status='error',error_msg=str(exc))
+        task = asyncio.create_task(run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted
 
 
 # --- 质量日报 ---

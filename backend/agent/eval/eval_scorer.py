@@ -126,192 +126,55 @@ def _build_eval_prompt(analysis_type: str, expected_quality: str, actual_result:
 只输出JSON，不要其他文字。"""
 
 
-def _parse_score_response(text: str) -> tuple[float, str]:
-    """解析 LLM 返回的评分 JSON（10分制）。"""
-    import re
+def _judge_object(text: str) -> dict:
+    """只接受完整JSON对象；允许Markdown围栏，不从自然语言猜测分数。"""
     text = text.strip()
+    if text.startswith('```'):
+        lines = text.splitlines()
+        if len(lines) < 3 or lines[-1].strip() != '```':
+            raise ValueError('评分JSON不完整')
+        text = '\n'.join(lines[1:-1])
+    data = json.loads(text)
+    if not isinstance(data,dict):
+        raise ValueError('评分必须为JSON对象')
+    return data
 
-    # 尝试直接解析
-    try:
-        data = json.loads(text)
-        score = float(data.get("score", data.get("overall_score", 5)))
-        reason = str(data.get("reason", data.get("overall_reason", "")))
-        score = max(1.0, min(10.0, round(score)))
-        return score, reason
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
 
-    # 尝试从文本中提取 JSON（支持嵌套大括号和截断）
-    json_patterns = [
-        r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}',
-        r'\{.*?"score"\s*:\s*\d+.*?"reason"\s*:.*?\}',
-        r'\{.*?"overall_score"\s*:\s*\d+.*?\}',
-    ]
-    for pattern in json_patterns:
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            try:
-                candidate = match.group()
-                # 修复截断的 JSON
-                if not candidate.endswith('}'):
-                    # 截断在 reason 中间 → 补全引号和括号
-                    if '"reason":' in candidate:
-                        # 找到最后一个完整的值
-                        last_brace = candidate.rfind('}')
-                        if last_brace == -1:
-                            candidate = candidate.rstrip() + '"}'  # 补全 reason 的引号和括号
-                        else:
-                            candidate = candidate[:last_brace + 1]
-                    else:
-                        candidate = candidate[:candidate.rfind('}') + 1]
-                data = json.loads(candidate)
-                score = float(data.get("score", data.get("overall_score", 5)))
-                reason = str(data.get("reason", data.get("overall_reason", "")))
-                score = max(1.0, min(10.0, round(score)))
-                return score, reason
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
+def _valid_judge_score(value) -> float:
+    import math
+    if type(value) not in (int,float) or not math.isfinite(value) or not 1 <= value <= 10:
+        raise ValueError('评分必须为1-10的有效数字')
+    return float(value)
 
-    # 尝试从思考过程中推断分数
-    # 注意：排除"满分X分"、"X-10分"等描述性文字
-    score_patterns = [
-        r'(?:最终|最后|综合)[：：\s]*(?:给|评|打)?[：：\s]*(\d{1,2}(?:\.\d)?)\s*分',
-        r'(?:score|rating)[：：\s]*(\d{1,2}(?:\.\d)?)',
-        r'(\d{1,2}(?:\.\d)?)\s*分[（(].*?[）)]',
-    ]
-    for pattern in score_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            try:
-                score = float(match.group(1))
-                if 1 <= score <= 10:
-                    # 排除"满分10分"等描述性文字
-                    context_start = max(0, match.start() - 20)
-                    context = text[context_start:match.end()]
-                    if '满分' in context or '不允许' in context:
-                        continue
-                    start = max(0, match.start() - 50)
-                    end = min(len(text), match.end() + 100)
-                    reason = text[start:end].strip()
-                    reason = re.sub(r'\s+', ' ', reason)[:150]
-                    return score, reason
-            except (ValueError, IndexError):
-                pass
 
-    # 兜底1：直接从文本找 "score": N
-    score_match = re.search(r'"score"\s*:\s*(\d{1,2})', text)
-    if score_match:
-        score = float(score_match.group(1))
-        if 1 <= score <= 10:
-            # 提取 reason 部分
-            reason_match = re.search(r'"reason"\s*:\s*"([^"]*)', text)
-            reason = reason_match.group(1) if reason_match else "评分已提取"
-            reason = reason[:150]
-            return score, reason
+def _judge_reason(value) -> str:
+    if not isinstance(value,str) or not value.strip():
+        raise ValueError('评分缺少有效评语')
+    return value.strip()
 
-    # 兜底2：从文本找 "X分" 但排除描述性文字
-    for match in re.finditer(r'(\d{1,2})\s*分', text):
-        score = float(match.group(1))
-        if 1 <= score <= 10:
-            context_start = max(0, match.start() - 30)
-            context_end = min(len(text), match.end() + 20)
-            context = text[context_start:context_end]
-            if any(kw in context for kw in ['满分', '不允许', '评分标准', '1-5', '1-10', '到10分']):
-                continue
-            start = max(0, match.start() - 30)
-            end = min(len(text), match.end() + 80)
-            reason = text[start:end].strip()
-            reason = re.sub(r'\s+', ' ', reason)[:150]
-            return score, reason
 
-    logger.warning(f"评分解析失败，使用默认5分。原始返回: {text[:300]}")
-    return 5.0, "评分解析失败，使用默认分数"
+def _parse_score_response(text: str) -> tuple[float, str]:
+    """缺字段、越界和无效JSON均使评审失败，不制造默认分。"""
+    data = _judge_object(text)
+    score = data['score'] if 'score' in data else data.get('overall_score')
+    reason = data['reason'] if 'reason' in data else data.get('overall_reason')
+    return _valid_judge_score(score),_judge_reason(reason)
 
 
 def _parse_multi_dim_response(text: str) -> dict:
-    """解析多维度评分 JSON。"""
-    text = text.strip()
-
-    # 尝试直接解析
-    try:
-        data = json.loads(text)
-        return _normalize_scores(data)
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # 尝试从文本中提取 JSON（支持嵌套大括号）
-    # 原正则 [^{}]* 无法匹配嵌套结构（data_accuracy 的值本身是 {...}），
-    # 改用括号平衡匹配：从第一个 { 到最后一个 } 逐层检查
-    import re
-
-    # 策略1：找包含 data_accuracy 的最外层 JSON 块（平衡括号）
-    start = text.find("{")
-    while start >= 0:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start:i + 1]
-                    if '"data_accuracy"' in candidate:
-                        try:
-                            data = json.loads(candidate)
-                            return _normalize_scores(data)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    break
-        start = text.find("{", start + 1)
-
-    # 策略2：尝试修复常见的尾随逗号/单引号问题
-    match = re.search(r'\{.*"data_accuracy".*"overall_reason".*?\}', text, re.DOTALL)
-    if match:
-        try:
-            candidate = match.group()
-            # 修复可能的尾随逗号
-            candidate = re.sub(r',\s*}', '}', candidate)
-            candidate = re.sub(r',\s*]', ']', candidate)
-            data = json.loads(candidate)
-            return _normalize_scores(data)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    # 兜底
-    logger.warning(f"多维度评分解析失败: {text[:200]}")
-    return {
-        "data_accuracy": {"score": 5, "reason": "评分解析失败"},
-        "logic": {"score": 5, "reason": "评分解析失败"},
-        "actionability": {"score": 5, "reason": "评分解析失败"},
-        "overall_score": 5,
-        "overall_reason": "评分解析失败",
-    }
+    return _normalize_scores(_judge_object(text))
 
 
 def _normalize_scores(data: dict) -> dict:
-    """标准化评分数据（10分制）。"""
+    """所有维度和总体分必须明确存在，禁止缺数据时补5分。"""
     result = {}
-    for key in ("data_accuracy", "logic", "actionability"):
-        item = data.get(key, {})
-        if isinstance(item, dict):
-            score = max(1, min(10, int(item.get("score", 5))))
-            reason = str(item.get("reason", ""))
-        elif isinstance(item, (int, float)):
-            score = max(1, min(10, int(item)))
-            reason = ""
-        else:
-            score = 5
-            reason = ""
-        result[key] = {"score": score, "reason": reason}
-    # overall
-    overall = data.get("overall_score", 0)
-    if isinstance(overall, (int, float)) and overall > 0:
-        result["overall_score"] = max(1, min(10, int(overall)))
-    else:
-        # 计算平均分
-        scores = [result[k]["score"] for k in ("data_accuracy", "logic", "actionability")]
-        result["overall_score"] = round(sum(scores) / len(scores))
-    result["overall_reason"] = str(data.get("overall_reason", ""))
+    for key in ('data_accuracy','logic','actionability'):
+        item = data.get(key)
+        if not isinstance(item,dict):
+            raise ValueError(f'缺少评分维度: {key}')
+        result[key] = {'score':_valid_judge_score(item.get('score')),'reason':_judge_reason(item.get('reason'))}
+    result['overall_score'] = _valid_judge_score(data.get('overall_score'))
+    result['overall_reason'] = _judge_reason(data.get('overall_reason'))
     return result
 
 

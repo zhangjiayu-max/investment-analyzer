@@ -595,10 +595,9 @@ def calc_cash_constraint(
 ) -> dict:
     """计算可用补仓资金及仓位约束。
 
-    P1-S4（2026-08-01）：goal-aware 资金规划。
-    - 开关 `smart_add.goal_aware_enabled`（默认 false）
-    - 开启时：优先读 user_profiles.monthly_surplus，回退到 smart_add.monthly_cash_inflow
-    - 关闭时：保持原行为（读 smart_add.monthly_cash_inflow）
+    家庭必要支出和应急金构成所有模式的共同上限。
+    `smart_add.goal_aware_enabled` 开启时采用家庭可投资结余；关闭时全局月投入
+    还需受家庭可投资结余限制。数据不可用、零或负结余均不回退正额度。
 
     Returns:
         {
@@ -618,40 +617,28 @@ def calc_cash_constraint(
         cash = 0.0
         cash_data_available = False
 
-    usable_cash = cash * 0.8  # 留 20% 应急
-
-    # P1-S4：月度现金流读取（goal_aware 开启时优先 user_profiles.monthly_surplus）
+    usable_cash = cash * 0.8
     monthly_inflow = 0.0
-    monthly_inflow_source = "global_config"
+    monthly_inflow_source = "none"
+    household = None
     try:
-        goal_aware = get_config_bool("smart_add.goal_aware_enabled", False)
+        from db.expense import get_cashflow
+        household = get_cashflow(user_id)
+        # 家庭必要开销和应急金是所有配置模式共同的上限，零/负结余不能回退正额度。
+        cash_data_available = cash_data_available and household["data_available"]
+        usable_cash = max(0.0, cash - household["protected_cash"]) if cash_data_available else 0.0
+        monthly_inflow = household["investable_surplus"] if cash_data_available else 0.0
+        monthly_inflow_source = "household_cashflow"
+        if not get_config_bool("smart_add.goal_aware_enabled", False):
+            configured = max(0.0, float(get_config_float("smart_add.monthly_cash_inflow", 0.0)))
+            monthly_inflow = min(monthly_inflow, configured)
+            monthly_inflow_source = "household_capped_global_config"
     except Exception:
-        goal_aware = False
-
-    if goal_aware:
-        # 优先读当月现金流；没有实际支出记录时会自动回退画像静态值。
-        try:
-            from db.expense import get_cashflow
-            cashflow = get_cashflow(user_id)
-            surplus = cashflow.get("monthly_surplus")
-            if isinstance(surplus, (int, float)) and surplus > 0:
-                monthly_inflow = float(surplus)
-                monthly_inflow_source = (
-                    "expense_records"
-                    if cashflow.get("expense_source") == "records"
-                    else "user_profiles.monthly_surplus"
-                )
-        except Exception:
-            pass
-
-    # 回退到全局配置（goal_aware 关闭 或 user_profiles 无数据）
-    if monthly_inflow <= 0:
-        try:
-            monthly_inflow = get_config_float("smart_add.monthly_cash_inflow", 0.0)
-            monthly_inflow_source = "global_config" if not goal_aware else "global_config_fallback"
-        except Exception:
-            monthly_inflow = 0.0
-            monthly_inflow_source = "none"
+        # 家庭数据不可用时不生成未经约束的投资金额。
+        cash_data_available = False
+        usable_cash = 0.0
+        monthly_inflow = 0.0
+        monthly_inflow_source = "unavailable"
 
     # 3个月可用资金（保守估算，不含减仓释放，因减仓需用户手动执行）
     total_available_3m = usable_cash + monthly_inflow * 3
@@ -666,7 +653,8 @@ def calc_cash_constraint(
         "total_available_3m": round(total_available_3m, 2),
         "position_room_pct": round(position_room_pct, 2),
         "data_available": cash_data_available,
-        "monthly_inflow_source": monthly_inflow_source,  # P1-S4：来源标记
+        "monthly_inflow_source": monthly_inflow_source,
+        "household_cashflow": household,
     }
 
 
@@ -774,6 +762,16 @@ def generate_position_sizing_plan(
         # 超配：无加仓（减仓由维度5处理）
         target_driven_monthly = 0.0
 
+    funding_available = cash_constraint.get("data_available", False)
+    if not funding_available:
+        target_driven_monthly = 0.0
+        first_position = {**first_position, "needed": False, "monthly_add": 0.0,
+                          "reason": "家庭收支数据不足，暂不生成首次仓补足金额"}
+    else:
+        # 单标的也不能展示超过整月可用资金的金额，组合层会继续分摊预算。
+        monthly_budget = cash_constraint.get("usable_cash", 0) + cash_constraint.get("monthly_inflow", 0)
+        target_driven_monthly = min(target_driven_monthly, max(0.0, monthly_budget))
+
     # 生成一句话建议
     summary = _build_summary(
         gap_pct=gap_pct,
@@ -785,6 +783,9 @@ def generate_position_sizing_plan(
         elasticity=elasticity,
         first_position=first_position,
     )
+
+    if not funding_available:
+        summary = "家庭收支资料不足，请先补充月收入及支出预算；暂不生成新增投资金额"
 
     # P1-S5：份额取整（基于目标驱动月度金额 + 当前净值）
     current_price = holding.get("current_price") or 0

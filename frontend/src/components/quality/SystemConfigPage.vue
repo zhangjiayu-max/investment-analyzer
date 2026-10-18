@@ -11,6 +11,8 @@ const editingValue = ref('')
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 const filterCategory = ref('')
 const searchQuery = ref('')
+const error = ref('')
+const saving = ref(false)
 
 const categories = computed(() => {
   const cats = [...new Set(configs.value.map(c => c.category))]
@@ -26,8 +28,8 @@ const filteredConfigs = computed(() => {
     const q = searchQuery.value.toLowerCase()
     result = result.filter(c =>
       c.key.toLowerCase().includes(q) ||
-      c.description.toLowerCase().includes(q) ||
-      c.value.toLowerCase().includes(q)
+      (c.description || '').toLowerCase().includes(q) ||
+      String(c.value || '').toLowerCase().includes(q)
     )
   }
   return result
@@ -49,17 +51,19 @@ const categoryLabels = {
 
 async function loadConfigs() {
   loading.value = true
+  error.value = ''
   try {
     const { data } = await getSystemConfigs()
     configs.value = data.configs || []
   } catch (e) {
-    console.error('Failed to load configs:', e)
+    error.value = '配置加载失败：' + e.message
   } finally {
     loading.value = false
   }
 }
 
 function startEdit(key, value) {
+  if (saving.value) return
   editingKey.value = key
   editingValue.value = value
 }
@@ -70,30 +74,49 @@ function cancelEdit() {
 }
 
 async function saveEdit(key) {
-  try {
-    await updateSystemConfig(key, editingValue.value)
-    const item = configs.value.find(c => c.key === key)
-    if (item) item.value = editingValue.value
-    editingKey.value = null
-    editingValue.value = ''
-  } catch (e) {
-    console.error('Failed to update config:', e)
+  if (saving.value) return
+  const value = String(editingValue.value)
+  const old = configs.value.find(c => c.key === key)?.value
+  confirm.value = {
+    visible: true, title: '保存配置',
+    message: `${key}：${old} → ${value}。确认应用此变更？`, danger: false,
+    onConfirm: async () => {
+      if (saving.value) return
+      saving.value = true
+      error.value = ''
+      try {
+        await updateSystemConfig(key, value)
+        await loadConfigs()
+        cancelEdit()
+      } catch (e) {
+        error.value = '配置保存失败：' + (e.response?.data?.detail || e.message)
+      } finally {
+        saving.value = false
+        confirm.value.visible = false
+      }
+    },
   }
 }
 
 function confirmReset() {
+  if (saving.value) return
   confirm.value = {
     visible: true,
     title: '重置配置',
     message: '确定要将所有配置重置为默认值吗？此操作不可撤销。',
     danger: true,
     onConfirm: async () => {
-      confirm.value.visible = false
+      if (saving.value) return
+      saving.value = true
       try {
+        error.value = ''
         await resetSystemConfigs()
         await loadConfigs()
       } catch (e) {
-        console.error('Failed to reset configs:', e)
+        error.value = '配置重置失败：' + e.message
+      } finally {
+        saving.value = false
+        confirm.value.visible = false
       }
     }
   }
@@ -116,7 +139,7 @@ onMounted(loadConfigs)
           <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
           刷新
         </button>
-        <button class="btn-outline btn-sm btn-danger-text" @click="confirmReset">
+        <button class="btn-outline btn-sm btn-danger-text" @click="confirmReset" :disabled="saving">
           重置默认
         </button>
       </div>
@@ -127,11 +150,13 @@ onMounted(loadConfigs)
       :title="confirm.title"
       :message="confirm.message"
       :danger="confirm.danger"
+      :loading="saving"
       @confirm="confirm.onConfirm"
       @cancel="confirm.visible = false"
     />
 
     <AnalysisDependencyStatus />
+    <p v-if="error" role="alert" style="color: var(--color-danger)">{{ error }}</p>
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
@@ -157,8 +182,14 @@ onMounted(loadConfigs)
         </div>
         <div class="config-value">
           <template v-if="editingKey === config.key">
-            <input
+            <select v-if="config.choices" v-model="editingValue" class="input-field input-sm" :disabled="saving">
+              <option v-for="choice in config.choices" :key="choice" :value="choice">{{ choice }}</option>
+            </select>
+            <textarea v-else-if="config.value_type === 'json'" v-model="editingValue" class="input-field input-sm font-jet" :disabled="saving" />
+            <input v-else
               v-model="editingValue"
+              :type="config.value_type === 'number' ? 'number' : config.value_type === 'time' ? 'time' : 'text'"
+              :min="config.min" :max="config.max" :step="config.step" :disabled="saving"
               class="input-field input-sm font-jet"
               @keyup.enter="saveEdit(config.key)"
               @keyup.escape="cancelEdit"

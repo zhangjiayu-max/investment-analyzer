@@ -1,15 +1,13 @@
 """螺丝钉图片解析后台任务。"""
 
 import asyncio
-import json
 import logging
 import uuid
 from pathlib import Path
 
-from config import DD_IMAGES_DIR, LIUYI_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR
-from db.dd_tasks import update_dd_parse_task, get_dd_parse_task
+from db.dd_tasks import update_dd_parse_task
 from db.valuations import save_dd_valuation, save_liuyi_valuation
-from db._conn import _get_conn
+from services.valuation.image_paths import resolve_valuation_image, valuation_image_location
 from services.image_parser import DDImageParser, LiuyiImageParser, ImageParser
 
 logger = logging.getLogger(__name__)
@@ -17,14 +15,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_image_path(path: str) -> Path:
     """解析图片路径，尝试多个基础目录。"""
-    img_path = Path(path)
-    if img_path.is_absolute():
-        return img_path
-    for base in [DD_IMAGES_DIR, LIUYI_IMAGES_DIR, IMAGES_DIR, VALUATION_IMAGES_DIR]:
-        candidate = base / img_path
-        if candidate.exists():
-            return candidate
-    return DD_IMAGES_DIR / path
+    return resolve_valuation_image(path, "dd_images")
 
 
 async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
@@ -47,32 +38,9 @@ async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
 
         if parse_type == "dd" and result.get("ok"):
             # 保存到 dd_valuations 表
-            img_path = Path(image_path)
-            try:
-                rel_path = f"data/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
-            except ValueError:
-                rel_path = f"data/dd_images/{img_path.name}"
-            image_url = f"/static/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
+            rel_path, image_url = valuation_image_location(Path(image_path))
             dd_id = save_dd_valuation(result, rel_path, image_url)
             result["dd_id"] = dd_id
-
-            # 更新 analysis_records
-            conn = _get_conn()
-            existing = conn.execute(
-                "SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?",
-                    (existing[0],),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')",
-                    (rel_path, image_url),
-                )
-            conn.commit()
-            conn.close()
 
             update_dd_parse_task(
                 task_id,
@@ -82,12 +50,7 @@ async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
             )
         elif parse_type == "liuyi" and result.get("ok"):
             # 保存到 liuyi_valuations 表
-            img_path = Path(image_path)
-            try:
-                rel_path = f"data/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
-            except ValueError:
-                rel_path = f"data/liuyi_images/{img_path.name}"
-            image_url = f"/static/liuyi_images/{img_path.relative_to(LIUYI_IMAGES_DIR)}"
+            rel_path, image_url = valuation_image_location(Path(image_path))
             liuyi_id = save_liuyi_valuation(result, rel_path, image_url)
             result["liuyi_id"] = liuyi_id
 

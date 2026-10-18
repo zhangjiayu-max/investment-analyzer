@@ -8,6 +8,7 @@ import {
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import EmptyState from '../ui/EmptyState.vue'
+import { trackFeatureClick, trackFeatureComplete } from '../../composables/useTracking'
 
 const { showToast } = useToast()
 
@@ -15,7 +16,7 @@ const { showToast } = useToast()
 const STRATEGIES = [
   { key: 'dca', label: '定投', desc: '定期定额买入，平滑成本' },
   { key: 'grid', label: '网格', desc: '区间网格买卖，赚取波动' },
-  { key: 'two_eight', label: '二八', desc: '股债轮动，动量择时' },
+  { key: 'two_eight', label: '二八', desc: '按目标股债比例月度再平衡' },
   { key: 'core_satellite', label: '核心卫星', desc: '核心持仓 + 卫星增强' },
 ]
 
@@ -47,6 +48,7 @@ const result = ref(null)
 const history = ref([])
 const historyLoading = ref(false)
 const strategyList = ref([])
+const enabled = ref(true)
 
 const activeStrategy = computed(() => STRATEGIES.find(s => s.key === strategy.value) || STRATEGIES[0])
 
@@ -55,24 +57,29 @@ const metrics = computed(() => {
   if (!result.value || result.value.status !== 'ok') return []
   const r = result.value.result || result.value
   return [
-    { key: 'total_return', label: '累计收益', value: r.total_return, fmt: 'pct' },
+    { key: 'total_return', label: '时间加权收益', value: r.total_return, fmt: 'pct' },
     { key: 'annual_return', label: '年化收益', value: r.annual_return, fmt: 'pct' },
     { key: 'max_drawdown', label: '最大回撤', value: r.max_drawdown, fmt: 'pct' },
     { key: 'volatility', label: '波动率', value: r.volatility, fmt: 'pct' },
     { key: 'sharpe_ratio', label: '夏普比率', value: r.sharpe_ratio, fmt: 'num' },
     { key: 'benchmark_return', label: '基准收益', value: r.benchmark_return, fmt: 'pct' },
+    { key: 'total_invested', label: '总投入', value: r.total_invested, fmt: 'money' },
+    { key: 'total_cost', label: '交易成本', value: r.total_cost, fmt: 'money' },
+    { key: 'investor_return', label: '投入资金简单收益', value: r.investor_return, fmt: 'pct' },
     { key: 'final_value', label: '期末资产', value: r.final_value, fmt: 'money' },
   ]
 })
 
 function fmtVal(v, type) {
-  const n = Number(v || 0)
+  if (v == null || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
   if (type === 'pct') return `${n > 0 ? '+' : ''}${(n * 100).toFixed(2)}%`
   if (type === 'money') return `¥${n.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`
   return n.toFixed(2)
 }
 
 function metricClass(v, type) {
+  if (v == null || !Number.isFinite(Number(v))) return ''
   if (type === 'pct') return v >= 0 ? 'positive' : 'negative'
   if (type === 'money') return 'positive'
   return ''
@@ -83,28 +90,26 @@ const chartWidth = 700
 const chartHeight = 200
 const chartPath = computed(() => {
   if (!result.value || result.value.status !== 'ok') return null
-  const rawCurve = result.value.result?.nav_curve || result.value.nav_curve || []
-  const rawBench = result.value.result?.benchmark_nav_curve || result.value.benchmark_nav_curve || []
-  // 提取 value 字段（后端返回 [{date, value}]）
-  const curve = rawCurve.map(p => (typeof p === 'number' ? p : p.value)).filter(v => v != null)
-  const bench = rawBench.map(p => (typeof p === 'number' ? p : p.value)).filter(v => v != null)
-  if (!curve.length) return null
-
-  const all = [...curve, ...bench]
-  const minVal = Math.min(...all) * 0.95
-  const maxVal = Math.max(...all) * 1.05
-  const range = maxVal - minVal || 1
-  const len = Math.max(curve.length, bench.length)
-
-  function toPath(c) {
-    if (!c.length) return ''
-    return c.map((v, i) => {
-      const x = (i / (len - 1)) * chartWidth
-      const y = chartHeight - ((v - minVal) / range) * chartHeight
+  const r = result.value.result || result.value
+  const curve = r.unit_nav_curve || []
+  const bench = r.benchmark_nav_curve || []
+  const valid = points => points.filter(p => p?.date && Number.isFinite(p.value) && Number.isFinite(Date.parse(p.date)))
+  const mainPoints = valid(curve)
+  const benchPoints = valid(bench)
+  if (!mainPoints.length) return null
+  const all = [...mainPoints, ...benchPoints]
+  const minVal = Math.min(...all.map(p => p.value)) * 0.95
+  const maxVal = Math.max(...all.map(p => p.value)) * 1.05
+  const firstDate = Math.min(...all.map(p => Date.parse(p.date)))
+  const lastDate = Math.max(...all.map(p => Date.parse(p.date)))
+  function toPath(points) {
+    return points.map((p, i) => {
+      const x = (Date.parse(p.date) - firstDate) / (lastDate - firstDate || 1) * chartWidth
+      const y = chartHeight - (p.value - minVal) / (maxVal - minVal || 1) * chartHeight
       return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
     }).join(' ')
   }
-  return { main: toPath(curve), bench: toPath(bench) }
+  return { main: toPath(mainPoints), bench: toPath(benchPoints) }
 })
 
 // ── 加载策略列表 ──
@@ -112,6 +117,7 @@ async function loadStrategies() {
   try {
     const { data } = await listStrategies()
     strategyList.value = data.items || data.strategies || []
+    enabled.value = data.enabled !== false
   } catch {
     // 静默：使用本地 STRATEGIES 兜底
   }
@@ -155,6 +161,8 @@ async function doBacktest() {
     showToast('请输入标的代码', 'warning')
     return
   }
+  if (!enabled.value || loading.value) return
+  trackFeatureClick('strategy_backtest_run', 'strategy-backtest')
   loading.value = true
   result.value = null
   try {
@@ -167,13 +175,20 @@ async function doBacktest() {
     }
     const { data } = await runStrategyBacktest(payload)
     result.value = data
+    if (!['ok', 'error'].includes(data.status)) throw new Error('回测响应无效，请重试')
     if (data.status === 'error') {
       showToast(data.error || '回测失败', 'error')
     } else {
-      showToast('回测完成', 'success')
+      trackFeatureComplete('strategy_backtest_run', 'strategy-backtest')
+      if (data.save_status === 'error') showToast(data.save_error || '计算完成，但保存失败', 'warning')
+      else {
+        showToast('回测完成', 'success')
+        await loadHistory()
+      }
     }
   } catch (e) {
-    showToast('回测失败: ' + (e.response?.data?.detail || e.message), 'error')
+    const detail = e.response?.data?.detail
+    showToast('回测失败: ' + (Array.isArray(detail) ? detail.map(item => item.msg).join('；') : (detail || e.message)), 'error')
   } finally {
     loading.value = false
   }
@@ -268,7 +283,7 @@ onMounted(() => {
         <!-- 定投参数（P3 Step2：字段名对齐后端）-->
         <template v-if="strategy === 'dca'">
           <div class="param-section">
-            <label class="param-label terminal-label">定投间隔（天）</label>
+            <label class="param-label terminal-label">定投间隔（日历天）</label>
             <input v-model.number="dcaIntervalDays" type="number" min="1" max="90" class="param-input font-jet" />
           </div>
           <div class="param-section">
@@ -333,7 +348,8 @@ onMounted(() => {
           </div>
         </template>
 
-        <button class="btn-primary run-btn" :disabled="loading" @click="doBacktest">
+        <p v-if="!enabled" role="status">策略回测已关闭，请在系统配置中启用。</p>
+        <button class="btn-primary run-btn" :disabled="loading || !enabled" @click="doBacktest">
           <Icon :name="loading ? 'spinner' : 'play'" size="16" />
           {{ loading ? '回测中...' : '开始回测' }}
         </button>
@@ -361,6 +377,8 @@ onMounted(() => {
 
         <!-- 结果 -->
         <template v-else-if="result?.status === 'ok'">
+          <p v-if="result.save_status === 'error'" class="error-result" role="alert">{{ result.save_error || '计算完成，但保存失败' }}</p>
+          <p class="terminal-label">收益与风险按剔除外部注资后的单位净值计算；投入资金简单收益单独展示。</p>
           <!-- 收益指标卡片 -->
           <div class="metrics-grid">
             <article
@@ -390,7 +408,7 @@ onMounted(() => {
           <!-- 策略信息（P3 Step2：显示 target_type + 区间）-->
           <div class="strategy-info terminal-label">
             <Icon name="info" size="14" />
-            策略：{{ activeStrategy.label }} · 标的：{{ result.target_code || targetCode }}
+            策略：{{ STRATEGIES.find(s => s.key === result.strategy_name)?.label || activeStrategy.label }} · 标的：{{ result.target_code || targetCode }}
             （{{ result.target_type === 'fund' ? '基金' : '指数' }}）
             · 区间：{{ result.start_date || '-' }} ~ {{ result.end_date || '-' }} · {{ result.data_points || 0 }} 个数据点
           </div>
@@ -422,6 +440,7 @@ onMounted(() => {
             <strong>{{ h.strategy_name || h.strategy }}</strong>
             <span class="history-meta terminal-label">
               {{ h.target_code }} · {{ h.months || 0 }}个月
+              <span v-if="h.return_method !== 'time_weighted_unit_nav'"> · 旧计算口径，请重新回测</span>
             </span>
           </div>
           <div class="history-metrics">

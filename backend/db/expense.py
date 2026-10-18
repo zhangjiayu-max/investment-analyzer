@@ -3,15 +3,21 @@
 设计稿：doc/plans/2026-10-14-financial-decision-enhancement.md
 
 - expense_records 表：月份/分类/金额/固定项
-- 写操作后自动回填 user_profiles.monthly_expense（近 3 个月实际记录均值）
-  与 monthly_surplus（income - expense），受 system_config 'expense.auto_fill_profile' 开关控制
+- 实际支出、月度预算与周期账单分离；未结账月份采用保守预算
+- 写操作仅更新画像结余，不用不完整记账覆盖用户设置的月预算
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
+import logging
+import math
+import re
 
 from db._conn import _get_conn
+
+logger = logging.getLogger(__name__)
 
 # ── 分类常量（代码管理，不做 DB 配置表）──
 FIXED_CATEGORIES = [
@@ -57,11 +63,23 @@ def init_expense_tables(conn):
         "CREATE INDEX IF NOT EXISTS idx_expense_fixed ON expense_records(user_id, is_fixed)"
     )
 
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(expense_records)")}
+    if "copied_from_id" not in columns:
+        conn.execute("ALTER TABLE expense_records ADD COLUMN copied_from_id INTEGER")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_copy_identity "
+                 "ON expense_records(user_id, month, copied_from_id) WHERE copied_from_id IS NOT NULL")
+    conn.execute("""CREATE TABLE IF NOT EXISTS expense_month_status (
+        user_id TEXT NOT NULL, month TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id, month)
+    )""")
+
 
 def _validate_month(month: str) -> str:
     """校验并规范化月份格式 YYYY-MM。"""
     value = (month or "").strip()
     try:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", value):
+            raise ValueError("noncanonical month")
         datetime.strptime(value, "%Y-%m")
     except ValueError:
         raise ValueError(f"月份格式错误（应为 YYYY-MM）: {month}")
@@ -83,7 +101,7 @@ def _row_to_dict(row) -> dict:
 
 
 def _current_month() -> str:
-    return datetime.now().strftime("%Y-%m")
+    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
 
 
 # ── CRUD ──────────────────────────────────────────────
@@ -102,7 +120,7 @@ def create_expense(
     month = _validate_month(month)
     category = _validate_category(category)
     amount = float(amount)
-    if amount <= 0:
+    if not math.isfinite(amount) or amount <= 0:
         raise ValueError("金额必须为正数")
     conn = _get_conn()
     cur = conn.execute(
@@ -143,8 +161,11 @@ def list_expenses(month: str | None = None, user_id: str = "default") -> list[di
             "ORDER BY month DESC, is_fixed DESC, category, id",
             (user_id,),
         ).fetchall()
+    linked = {r["expense_id"]: r["template_id"] for r in conn.execute(
+        "SELECT expense_id, template_id FROM recurring_expense_payments WHERE user_id=?", (user_id,)
+    )}
     conn.close()
-    return [_row_to_dict(r) for r in rows]
+    return [dict(_row_to_dict(r), recurring_template_id=linked.get(r["id"])) for r in rows]
 
 
 def update_expense(expense_id: int, user_id: str = "default", **fields) -> bool:
@@ -159,11 +180,16 @@ def update_expense(expense_id: int, user_id: str = "default", **fields) -> bool:
         fields["category"] = _validate_category(fields["category"])
     if "amount" in fields:
         fields["amount"] = float(fields["amount"])
-        if fields["amount"] <= 0:
+        if not math.isfinite(fields["amount"]) or fields["amount"] <= 0:
             raise ValueError("金额必须为正数")
     if "is_fixed" in fields:
         fields["is_fixed"] = 1 if fields["is_fixed"] else 0
     conn = _get_conn()
+    linked = conn.execute("SELECT 1 FROM recurring_expense_payments WHERE expense_id=? AND user_id=?",
+                          (expense_id, user_id)).fetchone()
+    if linked:
+        conn.close()
+        raise ValueError("周期账单的已支付记录不能直接修改；请删除支付记录后重新确认")
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     cur = conn.execute(
         f"UPDATE expense_records SET {set_clause}, updated_at = datetime('now','localtime') "
@@ -180,6 +206,9 @@ def update_expense(expense_id: int, user_id: str = "default", **fields) -> bool:
 
 def delete_expense(expense_id: int, user_id: str = "default") -> bool:
     conn = _get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DELETE FROM recurring_expense_payments WHERE expense_id=? AND user_id=?",
+                 (expense_id, user_id))
     cur = conn.execute(
         "DELETE FROM expense_records WHERE id = ? AND user_id = ?",
         (expense_id, user_id),
@@ -195,16 +224,18 @@ def delete_expense(expense_id: int, user_id: str = "default") -> bool:
 # ── 汇总 ──────────────────────────────────────────────
 
 
-def get_expense_summary(month: str, user_id: str = "default") -> dict:
+def get_expense_summary(month: str, user_id: str = "default", *, conn=None) -> dict:
     """月度汇总：总额/固定/浮动/分类占比/贷款还款额。"""
     month = _validate_month(month)
-    conn = _get_conn()
+    owned = conn is None
+    conn = conn if conn is not None else _get_conn()
     rows = conn.execute(
-        "SELECT category, is_fixed, SUM(amount) AS total FROM expense_records "
+        "SELECT category, is_fixed, COUNT(*) AS record_count, SUM(amount) AS total FROM expense_records "
         "WHERE user_id = ? AND month = ? GROUP BY category, is_fixed",
         (user_id, month),
     ).fetchall()
-    conn.close()
+    if owned:
+        conn.close()
 
     total = 0.0
     fixed_total = 0.0
@@ -226,7 +257,7 @@ def get_expense_summary(month: str, user_id: str = "default") -> dict:
         "variable_total": round(total - fixed_total, 2),
         "debt_payment": round(debt_total, 2),
         "by_category": by_category,
-        "count": sum(1 for _ in rows),
+        "count": sum(r["record_count"] for r in rows),
     }
 
 
@@ -266,100 +297,138 @@ def get_expense_trend(months: int = 6, user_id: str = "default") -> list[dict]:
 
 
 def copy_fixed_expenses(from_month: str, to_month: str, user_id: str = "default") -> int:
-    """把 from_month 的固定支出复制到 to_month。返回复制条数（幂等：同月同类同额不重复）。"""
+    """按原始记录身份复制固定项；同额同备注也保留，重复操作不重复入账。"""
     from_month = _validate_month(from_month)
     to_month = _validate_month(to_month)
+    if from_month == to_month:
+        return 0
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT category, sub_category, amount, note FROM expense_records "
-        "WHERE user_id = ? AND month = ? AND is_fixed = 1",
-        (user_id, from_month),
-    ).fetchall()
-    copied = 0
-    for r in rows:
-        exists = conn.execute(
-            "SELECT 1 FROM expense_records WHERE user_id = ? AND month = ? AND category = ? "
-            "AND sub_category = ? AND amount = ? AND is_fixed = 1",
-            (user_id, to_month, r["category"], r["sub_category"], r["amount"]),
-        ).fetchone()
-        if exists:
-            continue
-        conn.execute(
-            "INSERT INTO expense_records (user_id, month, category, sub_category, amount, is_fixed, note) "
-            "VALUES (?, ?, ?, ?, ?, 1, ?)",
-            (user_id, to_month, r["category"], r["sub_category"], r["amount"], r["note"]),
-        )
-        copied += 1
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT e.*, COALESCE(e.copied_from_id,e.id) AS origin_id FROM expense_records e "
+            "WHERE e.user_id=? AND e.month=? AND e.is_fixed=1 "
+            "AND NOT EXISTS (SELECT 1 FROM recurring_expense_payments p WHERE p.expense_id=e.id)",
+            (user_id, from_month),
+        ).fetchall()
+        copied = 0
+        for r in rows:
+            exists = conn.execute(
+                "SELECT 1 FROM expense_records WHERE user_id=? AND month=? "
+                "AND COALESCE(copied_from_id,id)=?", (user_id,to_month,r["origin_id"])
+            ).fetchone()
+            if exists:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO expense_records "
+                "(user_id,month,category,sub_category,amount,is_fixed,note,copied_from_id) "
+                "VALUES (?,?,?,?,?,1,?,?)",
+                (user_id,to_month,r["category"],r["sub_category"] or "",r["amount"],r["note"] or "",r["origin_id"]),
+            )
+            copied += cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     if copied:
         _auto_fill_profile(user_id)
     return copied
 
 
+def set_expense_month_complete(month: str, complete: bool, user_id: str = "default") -> None:
+    """用户明确确认当月实际支出已录完；可撤销，不改写月预算。"""
+    month = _validate_month(month)
+    conn = _get_conn()
+    try:
+        conn.execute("INSERT INTO expense_month_status(user_id,month,complete) VALUES (?,?,?) "
+                     "ON CONFLICT(user_id,month) DO UPDATE SET complete=excluded.complete",
+                     (user_id, month, int(complete)))
+        conn.commit()
+    finally:
+        conn.close()
+    _auto_fill_profile(user_id)
+
+
 def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
-    """收支视图：月收入 - 支出 = 可投资结余（供 wealth_advisor / allocation_advisor 消费）。"""
-    from db.dashboard import get_user_profile
+    """统一家庭现金流：实际/待付/月均预留、月预算和应急储备分别计算。"""
+    from db.recurring_expenses import get_recurring_summary
 
-    profile = get_user_profile(user_id) or {}
     month = _validate_month(month) if month else _current_month()
-    summary = get_expense_summary(month, user_id)
-    income = float(profile.get("monthly_income") or 0)
-
-    # 支出优先用当月实际记录；当月无记录时回退画像静态值
-    if summary["total"] > 0:
-        expense = summary["total"]
-        expense_source = "records"
-    else:
-        expense = float(profile.get("monthly_expense") or 0)
-        expense_source = "profile_static"
-
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN")
+        profile_row = conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+        profile = dict(profile_row) if profile_row else {}
+        summary = get_expense_summary(month, user_id, conn=conn)
+        bills = get_recurring_summary(month, user_id, conn=conn)
+        row = conn.execute("SELECT complete FROM expense_month_status WHERE user_id=? AND month=?",
+                           (user_id, month)).fetchone()
+        investment_row = conn.execute("SELECT emergency_months FROM user_investment_profile WHERE user_id=?",
+                                      (user_id,)).fetchone()
+        buckets = conn.execute("SELECT * FROM goal_buckets WHERE user_id=? AND status='active'", (user_id,)).fetchall()
+        cash_row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+    income = max(0.0, float(profile.get("monthly_income") or 0))
+    budget = max(0.0, float(profile.get("monthly_expense") or 0))
+    complete = bool(row and row["complete"])
+    recorded = summary["total"]
+    pending = bills["pending_total"]
+    provision = bills["future_provision"]
+    known_expense = recorded + pending + provision
+    expense = known_expense if complete else max(budget, known_expense)
+    source = "records" if complete else "budget_and_records" if recorded or pending or provision else "profile_static"
     surplus = income - expense
+    target_months = int(investment_row["emergency_months"] or 6) if investment_row else 6
+    emergency = [dict(b) for b in buckets if b["bucket_type"] == "emergency"]
+    cash = max(0.0, float(cash_row["balance"] or 0)) if cash_row else 0.0
+    emergency_target = max(sum(float(b.get("target_amount") or 0) for b in emergency), expense * target_months)
+    emergency_available = min(cash, sum(max(0.0, float(b.get("current_amount") or 0)) for b in emergency)) if emergency else cash
+    emergency_gap = max(0.0, emergency_target - emergency_available)
+    reserve = min(max(0.0, surplus), emergency_gap)
+    data_complete = income > 0 and (budget > 0 or complete)
+    investable = max(0.0, surplus - reserve) if data_complete else 0.0
+    debt_payment = summary["debt_payment"] + bills["pending_debt_payment"]
     return {
         "month": month,
         "monthly_income": round(income, 2),
         "monthly_expense": round(expense, 2),
-        "expense_source": expense_source,
+        "expense_source": source,
+        "expense_complete": complete,
+        "recorded_expense": round(recorded, 2),
+        "budget_expense": round(budget, 2),
+        "pending_bills": round(pending, 2),
+        "future_provision": round(provision, 2),
+        "monthly_provision": bills["monthly_provision"],
         "fixed_total": summary["fixed_total"],
-        "debt_payment": summary["debt_payment"],
+        "debt_payment": round(debt_payment, 2),
         "monthly_surplus": round(surplus, 2),
         "surplus_rate": round(surplus / income, 4) if income > 0 else None,
+        "investable_surplus": round(investable, 2),
+        "bucket_reserve": round(reserve, 2),
+        "emergency_target": round(emergency_target, 2),
+        "emergency_available": round(emergency_available, 2),
+        "emergency_gap": round(emergency_gap, 2),
+        "emergency_months": round(emergency_available / expense, 1) if expense > 0 else None,
+        "emergency_target_months": target_months,
+        "protected_cash": round(min(cash, emergency_target + max(expense - recorded, pending + provision)), 2),
+        "cash_balance": round(cash, 2),
+        "data_available": data_complete,
+        "overdue_bills": bills["overdue_count"],
+        "upcoming_bills": bills["upcoming_count"],
     }
 
 
-# ── 回填钩子 ──────────────────────────────────────────
-
-
 def _auto_fill_profile(user_id: str = "default"):
-    """写操作后自动回填 user_profiles.monthly_expense / monthly_surplus。
-
-    规则：monthly_expense = 近 3 个有记录月份的支出均值（不足 3 个月按实际月份数）。
-    开关：system_config 'expense.auto_fill_profile'（默认 true）。
-    失败不阻塞主流程。
-    """
+    """仅同步预计月结余；月预算始终由用户显式维护，避免少记一笔就覆盖预算。"""
     try:
         from db.config import get_config
+        from db.dashboard import update_user_profile
         if get_config("expense.auto_fill_profile", "true").lower() != "true":
             return
-
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT month, SUM(amount) AS total FROM expense_records "
-            "WHERE user_id = ? GROUP BY month ORDER BY month DESC LIMIT 3",
-            (user_id,),
-        ).fetchall()
-        conn.close()
-        if not rows:
-            return
-        avg_expense = round(sum(float(r["total"]) for r in rows) / len(rows), 2)
-
-        from db.dashboard import get_user_profile, update_user_profile
-        profile = get_user_profile(user_id) or {}
-        income = float(profile.get("monthly_income") or 0)
-        fields: dict = {"monthly_expense": avg_expense}
-        if income > 0:
-            fields["monthly_surplus"] = round(income - avg_expense, 2)
-        update_user_profile(user_id, **fields)
+        cashflow = get_cashflow(user_id)
+        update_user_profile(user_id, monthly_surplus=cashflow["monthly_surplus"])
     except Exception:
-        # 回填失败不影响主流程
-        pass
+        logger.warning("同步家庭现金流结余失败 user_id=%s", user_id, exc_info=True)

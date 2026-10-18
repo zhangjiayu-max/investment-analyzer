@@ -4,6 +4,8 @@ import {
   listBadCases, createEvalFromBadCase,
   getRootCauseStats, batchAnalyzeRootCause, analyzeSingleRootCause,
 } from '../../api'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+import { trackFeatureClick, trackFeatureComplete } from '../../composables/useTracking'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import AppToast from '../layout/AppToast.vue'
 import { useToast } from '../../composables/useToast'
@@ -14,7 +16,18 @@ const confirm = ref({ visible: false, title: '', message: '', danger: false, onC
 const cases = ref([])
 const loading = ref(false)
 const converting = ref(false)
-const analyzing = ref(false)
+const { taskState: batchState, start: startRootBatch, restoreFromServer: restoreRootBatch } = useAsyncTask('bad_case_root_batch')
+const { taskState: singleState, start: startRootSingle, restoreFromServer: restoreRootSingle } = useAsyncTask('bad_case_root_single')
+const analyzing = computed(() => [batchState.value,singleState.value].some(s => ['running','submitting'].includes(s)))
+function confirmRoot(action, batch = false) {
+  confirm.value = {visible:true,title:batch?'批量分析根因':'分析根因',message:batch?'分析最多50条未处理案例并生成改进任务？':'分析该案例的根因并生成改进任务？',onConfirm:()=>{confirm.value.visible=false;action()}}
+}
+function rootCompleted(data) {
+  showToast(data?.message || (data?.result ? '根因分析完成' : `分析完成：成功 ${data?.analyzed || 0}，失败 ${data?.failed || 0}`), data?.failed ? 'warning':'success')
+  if (data?.result || data?.analyzed) trackFeatureComplete('bad_case_root','bad-case')
+  load(); loadRootCauseStats()
+}
+function rootError(error) { showToast('根因分析失败: '+error,'error'); load() }
 const filterSource = ref('')
 const filterType = ref('')
 const selectedCase = ref(null)
@@ -51,31 +64,14 @@ async function loadRootCauseStats() {
 
 // 批量分析根因
 async function batchAnalyze() {
-  analyzing.value = true
-  try {
-    const { data } = await batchAnalyzeRootCause(50)
-    showToast(`分析完成: ${data.analyzed} 条成功，${data.failed} 条失败`, 'success')
-    await load()
-    await loadRootCauseStats()
-  } catch (e) {
-    showToast('分析失败: ' + (e.response?.data?.detail || e.message), 'error')
-  } finally {
-    analyzing.value = false
-  }
+  if (analyzing.value) return
+  trackFeatureClick('bad_case_root','bad-case')
+  await startRootBatch(() => batchAnalyzeRootCause(50),{onComplete:rootCompleted,onError:rootError})
 }
-
-// 分析单条根因
 async function analyzeSingle(c) {
-  try {
-    const { data } = await analyzeSingleRootCause(c.source, c.id)
-    if (data.ok) {
-      c.root_cause = data.result.root_cause
-      c.root_cause_detail = JSON.stringify(data.result)
-      showToast(`根因: ${rootCauseStyles[data.result.root_cause]?.label || data.result.root_cause}`, 'success')
-    }
-  } catch (e) {
-    showToast('分析失败: ' + (e.response?.data?.detail || e.message), 'error')
-  }
+  if (analyzing.value) return
+  trackFeatureClick('bad_case_root','bad-case')
+  await startRootSingle(() => analyzeSingleRootCause(c.source,c.id),{onComplete:rootCompleted,onError:rootError})
 }
 
 // 解析根因详情 JSON
@@ -143,6 +139,7 @@ async function load() {
   try {
     const { data } = await listBadCases(filterSource.value || '', 200)
     cases.value = data.cases || []
+    if (selectedCase.value) selectedCase.value=cases.value.find(c => c.source===selectedCase.value.source && c.id===selectedCase.value.id) || null
   } catch (e) {
     console.error(e)
   } finally {
@@ -178,7 +175,7 @@ async function doConvertToEval(c) {
   converting.value = true
   try {
     const { data } = await createEvalFromBadCase(c.source, c.id)
-    if (data.ok) {
+    if (data?.id && data?.ok !== false) {
       showToast(`已创建评测用例「${data.name}」`, 'success')
     } else {
       showToast('转化失败', 'error')
@@ -190,7 +187,10 @@ async function doConvertToEval(c) {
   }
 }
 
-onMounted(() => { load(); loadRootCauseStats() })
+onMounted(async () => {
+  await Promise.all([restoreRootBatch({onComplete:rootCompleted,onError:rootError}),restoreRootSingle({onComplete:rootCompleted,onError:rootError})])
+  load();loadRootCauseStats()
+})
 </script>
 
 <template>
@@ -213,7 +213,7 @@ onMounted(() => { load(); loadRootCauseStats() })
         <button class="btn-secondary btn-sm" @click="showStatsPanel = !showStatsPanel">
           {{ showStatsPanel ? '隐藏根因' : '根因统计' }}
         </button>
-        <button class="btn-primary btn-sm" @click="batchAnalyze" :disabled="analyzing">
+        <button class="btn-primary btn-sm" @click="confirmRoot(batchAnalyze, true)" :disabled="analyzing">
           {{ analyzing ? '分析中...' : '批量分析根因' }}
         </button>
         <button class="btn-secondary" @click="load" :disabled="loading">
@@ -310,7 +310,7 @@ onMounted(() => { load(); loadRootCauseStats() })
           <div class="badcase-summary">{{ c.summary || '无摘要' }}</div>
           <div v-if="c.note" class="badcase-note">{{ c.note }}</div>
           <div v-if="!c.root_cause" class="badcase-actions-inline">
-            <button class="btn-ghost btn-sm" @click.stop="analyzeSingle(c)">分析根因</button>
+            <button class="btn-ghost btn-sm" @click.stop="confirmRoot(() => analyzeSingle(c))" :disabled="analyzing">分析根因</button>
           </div>
         </div>
         <div v-if="!loading && filteredCases.length === 0" class="empty-state">
@@ -355,7 +355,7 @@ onMounted(() => { load(); loadRootCauseStats() })
         </div>
         <div v-else class="detail-section">
           <h4 class="terminal-label">根因分析</h4>
-          <button class="btn-primary btn-sm" @click="analyzeSingle(selectedCase)">分析根因</button>
+          <button class="btn-primary btn-sm" @click="confirmRoot(() => analyzeSingle(selectedCase))" :disabled="analyzing">分析根因</button>
         </div>
 
         <div class="detail-section">

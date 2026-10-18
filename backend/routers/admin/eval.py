@@ -15,7 +15,7 @@ from db import (
     create_async_task, update_async_task, get_async_task,
     get_config_float, get_config_int,
 )
-from models.eval import CreateEvalCaseRequest, BadCaseToEvalRequest
+from models.eval import CreateEvalCaseRequest, UpdateEvalCaseRequest, BadCaseToEvalRequest
 from routers.analysis.panorama import panorama_analysis_api
 from routers.analysis.deep_dive import fund_deep_dive_api
 from routers.analysis.trade_review import trade_review_api
@@ -85,11 +85,11 @@ async def create_eval_case_api(req: CreateEvalCaseRequest):
 
 
 @router.put("/api/eval/cases/{case_id}")
-async def update_eval_case_api(case_id: int, body: dict):
+async def update_eval_case_api(case_id: int, body: UpdateEvalCaseRequest):
     """更新评测用例。"""
     from db import update_eval_case
     allowed = {"name", "description", "analysis_type", "input_params", "expected_quality", "is_active"}
-    fields = {k: v for k, v in body.items() if k in allowed and v is not None}
+    fields = body.model_dump(exclude_none=True)
     if not fields:
         raise HTTPException(400, "无有效字段")
     ok = update_eval_case(case_id, **fields)
@@ -114,11 +114,13 @@ async def run_eval_case_api(case_id: int):
     if not case:
         raise HTTPException(404, "评测用例不存在")
 
-    task_id = create_async_task("eval_case_run", caller=f"eval_case_{case_id}")
-    task = asyncio.create_task(_run_eval_case_async(task_id, case_id))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    return {"task_id": task_id, "status": "running"}
+    from db.eval import claim_governance_task
+    submitted = claim_governance_task("eval_case_run", f"eval_case_{case_id}", {"case_id":case_id})
+    if not submitted["reused"]:
+        task = asyncio.create_task(_run_eval_case_async(submitted["task_id"],case_id))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted
 
 
 async def _run_eval_case_async(task_id: int, case_id: int):
@@ -132,134 +134,98 @@ async def _run_eval_case_async(task_id: int, case_id: int):
 
 
 async def _do_eval_case_run(case_id: int):
-    """评测用例运行业务逻辑。"""
+    """执行真实入口、等待最终输出、完成评分后才将评测任务终结。"""
+    from services.quality.eval_execution import execute_case, production_prompt, UnsupportedEvaluation
     case = get_eval_case(case_id)
     if not case:
-        raise HTTPException(404, "评测用例不存在")
-
-    input_params = json.loads(case["input_params"] or "{}")
-    analysis_type = case["analysis_type"]
-    start = time.time()
-
+        raise HTTPException(404,"评测用例不存在")
+    kind = case["analysis_type"]
+    start = time.monotonic()
+    run_id = None
     try:
-        # 专家 Agent 类型：直接调用对应的 specialist
-        specialist_types = {"valuation_expert", "market_analyst", "risk_assessor",
-                            "allocation_advisor", "fund_analyst", "orchestrator"}
-
-        if analysis_type in specialist_types:
-            question = input_params.get("question", "")
-            if not question:
-                raise HTTPException(400, f"{analysis_type} 需要 question 参数")
-
-            from agent.multi_agent import run_specialist
-            from db.agents import load_specialist_agents
-            import uuid as _uuid
-            _eval_trace_id = f"eval-{_uuid.uuid4().hex[:8]}"
-
-            specialists = load_specialist_agents()
-            if analysis_type == "orchestrator":
-                # orchestrator 模式：调用完整编排流程
-                from agent.orchestrator import orchestrate
-                result = await asyncio.to_thread(lambda: orchestrate(question, [], trace_id=_eval_trace_id))
-                result_summary = result.get("answer", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)
-            elif analysis_type in specialists:
-                # 单个专家 Agent
-                result = await asyncio.to_thread(
-                    lambda: run_specialist(analysis_type, question, trace_id=_eval_trace_id)
-                )
-                result_summary = result.get("analysis", "")[:500]
-                result_data = json.dumps(result, ensure_ascii=False)
-            else:
-                raise HTTPException(400, f"未找到专家: {analysis_type}")
-
-        elif analysis_type == "panorama":
-            result = await panorama_analysis_api(PanoramaAnalysisRequest())
-            if isinstance(result, StreamingResponse):
-                result_summary = "流式输出（已在后台执行）"
-                result_data = "{}"
-            else:
-                result_summary = json.dumps(result, ensure_ascii=False)[:500]
-                result_data = json.dumps(result, ensure_ascii=False)
-        elif analysis_type == "deep_dive":
-            holding_id = input_params.get("holding_id")
-            if not holding_id:
-                raise HTTPException(400, "deep_dive 需要 holding_id 参数")
-            result = await fund_deep_dive_api(holding_id, DeepDiveRequest())
-            result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)
-        elif analysis_type == "trade_review":
-            result = await trade_review_api(TradeReviewRequest(
-                start_date=input_params.get("start_date", ""),
-                end_date=input_params.get("end_date", ""),
-            ))
-            result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)
-        elif analysis_type == "what_if":
-            result = await what_if_analysis_api(WhatIfRequest(
-                scenario=input_params.get("scenario", ""),
-                parameter=input_params.get("parameter", ""),
-            ))
-            result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)
-        elif analysis_type == "diversification_ai":
-            result = await portfolio_diversification_ai_summary()
-            if isinstance(result, dict) and result.get("status") == "running":
-                record_id = result.get("record_id") or result.get("id")
-                if record_id:
-                    result = await _await_portfolio_record_result(record_id)
-            result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)
-        elif analysis_type == "ai":
-            question = input_params.get("question", "")
-            result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
-            if isinstance(result, dict) and result.get("status") == "running":
-                record_id = result.get("record_id") or result.get("id")
-                if record_id:
-                    result = await _await_portfolio_record_result(record_id)
-            result_summary = json.dumps(result, ensure_ascii=False)[:500]
-            result_data = json.dumps(result, ensure_ascii=False)
+        # 在执行前冻结用例和生效提示词，避免执行期间编辑改变历史依据。
+        prompt = production_prompt(kind)
+        snapshot = {**case,"production_prompt":prompt}
+        result = await execute_case(case, prompt_override=prompt if prompt else None)
+        data = json.dumps(result,ensure_ascii=False)
+        run_id = create_eval_run(case_id,kind,str(result["result"])[:500],result_data=data,
+                                 duration_ms=int((time.monotonic()-start)*1000),
+                                 token_usage=result.get("token_usage",0),case_snapshot=snapshot)
+        score_state = await _score_run_async(run_id,case,data,kind)
+        run = get_eval_run_detail(run_id)
+        return {"ok":score_state == "scored","skipped":score_state == "skipped","case_id":case_id,"name":case['name'],"run_id":run_id,"score_status":score_state,
+                "status":score_state,"score":run.get('score'),"duration_ms":run.get('duration_ms'),
+                "error":"评分失败，请重试" if score_state == "error" else ""}
+    except UnsupportedEvaluation as exc:
+        run_id = create_eval_run(case_id,kind,str(exc),score_status='skipped',case_snapshot=case)
+        update_eval_run(run_id,score_reason=str(exc))
+        return {'ok':False,'skipped':True,'case_id':case_id,'run_id':run_id,'reason':str(exc)}
+    except Exception as exc:
+        error = str(getattr(exc,"detail",exc))
+        if run_id is None:
+            run_id = create_eval_run(case_id,kind,"执行失败",error_msg=error,
+                                     duration_ms=int((time.monotonic()-start)*1000),case_snapshot=case)
         else:
-            raise HTTPException(400, f"不支持的分析类型: {analysis_type}")
-
-        duration_ms = int((time.time() - start) * 1000)
-        # 提取 token_usage
-        tokens = 0
-        if isinstance(result, dict):
-            tokens = result.get("token_usage", 0)
-        run_id = create_eval_run(
-            case_id=case_id, analysis_type=analysis_type,
-            result_summary=result_summary,
-            result_data=result_data,
-            duration_ms=duration_ms,
-            token_usage=tokens,
-        )
-
-        # 异步触发自动评分（不阻塞返回）
-        asyncio.create_task(_score_run_async(run_id, case, result_data, analysis_type))
-
-        return {"ok": True, "run_id": run_id, "duration_ms": duration_ms}
-    except Exception as e:
-        duration_ms = int((time.time() - start) * 1000)
-        run_id = create_eval_run(
-            case_id=case_id, analysis_type=analysis_type,
-            result_summary=f"错误: {str(e)[:200]}",
-            error_msg=str(e)[:1000],
-            duration_ms=duration_ms,
-        )
-        return {"ok": False, "run_id": run_id, "error": str(e)}
+            update_eval_run(run_id,score_status="error",error_msg=error)
+        return {"ok":False,"run_id":run_id,"error":error}
 
 
 async def _score_run_async(run_id: int, case: dict, result_data: str, analysis_type: str):
-    """异步评分：用 LLM-as-Judge 对运行结果打分。"""
+    """阻塞评分调用在线程中执行；失败与跳过不作为有效0分。"""
     try:
-        from agent.eval_scorer import score_eval_result
-        expected_quality = case.get("expected_quality", "")
-        score, reason = await score_eval_result(expected_quality, result_data, analysis_type)
-        update_eval_run(run_id, score=score, score_reason=reason)
-        logger.info(f"Eval run {run_id} 评分完成: {score}分 — {reason}")
-    except Exception as e:
-        logger.error(f"Eval run {run_id} 评分失败: {e}")
+        from agent.eval.eval_scorer import score_eval_result
+        expected = case.get("expected_quality","")
+        if not expected.strip():
+            update_eval_run(run_id,score_status="skipped",score_reason="未设置质量标准，已跳过评分")
+            return "skipped"
+        score, reason = await asyncio.to_thread(lambda: asyncio.run(score_eval_result(expected,result_data,analysis_type)))
+        if score <= 0 or reason.startswith("评分失败"):
+            raise RuntimeError(reason)
+        update_eval_run(run_id,score=score,score_reason=reason,score_status="scored")
+        return "scored"
+    except Exception as exc:
+        update_eval_run(run_id,score_status="error",score_reason=str(exc))
+        logger.error("Eval run %s 评分失败: %s",run_id,exc)
+        return "error"
+
+
+async def _run_case_batch(task_id: int, case_ids: list[int]):
+    results = []
+    try:
+        for index,cid in enumerate(case_ids):
+            update_async_task(task_id,progress={"completed":index,"total":len(case_ids),"case_id":cid})
+            results.append({"case_id":cid,**await _do_eval_case_run(cid)})
+        passed = sum(bool(r.get('ok')) and r.get('score',0)>=5 for r in results)
+        failed = sum(bool(r.get('ok')) and r.get('score',0)<5 for r in results)
+        skipped = sum(bool(r.get('skipped')) for r in results)
+        errors = len(results)-passed-failed-skipped
+        update_async_task(task_id,status="done",result={"ok":errors==0,"total":len(results),
+                          "passed":passed,"failed":failed,"errors":errors,"skipped":skipped,"results":results})
+    except Exception as exc:
+        update_async_task(task_id,status="error",error_msg=str(exc))
+
+
+def _submit_case_batch(case_ids: list[int]):
+    from db.eval import claim_governance_task
+    ids = sorted(set(case_ids))
+    if not ids:
+        raise HTTPException(400,"没有可运行用例")
+    submitted = claim_governance_task("eval_case_batch","eval_case_batch",{"case_ids":ids})
+    if not submitted["reused"]:
+        task = asyncio.create_task(_run_case_batch(submitted["task_id"],ids))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted
+
+
+@router.post("/api/eval/run-batch")
+async def run_cases_batch_api(body: dict):
+    ids = body.get("case_ids")
+    if not isinstance(ids,list) or not ids or len(ids)>200 or any(type(i) is not int or i<=0 for i in ids):
+        raise HTTPException(400,"case_ids需为1-200个正整数")
+    if any(not get_eval_case(cid) for cid in ids):
+        raise HTTPException(404,"评测用例不存在")
+    return _submit_case_batch(ids)
 
 
 @router.get("/api/eval/runs")
@@ -299,21 +265,17 @@ async def get_eval_stats_api():
 async def create_eval_from_bad_case(req: BadCaseToEvalRequest):
     """从 Bad Case 转化为 Eval Case：自动提取输入/输出，用 LLM 生成期望质量标准。"""
     # 1. 查询原始 bad case 数据
-    all_cases = list_all_bad_cases(limit=500)
-    bad_case = None
-    for c in all_cases:
-        if c["source"] == req.source and c["id"] == req.source_id:
-            bad_case = c
-            break
-
+    from db.eval import get_governance_bad_case, get_eval_source, create_eval_case_from_source
+    bad_case = get_governance_bad_case(req.source,req.source_id)
     if not bad_case:
-        raise HTTPException(404, "Bad Case 不存在")
+        raise HTTPException(404,'Bad Case 不存在')
+    existing = get_eval_source('bad_case:'+req.source,req.source_id)
+    if existing:
+        return {'ok':True,**existing,'created':False,'reused':True}
 
     # 2. 确定分析类型
-    analysis_type = bad_case.get("type", "ai")
-    if analysis_type not in ("panorama", "deep_dive", "trade_review", "what_if",
-                              "diversification_ai", "ai"):
-        analysis_type = "ai"
+    from services.quality.eval_execution import resolve_case_type
+    analysis_type = resolve_case_type(bad_case.get("type", "ai"))
 
     # 3. 构建 input_params
     input_data = bad_case.get("input", "")
@@ -343,24 +305,17 @@ async def create_eval_from_bad_case(req: BadCaseToEvalRequest):
         name = f"BadCase-{type_label}-{note_preview or '无备注'}"
 
     # 6. 创建 eval case
-    case_id = create_eval_case(
-        name=name,
-        analysis_type=analysis_type,
-        input_params=input_params,
-        description=f"从 Bad Case 转化 | 来源: {req.source} | 原始ID: {req.source_id}",
-        expected_quality=expected_quality,
-    )
-
-    return {"ok": True, "id": case_id, "name": name, "expected_quality": expected_quality}
+    created = create_eval_case_from_source('bad_case:'+req.source,req.source_id,
+        name=name,analysis_type=analysis_type,input_params=input_params,
+        description=f"从 Bad Case 转化 | 来源: {req.source} | 原始ID: {req.source_id}",expected_quality=expected_quality)
+    return {"ok":True,**created,"expected_quality":expected_quality}
 
 
 @router.post("/api/eval/cases/batch-from-bad-cases")
 async def batch_convert_bad_cases():
     """批量将所有 Bad Case 转化为 Eval Case（跳过已转化的）。"""
     all_bad = list_all_bad_cases(limit=500)
-    existing = list_eval_cases(active_only=False)
-    # 用描述中的 source:id 去重
-    existing_descs = {c.get("description", "") for c in existing}
+    from db.eval import get_eval_source, create_eval_case_from_source
 
     converted = []
     skipped = 0
@@ -369,15 +324,13 @@ async def batch_convert_bad_cases():
         source = bc.get("source", "chat")
         source_id = bc.get("id")
         desc_marker = f"来源: {source} | 原始ID: {source_id}"
-        if desc_marker in existing_descs:
+        if get_eval_source('bad_case:'+source,source_id):
             skipped += 1
             continue
 
         # 确定分析类型
-        analysis_type = bc.get("type", "ai")
-        if analysis_type not in ("panorama", "deep_dive", "trade_review", "what_if",
-                                  "diversification_ai", "ai", "orchestrator"):
-            analysis_type = "ai"
+        from services.quality.eval_execution import resolve_case_type
+        analysis_type = resolve_case_type(bc.get("type", "ai"))
 
         # 构建 input_params
         input_data = bc.get("input", "")
@@ -409,14 +362,13 @@ async def batch_convert_bad_cases():
         input_preview = str(input_data)[:30].replace("\n", " ")
         name = f"BC-{type_label}-{input_preview}"
 
-        case_id = create_eval_case(
-            name=name,
-            analysis_type=analysis_type,
-            input_params=input_params,
-            description=f"从 Bad Case 批量转化 | {desc_marker}",
-            expected_quality=expected_quality,
-        )
-        converted.append({"case_id": case_id, "name": name, "source": source, "source_id": source_id})
+        created = create_eval_case_from_source('bad_case:'+source,source_id,
+            name=name,analysis_type=analysis_type,input_params=input_params,
+            description=f"从 Bad Case 批量转化 | {desc_marker}",expected_quality=expected_quality)
+        if created['created']:
+            converted.append({"case_id":created['id'],"name":name,"source":source,"source_id":source_id})
+        else:
+            skipped += 1
 
     return {"ok": True, "converted": len(converted), "skipped": skipped, "cases": converted}
 
@@ -567,104 +519,27 @@ async def run_eval_suite_api(limit_per_category: int = None):
 
 @router.get("/api/eval/quality-summary")
 async def quality_summary_api(days: int = 30):
-    """获取质量评分概览（合并 llm_feedback + eval_runs）。"""
-    from db import get_quality_summary, _get_conn
-
-    # llm_feedback 数据
-    fb = get_quality_summary(days)
-
-    # eval_runs 数据
-    conn = _get_conn()
-    eval_row = conn.execute("""
-        SELECT
-            COUNT(*) as total_runs,
-            COUNT(CASE WHEN score > 0 THEN 1 END) as scored_runs,
-            COALESCE(AVG(CASE WHEN score > 0 THEN score END), 0) as avg_score,
-            COUNT(CASE WHEN score >= 7 THEN 1 END) as good_count,
-            COUNT(CASE WHEN score > 0 AND score < 5 THEN 1 END) as bad_count
-        FROM eval_runs
-        WHERE created_at >= datetime('now', ?)
-    """, (f"-{days} days",)).fetchone()
-    conn.close()
-
-    eval_data = dict(eval_row) if eval_row else {}
-
-    return {
-        "total_feedback": fb.get("total_feedback", 0) + eval_data.get("total_runs", 0),
-        "scored_count": fb.get("scored_count", 0) + eval_data.get("scored_runs", 0),
-        "avg_overall": eval_data.get("avg_score", 0) or fb.get("avg_overall", 0),
-        "avg_data_accuracy": fb.get("avg_data_accuracy", 0),
-        "avg_logic": fb.get("avg_logic", 0),
-        "avg_actionability": fb.get("avg_actionability", 0),
-        "low_quality_count": fb.get("low_quality_count", 0) + eval_data.get("bad_count", 0),
-        "eval_avg_score": eval_data.get("avg_score", 0),
-        "eval_good_count": eval_data.get("good_count", 0),
-        "eval_bad_count": eval_data.get("bad_count", 0),
-    }
+    from db.eval import get_governance_quality
+    return get_governance_quality(days)["summary"]
 
 
 @router.get("/api/eval/quality-trend")
 async def quality_trend_api(days: int = 30):
-    """获取按天的质量评分趋势。"""
-    from db import get_quality_trend
-    return {"trend": get_quality_trend(days)}
+    from db.eval import get_governance_quality
+    return {"trend":get_governance_quality(days)["trend"]}
 
 
 @router.get("/api/eval/low-quality")
-async def low_quality_api(limit: int = 20):
-    """获取低分产出列表（bad cases）。"""
-    from db import get_low_quality_items
-    return {"items": get_low_quality_items(limit)}
+async def low_quality_api(limit: int = 20, days: int = 30):
+    from db.eval import get_governance_quality
+    return {"items":get_governance_quality(days,limit)["low_quality"]}
 
 
 @router.get("/api/eval/stats-by-agent")
-async def stats_by_agent_api():
-    """按 Agent 类型分组的评测统计。"""
-    from db import _get_conn
-    conn = _get_conn()
-    rows = conn.execute("""
-        SELECT
-            c.analysis_type,
-            COUNT(DISTINCT c.id) as case_count,
-            COUNT(r.id) as run_count,
-            COALESCE(AVG(r.score), 0) as avg_score,
-            COALESCE(MIN(r.score), 0) as min_score,
-            COALESCE(MAX(r.score), 0) as max_score,
-            COUNT(CASE WHEN r.score >= 7 THEN 1 END) as good_count,
-            COUNT(CASE WHEN r.score < 5 THEN 1 END) as bad_count
-        FROM eval_cases c
-        LEFT JOIN eval_runs r ON c.id = r.case_id
-        GROUP BY c.analysis_type
-        ORDER BY avg_score DESC
-    """).fetchall()
-    conn.close()
+async def stats_by_agent_api(days: int = 30):
+    from db.eval import get_governance_quality
+    return {"agents":get_governance_quality(days)["agents"]}
 
-    # Agent 名称映射
-    agent_names = {
-        "valuation_expert": "估值分析师",
-        "market_analyst": "择时分析师",
-        "risk_assessor": "风险管理师",
-        "allocation_advisor": "资产配置师",
-        "fund_analyst": "基金分析师",
-        "orchestrator": "编排器（多Agent）",
-        "ai": "AI 分析",
-        "panorama": "全景诊断",
-        "deep_dive": "单基金深度",
-        "trade_review": "交易复盘",
-        "what_if": "情景推演",
-        "diversification_ai": "分散度分析",
-    }
-
-    result = []
-    for row in rows:
-        r = dict(row)
-        r["agent_name"] = agent_names.get(r["analysis_type"], r["analysis_type"])
-        result.append(r)
-
-    return {"agents": result}
-
-
-# ── 对话质量评估 API ──────────────────────────────────────
 
 @router.post("/api/eval/conversation/{conversation_id}")
 async def evaluate_conversation_api(conversation_id: int):
@@ -820,10 +695,10 @@ async def submit_conversation_user_score_api(conversation_id: int, body: dict):
 
 
 @router.get("/api/eval/conversation-stats")
-async def conversation_eval_stats_api():
+async def conversation_eval_stats_api(days: int = 30):
     """获取对话评估统计"""
     from db.eval import get_conversation_eval_stats
-    return {"ok": True, "stats": get_conversation_eval_stats()}
+    return {"ok": True, "stats": get_conversation_eval_stats(days)}
 
 
 @router.get("/api/eval/conversation-list")
@@ -863,42 +738,21 @@ async def list_eval_suggestions_api(status: str = None, limit: int = 50):
 
 @router.post("/api/eval/suggestions/{suggestion_id}/accept")
 async def accept_eval_suggestion_api(suggestion_id: int):
-    """接受评估建议，转化为 Eval 用例"""
-    from agent.conversation_evolution import get_eval_suggestions, update_eval_suggestion_status
-    from db.eval import create_eval_case
-
-    # 获取建议
-    suggestions = get_eval_suggestions()
-    suggestion = None
-    for s in suggestions:
-        if s["id"] == suggestion_id:
-            suggestion = s
-            break
-
-    if not suggestion:
-        raise HTTPException(404, "建议不存在")
-
-    # 创建 Eval 用例
-    case_id = create_eval_case(
-        name=suggestion["name"],
-        analysis_type=suggestion["analysis_type"],
-        input_params=suggestion["input_params"],
-        description=f"从对话 {suggestion['conversation_id']} 转化（评分: {suggestion['auto_score']:.0f}）",
-        expected_quality=suggestion["expected_quality"] or "",
-    )
-
-    # 更新建议状态
-    update_eval_suggestion_status(suggestion_id, "accepted")
-
-    return {"ok": True, "case_id": case_id}
+    from db.eval import accept_governance_suggestion
+    try:
+        return accept_governance_suggestion(suggestion_id)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
 
 
 @router.post("/api/eval/suggestions/{suggestion_id}/reject")
 async def reject_eval_suggestion_api(suggestion_id: int):
-    """拒绝评估建议"""
-    from agent.conversation_evolution import update_eval_suggestion_status
-    update_eval_suggestion_status(suggestion_id, "rejected")
-    return {"ok": True}
+    from db.eval import reject_governance_suggestion
+    if not reject_governance_suggestion(suggestion_id):
+        raise HTTPException(409,"建议不存在或已处理")
+    return {"ok":True}
 
 
 @router.get("/api/eval/expert-alerts")
@@ -1036,241 +890,10 @@ async def user_insights_api(user_id: str = "default"):
 
 @router.post("/api/eval/auto-regression")
 async def auto_regression_api(limit: int = 10):
-    """自动回归测试：对每个用例实际运行 Agent 回答，然后用 LLM 评分。
-
-    每条用例约 10-30 秒（含 Agent 回答 + LLM 评分），limit 默认 10 条控制总耗时。
-    """
-    from db import list_eval_cases, get_eval_case, create_eval_run
-    from db._conn import _get_conn
-    import json
-    import time
-
-    cases = list_eval_cases(active_only=True)
-    if limit:
-        cases = cases[:limit]
-
-    results = []
-    passed = 0
-    failed = 0
-    degraded = []
-
-    for case in cases:
-        case_id = case["id"]
-        analysis_type = case.get("analysis_type", "ai")
-        start = time.time()
-
-        try:
-            detail = get_eval_case(case_id)
-            if not detail:
-                results.append({"case_id": case_id, "status": "skip", "reason": "用例不存在"})
-                continue
-
-            input_params = detail.get("input_params", "{}")
-            expected_quality = detail.get("expected_quality", "")
-
-            try:
-                params = json.loads(input_params) if isinstance(input_params, str) else input_params
-            except (json.JSONDecodeError, TypeError):
-                params = {}
-
-            question = params.get("question", "")
-            if not question:
-                duration_ms = int((time.time() - start) * 1000)
-                create_eval_run(case_id=case_id, analysis_type=analysis_type,
-                    result_summary="无问题参数", score=0, duration_ms=duration_ms)
-                results.append({"case_id": case_id, "status": "skip", "reason": "无问题"})
-                continue
-
-            # 1. 实际运行 Agent 获取回答
-            answer = await _run_agent_for_eval(question)
-            duration_ms = int((time.time() - start) * 1000)
-
-            if not answer:
-                create_eval_run(case_id=case_id, analysis_type=analysis_type,
-                    result_summary="Agent 无回答", score=0, duration_ms=duration_ms)
-                results.append({"case_id": case_id, "status": "fail", "score": 0, "reason": "Agent 无回答"})
-                failed += 1
-                continue
-
-            # 2. 用 LLM 评分回答质量
-            dimensions = await _score_answer_quality(question, answer[:2000], expected_quality)
-            total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0
-
-            # 保存运行结果（含完整回答 + 多维度评分）
-            answer_summary = answer[:300].replace("\n", " ")
-            create_eval_run(
-                case_id=case_id, analysis_type=analysis_type,
-                result_summary=answer_summary,
-                result_data=json.dumps({"answer": answer, "dimensions": dimensions}, ensure_ascii=False),
-                score=round(total_score, 1), duration_ms=duration_ms,
-                score_data_accuracy=dimensions.get("data_accuracy"),
-                score_logic=dimensions.get("logic"),
-                score_actionability=dimensions.get("actionability"),
-                score_risk_awareness=dimensions.get("risk_awareness"),
-            )
-
-            # 3. 退化检测
-            conn = _get_conn()
-            recent_runs = conn.execute("""
-                SELECT score FROM eval_runs WHERE case_id = ? ORDER BY created_at DESC LIMIT 3
-            """, (case_id,)).fetchall()
-            conn.close()
-            recent_scores = [r["score"] for r in recent_runs if r["score"] is not None]
-            is_degraded = len(recent_scores) >= 3 and all(s < 4 for s in recent_scores)
-            status = "degraded" if is_degraded else ("pass" if total_score >= 5 else "fail")
-
-            if is_degraded:
-                degraded.append({"case_id": case_id, "name": case["name"], "scores": recent_scores})
-
-            results.append({
-                "case_id": case_id, "status": status, "score": round(total_score, 1),
-                "dimensions": dimensions, "duration_ms": duration_ms,
-                "answer_preview": answer[:100],
-            })
-            if total_score >= 5:
-                passed += 1
-            else:
-                failed += 1
-
-        except Exception as e:
-            duration_ms = int((time.time() - start) * 1000)
-            create_eval_run(case_id=case_id, analysis_type=analysis_type,
-                result_summary=f"异常: {str(e)[:200]}", score=0,
-                duration_ms=duration_ms, error_msg=str(e)[:500])
-            results.append({"case_id": case_id, "status": "error", "error": str(e)[:200]})
-            failed += 1
-
-    if degraded:
-        logging.warning(f"检测到 {len(degraded)} 个退化用例: {[d['name'] for d in degraded]}")
-
-    return {
-        "ok": True, "total": len(cases), "passed": passed, "failed": failed,
-        "degraded_count": len(degraded), "degraded": degraded, "results": results,
-    }
-
-
-async def _run_agent_for_eval(question: str) -> str:
-    """运行 Agent 回答评测问题（简化版，直接调 LLM + RAG）。"""
-    try:
-        from services.llm_service import _call_llm, call_llm_async, MODEL_AUX
-        from services.rag import build_rag_context_with_details
-
-        # 获取 RAG 上下文
-        rag_result = build_rag_context_with_details(query=question, limit=5)
-        rag_context = rag_result.get("context", "")
-
-        # 构建 prompt
-        system = "你是一位专业的投资分析助手。请根据提供的知识库资料，给出专业、准确、可操作的投资分析。必须引用具体数据，包含风险提示。"
-        user_msg = question
-        if rag_context:
-            user_msg = f"参考资料：\n{rag_context[:2000]}\n\n用户问题：{question}"
-
-        resp = await call_llm_async(
-            caller="eval_runner", model=MODEL_AUX,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=get_config_float('llm.temperature_eval', 0.3), max_tokens=get_config_int('llm.max_tokens_eval', 2000),
-        )
-
-        msg = resp.choices[0].message
-        content = (msg.content or "").strip()
-        if not content and hasattr(msg, "reasoning_content"):
-            content = (msg.reasoning_content or "").strip()
-        return content
-
-    except Exception as e:
-        logging.error(f"Agent 评测运行失败: {e}")
-        return ""
-
-
-async def _score_answer_quality(question: str, answer: str, expected_quality: str) -> dict:
-    """用 LLM 对 Agent 回答质量做多维度评分。"""
-    try:
-        from services.llm_service import _call_llm, call_llm_async, MODEL_AUX
-
-        prompt = f"""请对以下投资分析回答评分，返回JSON格式。
-
-用户问题：{question[:300]}
-AI回答：{answer[:1000]}
-质量标准：{expected_quality[:300]}
-
-评分（0-10整数）：data_accuracy(数据准确性), logic(逻辑性), actionability(可操作性), risk_awareness(风险意识)
-
-直接返回JSON，如 {{"data_accuracy":8,"logic":7,"actionability":6,"risk_awareness":5}}"""
-
-        resp = await call_llm_async(
-            caller="eval_scorer", model=MODEL_AUX,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=get_config_float('llm.temperature_eval', 0.2), max_tokens=get_config_int('llm.max_tokens_eval_score', 500),
-        )
-
-        msg = resp.choices[0].message
-        text = (msg.content or "").strip()
-        if not text and hasattr(msg, "reasoning_content"):
-            text = (msg.reasoning_content or "").strip()
-
-        import re
-        # 匹配包含实际数字的 JSON（不是"分数"这种模板文字）
-        match = re.search(r'\{[^{}]*\d+[^{}]*\}', text)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-                return {
-                    "data_accuracy": min(10, max(0, int(parsed.get("data_accuracy", 5)))),
-                    "logic": min(10, max(0, int(parsed.get("logic", 5)))),
-                    "actionability": min(10, max(0, int(parsed.get("actionability", 5)))),
-                    "risk_awareness": min(10, max(0, int(parsed.get("risk_awareness", 5)))),
-                }
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # Fallback: 从 reasoning 中提取数字模式
-        scores = re.findall(r'(?:data_accuracy|logic|actionability|risk_awareness)[：:]\s*(\d+)', text)
-        if len(scores) >= 4:
-            return {
-                "data_accuracy": min(10, int(scores[0])),
-                "logic": min(10, int(scores[1])),
-                "actionability": min(10, int(scores[2])),
-                "risk_awareness": min(10, int(scores[3])),
-            }
-
-        # Fallback: 从回答内容做规则评分
-        return _rule_score_answer(answer, expected_quality)
-
-    except Exception as e:
-        logging.warning(f"回答质量评分失败: {e}")
-        return _rule_score_answer(answer, expected_quality)
-
-
-def _rule_score_answer(answer: str, expected_quality: str) -> dict:
-    """基于规则的回答质量评分（LLM 失败时的 fallback）。"""
-    a = answer.lower()
-    eq = expected_quality.lower()
-
-    # 数据准确性
-    data_hits = sum(1 for kw in ["pe", "pb", "净值", "收益率", "百分位", "亿", "元", "%", "点"] if kw in a)
-    data_score = min(10, 3 + data_hits * 2)
-
-    # 逻辑性
-    logic_hits = sum(1 for kw in ["因为", "所以", "首先", "其次", "因此", "基于", "分析", "对比"] if kw in a)
-    logic_score = min(10, 3 + logic_hits * 2)
-
-    # 可操作性
-    action_hits = sum(1 for kw in ["建议", "可以", "买入", "卖出", "持有", "配置", "比例", "仓位", "分批"] if kw in a)
-    action_score = min(10, 3 + action_hits * 2)
-
-    # 风险意识
-    risk_hits = sum(1 for kw in ["风险", "注意", "谨慎", "回撤", "波动", "不确定", "止损", "控制"] if kw in a)
-    risk_score = min(10, 3 + risk_hits * 2)
-
-    return {
-        "data_accuracy": data_score,
-        "logic": logic_score,
-        "actionability": action_score,
-        "risk_awareness": risk_score,
-    }
+    """回归和单条评测共享真实执行器；以持久批次任务跟踪终态。"""
+    if limit < 1 or limit > 200:
+        raise HTTPException(400,"limit需在1-200之间")
+    return _submit_case_batch([case["id"] for case in list_eval_cases(active_only=True)[:limit]])
 
 
 # ── 测试套件 (Eval Suite) API ──────────────────────────────────────
@@ -1369,36 +992,7 @@ async def run_eval_suite_api(suite_id: int):
     if not cases:
         raise HTTPException(400, "套件内无用例")
 
-    results = []
-    for case in cases:
-        try:
-            result = await _do_eval_case_run(case["id"])
-            results.append({
-                "case_id": case["id"],
-                "case_name": case.get("name", ""),
-                "ok": result.get("ok", False),
-                "run_id": result.get("run_id"),
-                "duration_ms": result.get("duration_ms", 0),
-                "error": result.get("error"),
-            })
-        except Exception as e:
-            results.append({
-                "case_id": case["id"],
-                "case_name": case.get("name", ""),
-                "ok": False,
-                "error": str(e)[:200],
-            })
-
-    ok_count = sum(1 for r in results if r["ok"])
-    return {
-        "ok": True,
-        "suite_id": suite_id,
-        "suite_name": suite.get("name", ""),
-        "total": len(results),
-        "passed": ok_count,
-        "failed": len(results) - ok_count,
-        "results": results,
-    }
+    return _submit_case_batch([case['id'] for case in cases])
 
 
 # ── 改进任务 (Improvement Task) API ──────────────────────────────────────
