@@ -274,6 +274,8 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         # 原字段（向后兼容）
         "query": query,
         "final_stance": final_stance,
+        "portfolio_stance": final_stance,
+        "asset_actions": _collect_asset_actions(specialist_results or []),
         "arbitration_mode": arbitration_mode,
         "reasons": reasons,
         "supporting_agents": supporting_agents,
@@ -293,6 +295,20 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         "consistency_warning": consistency_warning,    # 一致性告警（空字符串表示一致）
     }
     return summary
+
+
+def _collect_asset_actions(results: list[dict]) -> list[dict]:
+    """保留逐标的建议，组合 HOLD 不得抹去具体减集中度/持有动作。"""
+    from agent.infra.blackboard import _normalize_asset_actions
+    actions = []
+    for result in results:
+        if result.get("is_cross_review") or result.get("is_arbitration"):
+            continue
+        for action in _normalize_asset_actions(result.get("asset_actions") or result.get("action_signals") or []):
+            action = dict(action)
+            action["agent_key"] = result.get("agent_key", "unknown")
+            actions.append(action)
+    return actions
 
 
 def _check_consistency(stances: list, final_stance: str) -> str:

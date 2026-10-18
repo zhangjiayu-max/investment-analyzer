@@ -126,7 +126,7 @@ def evaluate_analysis(analysis: str, tool_calls: list, user_question: str,
         tool_summary = _build_tool_summary(tool_calls)
 
         # 截断 analysis（避免 prompt 过长，保留前 2000 字）
-        analysis_truncated = analysis[:2000] if len(analysis) > 2000 else analysis
+        analysis_truncated = analysis if len(analysis) <= 10000 else analysis[:7000] + "\n[中段省略，仅凭预览不可断言全文缺失]\n" + analysis[-3000:]
 
         # M7：跨专家盲点检查（默认关，需手动开启）
         cross_check_on = _is_cross_check_enabled()
@@ -163,22 +163,29 @@ def evaluate_analysis(analysis: str, tool_calls: list, user_question: str,
             messages=messages,
             model=model,
             temperature=0.1,  # 低温度保证一致性
-            max_tokens=500,   # 限制输出长度
+            max_tokens=2000,   # 限制输出长度
             trace_id=trace_id,
             caller=f"self_reflection_{agent_key}",
         )
 
+        if response and response.choices and getattr(response.choices[0], "finish_reason", None) == "length":
+            return {"status": "failed", "sufficient": False, "confidence": 0.3,
+                    "gaps": ["质量审查输出截断，尚未完成验证"], "issues": [],
+                    "need_retry": False, "reflection_score": 0.3}
         response_text = response.choices[0].message.content or "" if response and response.choices else ""
         if not response_text.strip():
             logger.warning(f"[self_reflection] {agent_name} LLM 返回空")
-            return None
+            return {"status": "failed", "sufficient": False, "confidence": 0.3,
+                    "gaps": ["质量审查未完成：空输出"], "issues": [], "need_retry": False, "reflection_score": 0.3}
 
         # 解析 JSON
         result = _parse_reflection_json(response_text)
         if not result:
             logger.warning(f"[self_reflection] {agent_name} JSON 解析失败: {response_text[:200]}")
-            return None
+            return {"status": "failed", "sufficient": False, "confidence": 0.3,
+                    "gaps": ["质量审查未完成：无效 JSON"], "issues": [], "need_retry": False, "reflection_score": 0.3}
 
+        result["status"] = "completed"
         # 计算综合得分
         reflection_score = _calc_reflection_score(result)
         result["reflection_score"] = reflection_score

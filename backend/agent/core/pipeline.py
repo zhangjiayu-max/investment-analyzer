@@ -39,6 +39,19 @@ from agent.core.context_builder import build_specialist_context, build_simple_ch
 logger = logging.getLogger(__name__)
 
 
+def _effective_complexity(initial: str, plan_result: dict | None = None,
+                          specialists: list | None = None) -> str:
+    """合并预处理、计划和实际专家规模，避免后续阶段沿用过低复杂度。"""
+    rank = {"chat": 0, "simple": 1, "medium": 2, "complex": 3}
+    values = [initial or "medium"]
+    plan = (plan_result or {}).get("plan") if isinstance(plan_result, dict) else None
+    if isinstance(plan, dict):
+        values.append(plan.get("complexity", ""))
+    if len(specialists or []) >= 2:
+        values.append("medium")
+    return max((v for v in values if v in rank), key=lambda v: rank[v], default="medium")
+
+
 def _route_model(agent_key: str) -> str:
     """成本感知路由：按 agent_key 选择分级模型，避免全部用最贵模型。
 
@@ -275,6 +288,8 @@ def run_pipeline(
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.PLANNING.value}
         phase2_result = _phase_planning(state, query_info, phase1_result, trace_id)
         state.set_phase_result(PipelinePhase.PLANNING.value, phase2_result)
+        complexity = _effective_complexity(complexity, phase2_result, phase2_result.get("specialists", []))
+        state.set_phase_result("effective_complexity", {"value": complexity, "source": "preprocess+plan+expert_count"})
         yield {"type": EVENT_PLAN_GENERATED, "plan": phase2_result}
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.PLANNING.value}
 
@@ -564,7 +579,10 @@ def run_pipeline(
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
                "arbitration": phase4_result.get("arbitration"),
-               "cross_review_results": phase4_result.get("cross_review_results", [])}
+               "cross_review_results": phase4_result.get("cross_review_results", []),
+               "completion_status": phase4_result.get("completion_status", "completed"),
+               "reflection": phase4_result.get("reflection"),
+               "cross_review_status": state.get_phase_result("cross_review_status")}
 
         # ── Phase 5: 记忆持久化 ──────────────────
         state.transition_to(PipelinePhase.MEMORY)
@@ -784,7 +802,10 @@ def run_pipeline_from_checkpoint(
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
                "arbitration": phase4_result.get("arbitration"),
-               "cross_review_results": phase4_result.get("cross_review_results", [])}
+               "cross_review_results": phase4_result.get("cross_review_results", []),
+               "completion_status": phase4_result.get("completion_status", "completed"),
+               "reflection": phase4_result.get("reflection"),
+               "cross_review_status": state.get_phase_result("cross_review_status")}
 
         # Phase 5: 记忆持久化
         state.transition_to(PipelinePhase.MEMORY)
@@ -1482,7 +1503,8 @@ def _phase_execution(
                     agent_name=agent_name,
                     query=step_query,
                     result=result.get("analysis", "")[:16000],
-                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    tool_calls=result.get("tool_calls", []),
+                    evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,
                     status="success",
@@ -1747,7 +1769,8 @@ def _execute_steps_parallel(
                     agent_name=agent_name,
                     query=step_query,
                     result=result.get("analysis", "")[:16000],
-                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    tool_calls=result.get("tool_calls", []),
+                    evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms,
                     trace_id=trace_id,
                     status="success",
@@ -1894,7 +1917,8 @@ def _fallback_execution(
                     agent_name=agent_name,
                     query=query,
                     result=result.get("analysis", "")[:16000],
-                    tool_calls=str(result.get("tool_calls", []))[:2000],
+                    tool_calls=result.get("tool_calls", []),
+                    evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,
                     status="success",
@@ -1993,12 +2017,13 @@ def _phase_synthesis(
             "specialist_count": len(specialists),
             "confidence": confidence,
             "data_gaps": data_gaps,
+            "completion_status": "completed" if answer.strip() else "failed",
         }
 
     # 多专家：调用 LLM 综合
     arbitration_summary = None
     try:
-        answer, arbitration_summary = _synthesize_multiple_specialists(
+        answer, arbitration_summary, completion_status = _synthesize_multiple_specialists(
             query, specialists, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
@@ -2008,6 +2033,7 @@ def _phase_synthesis(
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
         answer = _fallback_synthesize(query, specialists)
+        completion_status = "degraded"
 
     # 冲突检测
     conflicts = blackboard.find_conflicts() if blackboard else []
@@ -2038,6 +2064,7 @@ def _phase_synthesis(
         "portfolio_impacts": impacts,
         "confidence": confidence,
         "data_gaps": data_gaps,
+        "completion_status": completion_status,
     }
 
 
@@ -2158,9 +2185,10 @@ def _compute_confidence(
     # 冲突降低置信度
     if conflict_count > 0:
         base -= 0.05 * conflict_count
-    # 多专家微增
-    if specialist_count >= 3:
-        base += 0.05
+    # 专家数量本身不是证据，不能凭“专家更多”提高置信度；只有 reflection
+    # 明确完成且有依据时才允许其调整，缺少审查应保守处理。
+    if not reflection_result or reflection_result.get("status") == "failed":
+        base -= 0.15
     # P2: 数据缺失降低置信度（每个 -0.05，最多 -0.2）
     if data_gaps:
         penalty = min(0.2, 0.05 * len(data_gaps))
@@ -2329,7 +2357,7 @@ def _synthesize_multiple_specialists(
     """调用 LLM 综合多个专家的分析。
 
     Returns:
-        (answer, arbitration_summary)
+        (answer, arbitration_summary, completion_status)
         - answer: 综合回答文本
         - arbitration_summary: 仲裁 Agent 的结构化裁决摘要（dict 或 None）
     """
@@ -2538,12 +2566,8 @@ def _synthesize_multiple_specialists(
             "- 具体到金额/比例/触发条件\n"
             "- 操作表格：基金 | 操作 | 金额 | 理由 | 前提条件\n"
             "- 如有风险否决，必须遵守否决约束降级处理\n"
-            "- 【止盈不止损硬约束】涉及亏损标的（盈亏率<0）的减仓/清仓建议，"
-            "必须同时满足以下条件之一：\n"
-            "  (1) 标的当前估值分位 > 60%（高估）—— 需引用工具结果中的估值数据\n"
-            "  (2) 基本面恶化（业绩下滑/规模缩水/经理变更/费率上调）—— 需明确恶化证据\n"
-            "  否则只能建议「持有观察」或「暂停加仓」，禁止建议减仓/清仓\n"
-            "- 涉及卖出操作时，必须引用估值分位数据作为依据\n\n"
+            "- 减仓应基于风险预算、流动性需求、集中度或基本面证据，不以买入成本作为禁止减仓的理由\n"
+            "- 情景损失只能使用明确输入作确定性计算；缺少模型/数据时不得编造破产概率、模拟回撤或收益预测\n\n"
             "### 第 5 段：风险提示与盲点\n"
             "- 每个操作建议的风险说明\n"
             "- 标注置信度（高/中/低）及原因\n"
@@ -2569,7 +2593,9 @@ def _synthesize_multiple_specialists(
 
     prompt = "\n".join(parts)
 
-    response = _call_llm(
+    from services.llm.text_completion import complete_text_analysis_sync
+    answer, _tokens, completion_status = complete_text_analysis_sync(
+        _call_llm,
         caller="pipeline_synthesizer",
         trace_id=trace_id,
         model=MODEL,
@@ -2577,7 +2603,8 @@ def _synthesize_multiple_specialists(
         temperature=0.3,
         max_tokens=3000,
     )
-    answer = response.choices[0].message.content or ""
+    if completion_status == "failed":
+        raise RuntimeError("综合回答为空")
 
     # P2-问题6修复：风险否决代码层硬兜底
     # prompt 级降级依赖 LLM 遵守，此处做事后校验：
@@ -2619,7 +2646,7 @@ def _synthesize_multiple_specialists(
             f"[trace:{trace_id}] [pipeline] 卖出时机守卫失败: {_timing_err}"
         )
 
-    return answer, arbitration_summary
+    return answer, arbitration_summary, completion_status
 
 
 def _enforce_risk_veto(answer: str, vetoes: list, trace_id: str) -> str:
@@ -2884,7 +2911,7 @@ def _phase_reflection(
         return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
 
     # 黑板摘要（结论 + 冲突）
-    bb_summary = blackboard.to_context_text(max_chars=1500) if blackboard else ""
+    bb_summary = blackboard.to_context_text(max_chars=5000) if blackboard else ""
     conflicts = blackboard.find_conflicts() if blackboard else []
 
     parts = [
@@ -2902,7 +2929,8 @@ def _phase_reflection(
     parts.append("\n## 各专家分析预览")
     for s in specialists[:5]:
         agent_name = s.get("agent", "")
-        analysis = s.get("analysis", "")[:500]
+        full_analysis = s.get("analysis", "")
+        analysis = full_analysis if len(full_analysis) <= 10000 else full_analysis[:7000] + "\n[中段省略，仅凭预览不可断言全文缺失]\n" + full_analysis[-3000:]
         parts.append(f"\n### {agent_name}\n{analysis}")
 
     # Layer 1: prompt 明确要求字段名 + 严格 JSON 格式
@@ -2924,45 +2952,40 @@ def _phase_reflection(
 
     prompt = "\n".join(parts)
 
-    try:
-        # Layer 2: response_format=json_object 保证返回合法 JSON
-        response = _call_llm(
-            caller="reflection",
-            trace_id=trace_id,
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=800,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content.strip()
-    except Exception as e:
-        # response_format 不支持时降级
-        logger.warning(f"[pipeline] Reflection LLM 调用失败（尝试降级）: {e}")
+    # 有界重试结构化审查；解析失败绝不能等价于“没有问题”。
+    last_error = "invalid_json"
+    for attempt in range(2):
         try:
             response = _call_llm(
-                caller="reflection",
-                trace_id=trace_id,
-                model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=800,
+                caller="reflection", trace_id=trace_id, model=MODEL,
+                messages=[{"role": "user", "content": prompt + (
+                    "\n上次输出无效，请压缩为简短、完整的 JSON 对象。" if attempt else "")}],
+                temperature=0.2, max_tokens=2400,
+                **({"response_format": {"type": "json_object"}} if not attempt else {}),
             )
-            raw = response.choices[0].message.content.strip()
-        except Exception as e2:
-            logger.warning(f"[pipeline] Reflection LLM 降级也失败: {e2}")
-            return {"quality_issues": [], "missing_perspectives": [], "conflict_resolutions": [], "confidence_adjustment": 0.0}
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                last_error = "truncated"
+                continue
+            result = _parse_reflection_json(choice.message.content or "")
+            if result.get("status") == "completed":
+                return result
+            last_error = "invalid_json"
+        except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
+            raise
+        except Exception as exc:
+            last_error = str(exc)[:200]
+            logger.warning("[pipeline] Reflection 尝试 %s 失败: %s", attempt + 1, last_error)
+    return _failed_reflection(last_error)
 
-    # Layer 3: 鲁棒解析
-    result = _parse_reflection_json(raw)
 
-    logger.info(
-        f"[pipeline] Reflection 完成: "
-        f"{len(result['quality_issues'])} 质量问题, "
-        f"{len(result['missing_perspectives'])} 缺失视角, "
-        f"置信度调整={result['confidence_adjustment']}"
-    )
-    return result
+def _failed_reflection(reason: str) -> dict:
+    return {
+        "status": "failed", "error": reason,
+        "quality_issues": ["质量审查未完成，不能据此判定报告通过；操作建议需复核"],
+        "missing_perspectives": [], "conflict_resolutions": [],
+        "confidence_adjustment": -0.3,
+    }
 
 
 def _parse_reflection_json(raw: str) -> dict:
@@ -2983,7 +3006,7 @@ def _parse_reflection_json(raw: str) -> dict:
         "confidence_adjustment": 0.0,
     }
     if not raw:
-        return result
+        return _failed_reflection("empty")
 
     # 清理 markdown 包裹
     cleaned = raw.strip()
@@ -3013,7 +3036,7 @@ def _parse_reflection_json(raw: str) -> dict:
 
     if not isinstance(parsed, dict):
         logger.warning(f"[pipeline] Reflection JSON 解析完全失败，原始返回: {raw[:300]}")
-        return result
+        return _failed_reflection("invalid_json")
 
     # Layer 3 核心：递归查找字段（支持中英文别名 + 嵌套结构）
     # 字段别名映射
@@ -3038,6 +3061,14 @@ def _parse_reflection_json(raw: str) -> dict:
                 if found is not None:
                     return found
         return None
+
+    required = ["quality_issues", "missing_perspectives", "conflict_resolutions", "confidence_adjustment"]
+    values = {key: _find_field(parsed, FIELD_ALIASES[key]) for key in required}
+    if (any(values[key] is None for key in required)
+            or any(not isinstance(values[key], list) for key in required[:3])
+            or not isinstance(values["confidence_adjustment"], (int, float))):
+        return _failed_reflection("invalid_schema")
+    result["status"] = "completed"
 
     # quality_issues（数组）
     qi = _find_field(parsed, FIELD_ALIASES["quality_issues"])
@@ -3439,6 +3470,10 @@ def _phase_memory(
         "summary_updated": False,
         "recommendations": {"enabled": False, "recommendation_ids": [], "recommendations": []},
     }
+
+    if synthesis_result.get("completion_status", "completed") != "completed":
+        result["skipped_reason"] = "incomplete_synthesis"
+        return result
 
     # 1. 保存分析结论
     try:

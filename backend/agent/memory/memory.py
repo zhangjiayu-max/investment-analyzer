@@ -186,7 +186,7 @@ def build_user_memory_context(user_id: str = "default") -> str:
     # 2. 持仓概况（2026-07-29 增强：总市值/盈亏/重仓行业分布）
     try:
         from db import list_holdings
-        holdings = list_holdings()
+        holdings = [h for h in list_holdings(user_id=user_id) if (h.get("shares") or 0) > 0]
         if holdings:
             # 按市值排序，取 Top 5
             sorted_holdings = sorted(
@@ -245,14 +245,38 @@ def build_user_memory_context(user_id: str = "default") -> str:
     try:
         from db import _get_conn
         conn = _get_conn()
+        # 会话表当前没有 user_id；只使用带时间和来源标签的元数据，避免把跨会话主题说成“今天用户提到”。
         rows = conn.execute(
-            "SELECT title FROM conversations ORDER BY updated_at DESC LIMIT 5"
+            "SELECT id, title, created_at, updated_at, context_data "
+            "FROM conversations ORDER BY updated_at DESC LIMIT 50"
         ).fetchall()
         conn.close()
         if rows:
-            titles = [r["title"] for r in rows if r["title"] != "新对话"]
+            titles = []
+            for r in rows:
+                try:
+                    context = json.loads(r["context_data"] or "{}")
+                except (ValueError, TypeError):
+                    context = {}
+                # 旧会话属于默认用户；其他用户不能读取未归属的历史。
+                owner = context.get("user_id", "default") if isinstance(context, dict) else "default"
+                if owner != user_id:
+                    continue
+                title = r["title"]
+                if not title or title == "新对话":
+                    continue
+                when = r["updated_at"] or r["created_at"] or "日期未知"
+                # 只保留日期，明确这是历史主题，不暗示当前意图。
+                when = str(when)[:10]
+                titles.append(f"{title}（来源会话{r['id']}，历史会话，更新时间{when}）")
+                if len(titles) >= 3:
+                    break
             if titles:
-                parts.append(f"<recent_topics>近期讨论: {'、'.join(titles[:3])}</recent_topics>")
+                parts.append(
+                    f"<recent_topics source=conversation_history user_id={user_id}>"
+                    f"历史会话主题（仅供背景，不代表本轮意图）: {'、'.join(titles[:3])}"
+                    "</recent_topics>"
+                )
     except Exception:
         pass
 
@@ -272,7 +296,9 @@ def build_user_memory_context(user_id: str = "default") -> str:
                 content = (m.get("content") or "").strip()
                 if not content:
                     continue
-                line = f"- {content[:120]}"
+                source = (m.get("source") or "user_memory").strip()
+                observed_at = m.get("created_at") or "日期未知"
+                line = f"- [{source}; 记录时间{str(observed_at)[:10]}] {content[:120]}"
                 t = estimate_tokens(line)
                 if used + t > mem_budget:
                     break

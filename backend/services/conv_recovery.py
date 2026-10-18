@@ -56,6 +56,67 @@ _EXPERTS_MISPLACED_NOTICE = (
 _RETRYING_NOTICE = "⏳ 检测到服务重启导致中断，正在自动重试..."
 
 
+def _finalize_recovery(msg_id: int, conv_id: int, content: str, metadata: dict | None = None) -> dict:
+    """幂等地完成恢复消息，并写入 answer/recovered/done 事件。
+
+    取消是单向终态；消息更新使用条件 UPDATE，避免后台恢复覆盖用户取消。
+    恢复使用独立 channel，原来 aborted 的 channel 保留完整故障轨迹。
+    """
+    from db._conn import _get_conn
+    import uuid
+
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT metadata FROM messages WHERE id=? AND conversation_id=?", (msg_id, conv_id)).fetchone()
+        if not row:
+            conn.rollback()
+            return {"ok": False, "reason": "message_not_found"}
+        try:
+            meta = json.loads(row["metadata"] or "{}")
+        except Exception:
+            meta = {}
+        if meta.get("execution_status") == "cancelled":
+            conn.rollback()
+            return {"ok": False, "reason": "cancelled"}
+        merged = dict(meta)
+        merged.update(metadata or {})
+        merged.update({"execution_status": "completed", "recovered": True, "recovery_type": "synthesis"})
+        cur = conn.execute(
+            "UPDATE messages SET content=?, metadata=? WHERE id=? "
+            "AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,'$.execution_status'),'') != 'cancelled'",
+            (content, json.dumps(merged, ensure_ascii=False), msg_id),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return {"ok": False, "reason": "cancelled"}
+        # 消息和新恢复通道在同一个事务内落库，取消不会穿过中间窗口。
+        channel_id = str(uuid.uuid4())
+        merged["channel_id"] = channel_id
+        merged.pop("error_message", None)
+        merged.pop("error", None)
+        merged.pop("abort_reason", None)
+        conn.execute("UPDATE messages SET metadata=? WHERE id=?", (json.dumps(merged, ensure_ascii=False), msg_id))
+        conn.execute("""INSERT INTO stream_channels
+            (channel_id,conversation_id,message_id,trace_id,status,last_seq,heartbeat_at,finished_at)
+            VALUES (?,?,?,?,'completed',3,datetime('now','localtime'),datetime('now','localtime'))""",
+            (channel_id, conv_id, msg_id, merged.get("trace_id", "recovery")))
+        events = [
+            ("answer", {"type": "answer", "content": content, "recovered": True,
+                        "completion_status": merged.get("completion_status", "completed"),
+                        "specialist_results": merged.get("specialist_results", [])}),
+            ("recovered", {"type": "recovered", "message_id": msg_id, "recovery_type": "synthesis"}),
+            ("done", {"type": "done", "message_id": msg_id, "recovered": True}),
+        ]
+        for seq, (kind, data) in enumerate(events, 1):
+            conn.execute("INSERT INTO stream_events(channel_id,seq,event_type,data_json) VALUES(?,?,?,?)",
+                         (channel_id, seq, kind, json.dumps(data, ensure_ascii=False)))
+        conn.commit()
+        return {"ok": True, "channel_id": channel_id}
+    finally:
+        conn.close()
+
+
 # ── "只跑综合阶段"恢复（2026-07-30）──────────────────────────
 # 复用已落库的 agent_runs 结果，调用 _phase_synthesis 生成完整综合报告
 # 避免重新分析专家，节省 75%+ 时间和 token
@@ -78,8 +139,8 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
         agent_name = r.get("agent_name") or "专家分析"
         result = r.get("result") or ""
 
-        # 跳过交叉审阅结果（内容以"审阅"或"综合审阅"开头）
-        if result.startswith("审阅") or result.startswith("综合审阅"):
+        # 阶段字段优先，兼容旧记录内容前缀。
+        if r.get("run_phase") in ("cross_review", "arbitration") or result.startswith("审阅") or result.startswith("综合审阅"):
             continue
 
         # 按 agent_key 去重，保留首次（首轮 primary 分析）
@@ -93,14 +154,9 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
         if agent_key and agent_key in specialists_db:
             icon = specialists_db[agent_key].get("icon", "🤖")
 
-        # 解析 tool_calls（可能是 JSON 字符串）
-        tool_calls = []
-        tc_raw = r.get("tool_calls")
-        if tc_raw:
-            try:
-                tool_calls = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
-            except (json.JSONDecodeError, TypeError):
-                tool_calls = []
+        # 解析工具记录与结构化证据；坏历史记录显式标记缺失。
+        from db.agents import deserialize_agent_run_payload
+        tool_calls, evidence = deserialize_agent_run_payload(r.get("tool_calls"))
 
         specialists.append({
             "agent_key": agent_key,
@@ -109,6 +165,11 @@ def _rebuild_specialists_from_runs(runs: list) -> list:
             "analysis": result,
             "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
             "duration_ms": r.get("duration_ms") or 0,
+            "evidence": evidence,
+            "verdict": evidence.get("verdict", r.get("verdict", "unknown")),
+            "confidence": evidence.get("confidence", r.get("confidence", 0.0)),
+            "asset_actions": evidence.get("asset_actions", []),
+            "evidence_status": evidence.get("status", "available"),
         })
 
     return specialists
@@ -150,11 +211,7 @@ def _rebuild_blackboard_from_specialists(specialists: list) -> "Blackboard":
             entry = extract_entry_from_result(
                 agent_key=s.get("agent_key", ""),
                 agent_name=s.get("agent", "") or s.get("agent_name", "") or "专家",
-                result={
-                    "analysis": s.get("analysis", ""),
-                    "tool_calls": s.get("tool_calls", []),
-                    "duration_ms": s.get("duration_ms", 0),
-                },
+                result=s,
                 duration_ms=s.get("duration_ms", 0),
             )
             if entry.conclusion or entry.action_signals or entry.key_data:
@@ -190,6 +247,15 @@ def resume_synthesis_only(msg_id: int, conv_id: int = None) -> dict:
 
     conn = _get_conn()
     try:
+        message = conn.execute("SELECT conversation_id,metadata FROM messages WHERE id=?", (msg_id,)).fetchone()
+        if not message:
+            return {"success": False, "reason": "message_not_found", "answer": ""}
+        try:
+            metadata = json.loads(message["metadata"] or "{}")
+        except Exception:
+            metadata = {}
+        if metadata.get("execution_status") == "cancelled":
+            return {"success": False, "reason": "cancelled", "answer": ""}
         # 1. 查 agent_runs
         if conv_id is None:
             row = conn.execute(
@@ -264,6 +330,9 @@ def resume_synthesis_only(msg_id: int, conv_id: int = None) -> dict:
         )
 
         answer = synthesis_result.get("answer", "")
+        if synthesis_result.get("completion_status", "completed") != "completed":
+            return {"success": False, "answer": answer, "specialist_count": len(specialists),
+                    "reason": synthesis_result.get("completion_status"), "synthesis_result": synthesis_result}
         if not answer:
             return {
                 "success": False,
@@ -317,8 +386,8 @@ def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict)
         恢复后的 answer 文本；失败返回空串（调用方可降级到 resume_synthesis_only）
     """
     from db.stream_channels import (
-        create_stream_channel, append_stream_event, complete_stream_channel,
-        fail_stream_channel, update_stream_heartbeat,
+        create_channel as create_stream_channel, append_event as append_stream_event, complete_channel as complete_stream_channel,
+        fail_channel as fail_stream_channel, update_heartbeat as update_stream_heartbeat,
     )
     from agent.core.orchestrator import orchestrate_stream
 
@@ -389,39 +458,17 @@ def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict)
                 specialist_results = event.get("specialist_results", [])
                 all_tool_calls = event.get("tool_calls", [])
 
-        # 3. 标记 channel 完成（与首次对话相同）
+        if not answer:
+            fail_stream_channel(channel_id, "恢复未返回完整回答")
+            return ""
+        finalized = _finalize_recovery(msg_id, conv_id, answer, {
+            "recovery_method": "orchestrate_stream", "specialist_count": len(specialist_results),
+            "specialist_results": specialist_results, "tool_calls": all_tool_calls,
+        })
+        if not finalized["ok"]:
+            return ""
         complete_stream_channel(channel_id)
 
-        # 4. 写回 message（与首次对话相同）
-        if answer:
-            from db._conn import _get_conn
-            import json as _json
-            conn = _get_conn()
-            try:
-                # 读取现有 metadata，合并恢复标记
-                row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
-                meta = {}
-                if row and row["metadata"]:
-                    try:
-                        meta = _json.loads(row["metadata"])
-                    except Exception:
-                        meta = {}
-                meta["execution_status"] = "completed"
-                meta["recovered"] = True
-                meta["recovery_method"] = "orchestrate_stream"
-                meta["specialist_count"] = len(specialist_results)
-                meta["channel_id"] = channel_id
-                conn.execute(
-                    "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
-                    (answer, _json.dumps(meta, ensure_ascii=False), msg_id),
-                )
-                conn.commit()
-                logger.info(
-                    f"[recover] msg {msg_id} 恢复成功（走 orchestrate_stream，"
-                    f"answer len={len(answer)}, specialists={len(specialist_results)})",
-                )
-            finally:
-                conn.close()
         return answer
 
     except Exception as e:
@@ -470,28 +517,31 @@ def _merge_runs_to_answer(runs) -> str | None:
     return _EXPERTS_DONE_NOTICE + "\n".join(parts)
 
 
-def _apply_recovery(conn, msg_id: int, content: str, has_expert_results: bool = False) -> None:
-    """统一恢复写回：同时更新 content 和 metadata.execution_status。
-
-    修复 conv#140：专家已成功时 execution_status 设为 'completed'（专家分析可用），
-    仅无专家结果时设为 'failed'。避免把"专家都跑完了"误标为"失败"。
-    """
-    import json as _json
-    row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
-    meta = {}
-    if row and row["metadata"]:
-        try:
-            meta = _json.loads(row["metadata"])
-        except Exception:
-            meta = {}
-    # 专家有结果时标 completed（前端不显示"失败"，用户能看到专家分析）
-    meta["execution_status"] = "completed" if has_expert_results else "failed"
-    meta["recovered"] = True  # 标记为恢复产生，便于排查
-    meta["recovery_type"] = "experts_done" if has_expert_results else "no_expert"
-    conn.execute(
-        "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
-        (content, _json.dumps(meta, ensure_ascii=False), msg_id),
-    )
+def _apply_recovery(conn, msg_id: int, content: str, has_expert_results: bool = False,
+                    synthesis_result: dict | None = None) -> bool:
+    """完整综合才算 completed，专家拼接始终保留降级标记。"""
+    row = conn.execute("SELECT conversation_id,metadata FROM messages WHERE id=?", (msg_id,)).fetchone()
+    if not row:
+        return False
+    try:
+        meta = json.loads(row["metadata"] or "{}")
+    except Exception:
+        meta = {}
+    if meta.get("execution_status") == "cancelled":
+        return False
+    if synthesis_result and synthesis_result.get("completion_status", "completed") == "completed":
+        conn.commit()
+        result = _finalize_recovery(msg_id, row["conversation_id"], content, {
+            "completion_status": "completed", "reflection": synthesis_result.get("reflection"),
+            "arbitration": synthesis_result.get("arbitration"),
+            "cross_review_results": synthesis_result.get("cross_review_results", []),
+        })
+        return result["ok"]
+    meta.update({"execution_status": "failed", "completion_status": "degraded" if has_expert_results else "failed",
+                 "recovered": True, "recovery_type": "experts_only" if has_expert_results else "no_expert",
+                 "error_message": "专家结果可用，完整综合报告尚未完成" if has_expert_results else "服务中断，未生成有效结果"})
+    conn.execute("UPDATE messages SET content=?,metadata=? WHERE id=?", (content, json.dumps(meta, ensure_ascii=False), msg_id))
+    return True
 
 
 def recover_message(message_id: int) -> str:
@@ -583,7 +633,7 @@ def recover_message(message_id: int) -> str:
             resume_result = resume_synthesis_only(msg_id, conv_id)
             if resume_result.get("success"):
                 full_answer = resume_result["answer"]
-                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True, synthesis_result=resume_result.get("synthesis_result"))
                 conn.commit()
                 logger.info(
                     f"[conv_recovery] msg {msg_id} (conv {conv_id}) 心跳超时恢复"
@@ -594,7 +644,7 @@ def recover_message(message_id: int) -> str:
             # 降级：简单拼接
             full_answer = _merge_runs_to_answer(effective_runs)
             if full_answer:
-                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                _apply_recovery(conn, msg_id, full_answer, has_expert_results=True, synthesis_result=resume_result.get("synthesis_result"))
                 conn.commit()
                 source = "message_id" if runs else "trace_id fallback"
                 logger.info(
@@ -699,7 +749,7 @@ def recover_interrupted_conversations() -> dict:
                 resume_result = resume_synthesis_only(msg_id, conv_id)
                 if resume_result.get("success"):
                     full_answer = resume_result["answer"]
-                    _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                    _apply_recovery(conn, msg_id, full_answer, has_expert_results=True, synthesis_result=resume_result.get("synthesis_result"))
                     stats["recovered"] += 1
                     logger.info(
                         f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复"
@@ -709,7 +759,7 @@ def recover_interrupted_conversations() -> dict:
                     # 降级：简单拼接
                     full_answer = _merge_runs_to_answer(runs)
                     if full_answer:
-                        _apply_recovery(conn, msg_id, full_answer, has_expert_results=True)
+                        _apply_recovery(conn, msg_id, full_answer, has_expert_results=True, synthesis_result=resume_result.get("synthesis_result"))
                         stats["recovered"] += 1
                         logger.info(
                             f"[conv_recovery] msg {msg_id} (conv {conv_id}) 已恢复"

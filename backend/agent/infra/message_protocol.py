@@ -306,6 +306,10 @@ _A2A_OUTPUT_INSTRUCTION = """
   "action_signals": [
     {"type": "BUY|SELL|HOLD|ADD|REDUCE|WATCH", "target": "标的名称", "confidence": 0.0-1.0, "urgency": "high|medium|low"}
   ],
+  "asset_actions": [
+    {"target": "标的名称或代码", "action": "BUY|SELL|HOLD", "reason": "针对该标的的理由", "status": "current|conditional"}
+  ],
+  "portfolio_stance": "buy|hold|sell|watch",
   "data_references": [
     {"source": "数据来源表名", "metric": "指标名", "value": "数值"}
   ],
@@ -330,6 +334,8 @@ _A2A_OUTPUT_INSTRUCTION = """
   - watch：建议观察等待（数据不足或信号不明确）
   - avoid：建议回避（高风险或估值过高）
 - verdict 必须与 action_signals 和详细分析的操作建议一致，不得矛盾
+- asset_actions 只填写当前明确建议；条件、历史或否定动作请标记 status=conditional 或省略。
+- portfolio_stance 表示组合层面立场，可以与单个标的的 asset_actions 同时存在。
 - 如果某个字段不适用，用空数组 [] 或 0.0
 - 置信度 confidence 不要盲目给高分，有不确定因素时如实降低
 """
@@ -362,6 +368,7 @@ def normalize_specialist_result(raw: dict) -> dict:
     if confidence is None:
         confidence = inner.get("confidence", 0.0)
     action_signals = raw.get("action_signals") or inner.get("action_signals") or []
+    asset_actions = raw.get("asset_actions") or inner.get("asset_actions") or []
 
     # 归一化 verdict
     verdict = _normalize_verdict(verdict, action_signals) if verdict != "unknown" else "unknown"
@@ -372,6 +379,8 @@ def normalize_specialist_result(raw: dict) -> dict:
         "verdict": verdict,
         "confidence": float(confidence or 0.0),
         "action_signals": action_signals,
+        "asset_actions": asset_actions,
+        "portfolio_stance": raw.get("portfolio_stance") or inner.get("portfolio_stance") or verdict,
         "agent_key": raw.get("agent_key", "unknown"),
         "agent": raw.get("agent", raw.get("agent_key", "unknown")),
         "icon": raw.get("icon", ""),

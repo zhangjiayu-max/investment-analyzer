@@ -280,3 +280,7 @@ def test_get_max_retry_configurable():
     assert get_max_retry() == 3
     # 恢复
     update_config("agent.self_reflection_max_retry", "1")
+
+def test_pipeline_reflection_parse_marks_invalid_as_failed(monkeypatch):
+    from agent.core import pipeline
+    assert pipeline._parse_reflection_json('{"quality_issues": ["x"') ["status"] == "failed"

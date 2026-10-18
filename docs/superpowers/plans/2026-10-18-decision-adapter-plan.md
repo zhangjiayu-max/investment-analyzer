@@ -106,7 +106,7 @@ unified_decision(investment_id: int | None = None, archive_id: int | None = None
 
 - [ ] **Step 3: 实现状态和复盘同步**
 
-`accepted → confirmed`、`executed → executed`、`expired → expired`、`reviewed → closed`。`rejected/deferred` 不改量化状态，只追加用户备注或同步事件。复盘内容写入量化账本 `notes` 或 `review_result` 的扩展字段，保留量化回测数据。
+`accepted → confirmed`、`executed → executed`、`expired → expired`、用户复盘不关闭尚未回测的账本。`rejected/deferred` 不改量化状态，只追加用户备注或同步事件。复盘内容写入量化账本 `notes` 或 `review_result` 的扩展字段，保留量化回测数据。
 
 - [ ] **Step 4: 运行适配层测试**
 
@@ -214,3 +214,9 @@ git add backend/db/decisions.py backend/db/investment_decisions.py backend/db/__
   docs/superpowers/plans/2026-10-18-decision-adapter-plan.md
 git commit -m "feat: unify decision archive and quant ledger"
 ```
+
+## 2026-10-18 实施记录
+
+兼容字段、幂等关联、量化流水线接入、共用状态入口、独立用户复盘、量化回测时间线和前端档案入口已实现。修正原计划的 reviewed→closed 映射，避免用户先复盘后量化账本失去回测资格。并发冲突清理包含行动项；状态更新使用 BEGIN IMMEDIATE 事务。
+
+验证：后端目标回归 60 项、前端相关测试 15 项通过，生产构建成功。全部工作区改动提交前另行验证对话可靠性相关测试。

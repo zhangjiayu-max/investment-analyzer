@@ -126,6 +126,9 @@ const pageProps = computed(() => {
   if (props.activePage === 'health-v2') {
     return { onNavigate: (page) => emit('navigate', page) }
   }
+  if (props.activePage === 'decision-center') {
+    return { onNavigate: (page) => emit('navigate', page) }
+  }
   return {}
 })
 

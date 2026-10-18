@@ -102,7 +102,7 @@ from db.articles import (
 # 持仓管理全领域
 from db.portfolio import (
     create_holding, get_holding, get_holding_by_fund, list_holdings, update_holding, delete_holding,
-    get_portfolio_summary, get_portfolio_cash_snapshot, get_cash_balance, get_total_cash_balance, add_cash, set_cash_balance,
+    get_portfolio_summary, get_portfolio_snapshot, get_portfolio_cash_snapshot, get_cash_balance, get_total_cash_balance, add_cash, set_cash_balance,
     accrue_cash_interest, save_rebalance_config, get_active_rebalance_config,
     list_rebalance_configs, get_rebalance_config_by_id, rollback_rebalance_config,
     create_transaction, list_transactions, _recalculate_holding, confirm_transaction,
@@ -276,6 +276,7 @@ from db.decisions import (
     create_candidate_from_structured_recommendation,
     get_decision_stats,
     update_decision_backtest, get_decisions_for_backtest, auto_backtest_decisions,
+    get_decision_by_investment_id, update_investment_decision_link, append_decision_user_note,
 )
 
 # P0-1 决策执行回写闭环：记录决策执行结果（执行价/执行时间/实际盈亏/归因）
@@ -328,6 +329,7 @@ from db.investment_decisions import (
     update_decision_status as update_investment_decision_status,
     update_exit_state, update_exit_plan,
     record_review, get_decisions_due_for_review, get_decision_accuracy_stats,
+    get_decision_by_archive_id, update_decision_record_link, append_decision_note,
 )
 # 4%定投法（雷牛牛方法论）：建仓配置 + 触发记录
 from db.dip_investment_plans import (

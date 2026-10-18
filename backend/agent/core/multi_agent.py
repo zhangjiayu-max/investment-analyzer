@@ -1302,10 +1302,11 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 agent_name=agent["name"],
                 query=query,
                 result=answer[:4000],
-                tool_calls=str(tool_calls_log)[:2000],
+                tool_calls=tool_calls_log,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
                 status="success",
+                run_phase="cross_review",
             )
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1554,6 +1555,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
                 status="success",
+                run_phase="cross_review",
             )
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")

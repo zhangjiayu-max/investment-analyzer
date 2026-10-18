@@ -2973,6 +2973,11 @@ export const decisionAPI = {
   getLedger: (params = {}) => api.get('/decision/ledger', { params }).then(r => r.data),
   /** 查询单条决策详情 */
   getDetail: (decisionId) => api.get(`/decision/ledger/${decisionId}`).then(r => r.data),
+  /** 为量化账本创建或获取对应的用户决策档案 */
+  createArchive: (decisionId) => api.post(`/decision/ledger/${decisionId}/archive`).then(r => r.data),
+  /** 获取决策档案与量化账本的统一只读视图 */
+  getUnified: ({ investmentId, archiveId } = {}) =>
+    api.get('/decision/unified', { params: { investment_id: investmentId, archive_id: archiveId } }).then(r => r.data),
   /** 决策准确率统计（命中率/超额收益） */
   getAccuracy: (userId = 'default', days = 90) =>
     api.get('/decision/accuracy', { params: { user_id: userId, days } }).then(r => r.data),

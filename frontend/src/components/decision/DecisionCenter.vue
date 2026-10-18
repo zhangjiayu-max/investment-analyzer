@@ -9,6 +9,10 @@ import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const { showToast } = useToast()
 
+const props = defineProps({
+  onNavigate: { type: Function, default: null },
+})
+
 // ── 数据状态 ──
 const loading = ref(false)
 const accuracy = ref(null)
@@ -61,6 +65,22 @@ async function loadLedger() {
   finally { loading.value = false }
 }
 async function refresh() { await Promise.all([loadAccuracy(), loadLedger()]) }
+
+async function createArchive(row) {
+  try {
+    await decisionAPI.createArchive(row.id)
+    showToast('已创建决策档案', 'success')
+    await loadLedger()
+  } catch (e) {
+    showToast('创建决策档案失败: ' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+function openArchive(row) {
+  try { localStorage.setItem('decisionArchiveId', String(row.decision_record_id)) } catch { /* ignore */ }
+  if (props.onNavigate) props.onNavigate('decisions')
+  else showToast('请打开决策档案查看关联记录', 'info')
+}
 
 // ── 查看详情 ──
 async function openDetail(row) {
@@ -204,7 +224,7 @@ onMounted(() => {
           <thead>
             <tr>
               <th>时间</th><th>基金</th><th>类型</th><th>来源</th><th>结论</th>
-              <th>置信度</th><th>建议金额</th><th>状态</th><th>回测</th>
+              <th>置信度</th><th>建议金额</th><th>状态</th><th>回测</th><th>档案</th>
             </tr>
           </thead>
           <tbody>
@@ -221,6 +241,10 @@ onMounted(() => {
                 <span v-if="row.is_hit === true" class="hit-yes">✓ 命中</span>
                 <span v-else-if="row.is_hit === false" class="hit-no">✗ 未中</span>
                 <span v-else class="td-muted">待回测</span>
+              </td>
+              <td @click.stop>
+                <button v-if="row.decision_record_id" class="archive-link" @click="openArchive(row)">已关联档案</button>
+                <button v-else class="archive-link" @click="createArchive(row)">创建档案</button>
               </td>
             </tr>
           </tbody>
@@ -349,6 +373,8 @@ onMounted(() => {
 .vd-reduce { background: var(--color-danger-bg); color: var(--color-danger); }
 .hit-yes { color: var(--color-success); font-weight: 600; }
 .hit-no { color: var(--color-danger); }
+.archive-link { border: 0; padding: 0.2rem 0.35rem; background: transparent; color: var(--color-primary-600); cursor: pointer; font-size: 0.78rem; white-space: nowrap; }
+.archive-link:hover { text-decoration: underline; }
 
 .detail-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); background: rgba(0,0,0,.4); backdrop-filter: blur(4px); display: flex; justify-content: flex-end; }
 .detail-panel { width: 100%; max-width: 560px; height: 100%; border-radius: 0; overflow-y: auto; padding: 1.5rem; }

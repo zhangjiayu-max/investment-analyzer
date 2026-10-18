@@ -8,6 +8,7 @@ import re
 from datetime import datetime, timedelta
 
 from db._conn import _get_conn
+from db._utils import _add_column_if_not_exists
 
 VALID_DECISION_STATUSES = {
     "proposed",
@@ -18,6 +19,7 @@ VALID_DECISION_STATUSES = {
     "expired",
     "reviewed",
 }
+_ARCHIVE_QUANT_STATUS = {"accepted": "confirmed", "executed": "executed", "expired": "expired"}
 VALID_ACTION_STATUSES = {"todo", "doing", "done", "skipped"}
 VALID_REVIEW_OUTCOMES = {"helpful", "neutral", "unhelpful"}
 VALID_CANDIDATE_STATUSES = {"new", "saved", "ignored", "deferred", "expired"}
@@ -60,6 +62,11 @@ def init_decision_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_user ON decision_records(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decision_records(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_created ON decision_records(created_at)")
+    _add_column_if_not_exists(conn, "decision_records", "investment_decision_id", "INTEGER")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_investment_link "
+        "ON decision_records(investment_decision_id) WHERE investment_decision_id IS NOT NULL"
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS decision_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1320,6 +1327,54 @@ def get_decision(decision_id: int) -> dict | None:
         conn.close()
 
 
+def get_decision_by_investment_id(investment_decision_id: int) -> dict | None:
+    """按量化账本 ID 查询关联的用户决策档案。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id FROM decision_records WHERE investment_decision_id = ?",
+            (investment_decision_id,),
+        ).fetchone()
+        return get_decision(row["id"]) if row else None
+    finally:
+        conn.close()
+
+
+def update_investment_decision_link(decision_id: int, investment_decision_id: int | None) -> bool:
+    """写入或清除决策档案到量化账本的关联。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE decision_records SET investment_decision_id = ?, "
+            "updated_at = datetime('now','localtime') WHERE id = ?",
+            (investment_decision_id, decision_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def append_decision_user_note(decision_id: int, note: str) -> bool:
+    """向用户决策档案追加一条可见备注。"""
+    note = (note or "").strip()
+    if not note:
+        return False
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE decision_records SET user_note = CASE "
+            "WHEN COALESCE(user_note, '') = '' THEN ? "
+            "ELSE user_note || CHAR(10) || ? END, "
+            "updated_at = datetime('now','localtime') WHERE id = ?",
+            (note, note, decision_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def list_due_decision_reviews(user_id: str = "default", limit: int = 20) -> list[dict]:
     """列出到期需要复盘的决策。"""
     conn = _get_conn()
@@ -2052,21 +2107,43 @@ def get_decision_stats(user_id: str = "default") -> dict:
 
 
 def update_decision_status(decision_id: int, status: str, user_note: str = "") -> bool:
-    """更新决策状态。"""
+    """原子更新用户状态及关联量化状态，覆盖 API、草稿和交易确认路径。"""
     if status not in VALID_DECISION_STATUSES:
         return False
     conn = _get_conn()
     try:
-        cur = conn.execute(
-            """
-            UPDATE decision_records
-            SET status = ?, user_note = ?, updated_at = datetime('now','localtime')
-            WHERE id = ?
-            """,
+        conn.execute("BEGIN IMMEDIATE")
+        archive = conn.execute(
+            "SELECT user_id, investment_decision_id FROM decision_records WHERE id = ?", (decision_id,)
+        ).fetchone()
+        if not archive:
+            return False
+        quant_id = archive["investment_decision_id"]
+        if quant_id:
+            quant = conn.execute(
+                "SELECT user_id, decision_record_id FROM investment_decisions WHERE id = ?", (quant_id,)
+            ).fetchone()
+            if not quant or quant["decision_record_id"] != decision_id or quant["user_id"] != archive["user_id"]:
+                raise ValueError("关联量化账本缺失或归属不一致，档案状态未更新")
+            quant_status = _ARCHIVE_QUANT_STATUS.get(status)
+            if quant_status:
+                conn.execute(
+                    "UPDATE investment_decisions SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+                    (quant_status, quant_id),
+                )
+            elif status in ("rejected", "deferred"):
+                note = f"用户{'拒绝' if status == 'rejected' else '暂缓'}决策：{user_note or '未填写原因'}"
+                conn.execute(
+                    "UPDATE investment_decisions SET notes = CASE WHEN COALESCE(notes, '') = '' THEN ? "
+                    "ELSE notes || CHAR(10) || ? END, updated_at = datetime('now','localtime') WHERE id = ?",
+                    (note, note, quant_id),
+                )
+        conn.execute(
+            "UPDATE decision_records SET status = ?, user_note = ?, updated_at = datetime('now','localtime') WHERE id = ?",
             (status, user_note or "", decision_id),
         )
         conn.commit()
-        return cur.rowcount > 0
+        return True
     finally:
         conn.close()
 

@@ -1,5 +1,8 @@
 """Agent 定义 + 提示词版本 + Agent 运行记录。"""
 
+import ast
+import json
+
 from db._conn import _get_conn
 
 
@@ -1202,18 +1205,59 @@ def get_prompt_version(version_id: int) -> dict | None:
 # ── Agent Runs ──────────────────────────────────────────
 
 
+def deserialize_agent_run_payload(raw) -> tuple[list, dict]:
+    """读取新证据封装和旧 JSON/Python repr，损坏历史记录显式标记缺失。"""
+    if isinstance(raw, (list, dict)):
+        parsed = raw
+    elif not raw:
+        return [], {"status": "missing"}
+    else:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            try:
+                parsed = ast.literal_eval(raw)
+            except (ValueError, SyntaxError, TypeError):
+                return [], {"status": "missing", "reason": "invalid_legacy_tool_calls"}
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)], {}
+    if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
+        return parsed["tool_calls"], parsed.get("evidence") or {}
+    return [], {"status": "missing", "reason": "unsupported_payload"}
+
+
+def serialize_agent_run_payload(tool_calls, evidence: dict | None = None) -> str:
+    """逐字段压缩工具记录，始终保留完整 JSON 结构与可恢复的专家证据。"""
+    tools, previous_evidence = deserialize_agent_run_payload(tool_calls)
+    compact = []
+    for item in tools:
+        tool = dict(item)
+        # 摘要字段可以压缩，参数/证据引用保持结构完整；不可对最终 JSON 切片。
+        for key in ("result", "result_preview", "output"):
+            value = tool.get(key)
+            if isinstance(value, str) and len(value) > 1500:
+                tool[key] = value[:1500]
+                tool["result_truncated"] = True
+        compact.append(tool)
+    merged = dict(previous_evidence)
+    merged.update(evidence or {})
+    payload = {"schema_version": 1, "tool_calls": compact, "evidence": merged} if merged else compact
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
 def create_agent_run(conversation_id: int, message_id: int, agent_key: str,
                      agent_name: str, query: str, result: str = "",
-                     tool_calls: str = "", duration_ms: int = 0,
-                     trace_id: str = "", status: str = "success") -> int:
+                     tool_calls: str | list | dict = "", duration_ms: int = 0,
+                     trace_id: str = "", status: str = "success",
+                     evidence: dict | None = None, run_phase: str = "primary") -> int:
     """记录一次专家 Agent 调用，返回 run_id。status: success / error / timeout。"""
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO agent_runs (conversation_id, message_id, agent_key, agent_name,
-                                query, result, tool_calls, duration_ms, trace_id, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                query, result, tool_calls, duration_ms, trace_id, status, run_phase)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (conversation_id, message_id, agent_key, agent_name,
-          query, result, tool_calls, duration_ms, trace_id, status))
+          query, result, serialize_agent_run_payload(tool_calls, evidence), duration_ms, trace_id, status, run_phase))
     run_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -1275,14 +1319,14 @@ def get_completed_agents_for_message(message_id: int, run_phase: str = None) -> 
     conn = _get_conn()
     if run_phase:
         rows = conn.execute("""
-            SELECT agent_key, agent_name, result, duration_ms, tool_calls
+            SELECT agent_key, agent_name, result, duration_ms, tool_calls, run_phase
             FROM agent_runs
             WHERE message_id = ? AND status IN ('completed', 'success') AND run_phase = ?
             ORDER BY id ASC
         """, (message_id, run_phase)).fetchall()
     else:
         rows = conn.execute("""
-            SELECT agent_key, agent_name, result, duration_ms, tool_calls
+            SELECT agent_key, agent_name, result, duration_ms, tool_calls, run_phase
             FROM agent_runs
             WHERE message_id = ? AND status IN ('completed', 'success')
             ORDER BY id ASC

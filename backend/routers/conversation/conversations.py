@@ -1010,20 +1010,13 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     if success_run and target_meta.get('execution_status') != 'cancelled':
         # 原消息已有成功专家 → 只跑综合阶段，原地恢复
         from services.conv_recovery import resume_synthesis_only
-        result = resume_synthesis_only(message_id, conv_id)
+        result = await asyncio.to_thread(resume_synthesis_only, message_id, conv_id)
         if result.get("success"):
-            from db.conversations import update_message_content_and_metadata
-            saved = update_message_content_and_metadata(
-                message_id,
-                result["answer"],
-                {
-                    "recovered": True,
-                    "execution_status": "completed",
-                    "recovery_method": "retry_resume_synthesis",
-                    "specialist_count": result["specialist_count"],
-                    "blackboard_entries": result.get("blackboard_entries", 0),
-                },
-            )
+            from services.conv_recovery import _finalize_recovery
+            saved = _finalize_recovery(message_id, conv_id, result["answer"], {
+                **result.get("synthesis_result", {}),
+                "recovery_method": "retry_resume_synthesis", "specialist_count": result["specialist_count"],
+            })["ok"]
             if not saved:
                 raise HTTPException(409, "任务已取消，综合结果未写回。")
             logger.info(
@@ -1093,7 +1086,7 @@ async def resume_synthesis_api(conv_id: int, message_id: int):
     finally:
         conn.close()
     from services.conv_recovery import resume_synthesis_only
-    result = resume_synthesis_only(message_id, conv_id)
+    result = await asyncio.to_thread(resume_synthesis_only, message_id, conv_id)
     if not result.get("success"):
         raise HTTPException(
             400,
@@ -1101,13 +1094,11 @@ async def resume_synthesis_api(conv_id: int, message_id: int):
             f"(specialists={result.get('specialist_count', 0)})"
         )
 
-    # 写回 message
-    from db.conversations import update_message_content_and_metadata
-    saved = update_message_content_and_metadata(
-        message_id,
-        result["answer"],
-        {"recovered": True, "execution_status": "completed", "recovery_method": "resume_synthesis", "specialist_count": result["specialist_count"]}
-    )
+    from services.conv_recovery import _finalize_recovery
+    saved = _finalize_recovery(message_id, conv_id, result["answer"], {
+        **result.get("synthesis_result", {}),
+        "recovery_method": "resume_synthesis", "specialist_count": result["specialist_count"],
+    })["ok"]
     if not saved:
         raise HTTPException(409, "任务已取消，综合结果未写回。")
 
@@ -1909,7 +1900,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 except Exception as e:
                     logger.warning(f"增量保存进度失败: {e}")
 
-            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None):
+            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None, completion_status="completed", reflection=None, cross_review_status=None):
                 total_ms = int((time.time() - request_start) * 1000)
                 pt = {"orchestrator_ms": orch_ms, "total_ms": total_ms}
                 # 输出审核
@@ -1946,10 +1937,13 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             _norm_tool_calls.append(tc)
                     # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
                     _meta = {
-                        "execution_status": "completed", "complexity": complexity,
+                        "execution_status": "completed" if completion_status == "completed" else "failed", "complexity": complexity,
+                        "completion_status": completion_status, "reflection": reflection, "cross_review_status": cross_review_status,
                         "specialist_results": p1, "cross_review_results": p2,
                         "tool_calls": _norm_tool_calls, "phase_timings": pt, "trace_id": trace_id,
                     }
+                    if completion_status != "completed":
+                        _meta["error_message"] = "综合报告未完整完成，以下内容为降级结果，请重新生成。"
                     if arbitration:
                         # 截断仲裁摘要避免 metadata 过大
                         _meta["arbitration"] = {
@@ -2118,6 +2112,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                         int((time.time() - _prod_start) * 1000),
                                         arbitration=event.get("arbitration"),
                                         cross_review_results=event.get("cross_review_results"),
+                                        completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"),
                                     )
                                     event = dict(event)
                                     event["content"] = reviewed
@@ -2151,14 +2146,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
                             # 修复 conv 192：用 .get() 安全访问，避免自纠错重跑等场景字段缺失抛 KeyError
-                            _prod_spec_results.append({"agent_key": event.get("agent_key", ""), "agent": event.get("agent", ""), "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
+                            _prod_spec_results.append({"verdict": event.get("verdict", "unknown"), "confidence": event.get("confidence", 0.0), "asset_actions": event.get("asset_actions", []), "agent_key": event.get("agent_key", ""), "agent": event.get("agent", ""), "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
                             _save_progress("streaming")
                             # 注：orchestrator.py 已创建并更新 agent_run 记录，此处不再重复创建
                         elif et == "cross_review_done":
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")
                         elif et == "answer":
-                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"))
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"), completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"))
                             event = dict(event)
                             event["content"] = reviewed
                             # 标记 channel 完成
@@ -2746,6 +2741,11 @@ async def clarify_answer_stream(conv_id: int, request: Request):
 def _sse_event(event_type: str, data: dict) -> str:
     """格式化 SSE 事件。"""
     return f"data: {json.dumps({'type': event_type, 'data': data}, ensure_ascii=False)}\n\n"
+
+
+def _sse_comment(comment: str) -> str:
+    """格式化 SSE 注释，用于发送保活内容而不触发客户端事件。"""
+    return f": {comment}\n\n"
 
 
 async def _proactive_alert_check(query: str, answer: str, specialist_results: list):

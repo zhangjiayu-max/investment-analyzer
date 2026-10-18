@@ -1,5 +1,7 @@
 """理财决策中枢路由 — /api/decisions/*"""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -35,6 +37,7 @@ from db.decisions import match_pending_decisions
 from services.shared_signals import build_shared_signals
 
 router = APIRouter(tags=["decisions"])
+logger = logging.getLogger(__name__)
 
 
 class DecisionStatusRequest(BaseModel):
@@ -358,6 +361,15 @@ async def get_decision_api(decision_id: int):
     item = get_decision(decision_id)
     if not item:
         raise HTTPException(404, "决策不存在")
+    if item.get("investment_decision_id"):
+        try:
+            from services.advisor.decision_adapter import unified_decision
+
+            unified = unified_decision(archive_id=decision_id)
+            if unified:
+                item["investment_decision"] = unified.get("investment_decision")
+        except Exception:
+            logger.exception("决策档案量化账本加载失败 decision_id=%s", decision_id)
     return item
 
 
@@ -373,11 +385,17 @@ async def get_decision_precheck_api(decision_id: int):
 @router.put("/api/decisions/{decision_id}/status")
 async def update_decision_status_api(decision_id: int, req: DecisionStatusRequest):
     """更新决策状态。"""
-    ok = update_decision_status(decision_id, req.status, req.user_note)
-    if not ok:
-        raise HTTPException(400, "无效状态或决策不存在")
-    item = get_decision(decision_id)
-    return {"ok": True, "item": item}
+    try:
+        from services.advisor.decision_adapter import sync_archive_status
+        synced = sync_archive_status(decision_id, req.status, req.user_note)
+        item = synced.get("decision_record") or get_decision(decision_id)
+        sync_status = synced.get("sync_status", "failed")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception:
+        logger.exception("决策档案状态同步失败 decision_id=%s", decision_id)
+        raise HTTPException(500, "决策状态同步失败")
+    return {"ok": True, "item": item, "sync_status": sync_status}
 
 
 @router.post("/api/decisions/{decision_id}/review")
@@ -392,7 +410,16 @@ async def record_decision_review_api(decision_id: int, req: DecisionReviewReques
     )
     if not review_id:
         raise HTTPException(400, "复盘结果无效或决策不存在")
-    return {"ok": True, "id": review_id, "item": get_decision(decision_id)}
+    sync_status = "not_linked"
+    try:
+        from services.advisor.decision_adapter import sync_archive_review
+
+        synced = sync_archive_review(decision_id, req.model_dump())
+        sync_status = synced.get("sync_status", "failed")
+    except Exception:
+        logger.exception("决策档案复盘同步失败 decision_id=%s", decision_id)
+        sync_status = "failed"
+    return {"ok": True, "id": review_id, "item": get_decision(decision_id), "sync_status": sync_status}
 
 
 @router.post("/api/decisions/{decision_id}/actions/{action_id}/complete")
@@ -530,6 +557,23 @@ async def get_decision_timeline(decision_id: int):
                 "detail": decision.get("user_note", ""),
                 "icon": "✅" if status in ("accepted", "executed") else "🔄",
             })
+
+        # 量化回测与用户复盘独立展示，避免回测完成后误认为用户已复盘。
+        if decision.get("investment_decision_id"):
+            from services.advisor.decision_adapter import unified_decision
+
+            unified = unified_decision(archive_id=decision_id)
+            quant = (unified or {}).get("investment_decision") or {}
+            if quant.get("reviewed_at"):
+                hit = quant.get("is_hit")
+                result = "命中" if hit is True else "未命中" if hit is False else "已完成"
+                timeline.append({
+                    "time": quant.get("reviewed_at", ""),
+                    "event_type": "quant_backtest",
+                    "label": f"量化回测完成 — {result}",
+                    "detail": quant.get("review_result") or {},
+                    "icon": "📈",
+                })
 
         # 3. 行动项完成事件
         actions = decision.get("actions", [])

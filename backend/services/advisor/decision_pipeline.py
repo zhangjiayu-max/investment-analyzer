@@ -315,6 +315,8 @@ def run_investment_decision(fund_code: str, user_id: str = "default",
 
     # 写入决策账本
     decision_id = None
+    decision_record_id = None
+    sync_status = "not_attempted"
     try:
         from db.investment_decisions import create_decision
         decision_id = create_decision(
@@ -341,8 +343,18 @@ def run_investment_decision(fund_code: str, user_id: str = "default",
             exit_plan=exit_plan,
             review_days=review_days if verdict != "avoid" else None,
         )
+        try:
+            from services.advisor.decision_adapter import ensure_decision_record_for_investment
+
+            archive = ensure_decision_record_for_investment(decision_id)
+            decision_record_id = archive.get("id")
+            sync_status = "synced"
+        except Exception as sync_error:
+            sync_status = "failed"
+            logger.exception("量化决策已写入但档案同步失败 investment_id=%s: %s", decision_id, sync_error)
     except Exception as e:
         logger.warning(f"[pipeline] 决策账本写入失败 {fund_code}: {e}")
+        sync_status = "failed"
 
     card = build_decision_card(
         fund_code=fund_code, fund_name=fund_name, verdict=verdict, confidence=confidence,
@@ -351,6 +363,8 @@ def run_investment_decision(fund_code: str, user_id: str = "default",
         exit_plan=exit_plan, evidence=evidence, layers=layers,
         theme=holding.get("index_name"), decision_id=decision_id,
     )
+    card["decision_record_id"] = decision_record_id
+    card["sync_status"] = sync_status
     return card
 
 

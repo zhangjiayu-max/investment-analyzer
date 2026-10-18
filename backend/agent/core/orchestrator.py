@@ -1439,7 +1439,9 @@ def should_run_cross_review(
         )
         if has_action_advice:
             logger.info(f"交叉审阅: 检测到操作建议关键词，强制触发（魔鬼代言人制衡），专家数={spec_count}")
-            return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
+            # 操作建议即使被前置路由误判为 simple 也必须审阅；否则 simple
+            # 分类会把风险/配置动作直接绕过质量检查。
+            return True
 
     # B1: 复杂度强制触发 — complex/medium 即使无冲突也强制交叉审阅（发挥魔鬼代言人作用）
     try:

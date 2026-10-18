@@ -118,6 +118,22 @@ def complete_channel(channel_id: str):
     conn.close()
 
 
+def complete_recovered_channel(channel_id: str) -> bool:
+    """完成恢复通道；允许从 aborted 进入 completed，但绝不覆盖 cancelled。"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE stream_channels SET status='completed', finished_at=? "
+            "WHERE channel_id=? AND status IN ('running','aborted')",
+            (now, channel_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
 def fail_channel(channel_id: str, error_message: str = ""):
     """标记 channel 为失败。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -137,7 +137,7 @@ const pageProps = computed(() => {
     return { onNavigate: (page) => navigate(page) }
   }
   // 与 Home.vue 对齐：需跨页跳转的页面透传 onNavigate
-  if (['chat', 'alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
+  if (['chat', 'alert-center', 'decisions', 'decision-center', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
     return { onNavigate: (page) => navigate(page) }
   }
   return {}

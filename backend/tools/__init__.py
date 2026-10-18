@@ -5,6 +5,8 @@ import logging
 import re
 import html as html_mod
 import requests as req
+from datetime import date, timedelta
+from services.index.index_history_fetcher import get_index_price_history
 
 from db import (
     list_valuation_indexes,
@@ -349,6 +351,8 @@ TOOLS = [
                         "description": "返回条数",
                         "default": 20,
                     },
+                    "start_date": {"type": "string", "description": "可选起始日期 YYYY-MM-DD；不指定表示全部历史"},
+                    "end_date": {"type": "string", "description": "可选截止日期 YYYY-MM-DD；最多统计到今天"},
                 },
                 "required": [],
             },
@@ -2451,26 +2455,22 @@ def _get_author_opinions(args: dict) -> str:
 
 
 def _calculate_metrics(args: dict) -> str:
-    """计算投资指标（基于估值历史数据的简化计算）。"""
-    metric_type = args.get("metric_type", "")
-    index_name = args.get("index_name", "")
-    period = args.get("period", "3年")
+    """基于真实指数收盘价计算价格收益指标，禁止以 PE/PB 代替行情。"""
+    import math
+    import statistics
 
+    metric_type = args.get("metric_type", "")
+    index_name = args.get("index_name", "").strip()
+    period = args.get("period", "3年")
     if not index_name:
         return json.dumps({"error": "请指定指数名称"}, ensure_ascii=False)
+    if metric_type not in {"max_drawdown", "annualized_return", "dca_return", "risk_level"}:
+        return json.dumps({"error": "不支持的指标类型", "metric_status": "unknown"}, ensure_ascii=False)
 
-    # 匹配指数
-    all_indexes = list_valuation_indexes()
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    matched_code = None
-    matched_name = None
-    for code, name in unique_indexes.items():
-        if name in index_name or index_name in name:
+    matched_code = matched_name = None
+    for idx in list_valuation_indexes():
+        code, name = idx["index_code"], idx["index_name"]
+        if index_name == code or name in index_name or index_name in name:
             matched_code, matched_name = code, name
             break
         for prefix in ("中证", "国证", "沪", "深"):
@@ -2480,114 +2480,76 @@ def _calculate_metrics(args: dict) -> str:
                 break
         if matched_code:
             break
-
     if not matched_code:
         return json.dumps({"error": f"未找到'{index_name}'相关指数"}, ensure_ascii=False)
 
-    # 获取历史数据
-    days_map = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825}
-    days = days_map.get(period, 1095)
-    history = get_valuation_history(matched_code, days)
-
-    if not history or len(history) < 10:
-        return json.dumps({
-            "error": f"{matched_name}历史数据不足（{len(history) if history else 0}条），无法计算",
-        }, ensure_ascii=False)
-
-    values = [h["current_value"] for h in history if h.get("current_value") is not None]
-    if len(values) < 10:
-        return json.dumps({"error": "有效数据点不足"}, ensure_ascii=False)
-
-    result = {"index_name": matched_name, "period": period, "data_points": len(values)}
-
+    days = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825}.get(period, 1095)
+    result = {"index_code": matched_code, "index_name": matched_name, "period": period,
+              "data_source": "index_price_history", "series_type": "index_close_price",
+              "return_basis": "指数价格收益，不含分红、费用和跟踪误差", "unit": "%"}
+    try:
+        history = get_index_price_history(matched_code, days=days)
+    except Exception as exc:
+        logger.warning("指数价格序列不可用 %s: %s", matched_code, exc)
+        history = []
+    # 不依赖上游排序；拒绝未来、重复日期和无效数值。
+    pairs = {}
+    for row in history:
+        try:
+            d = date.fromisoformat(str(row.get("trade_date", ""))[:10])
+            v = float(row.get("close"))
+            if date.today()-timedelta(days=days) <= d <= date.today() and math.isfinite(v) and v > 0:
+                pairs[d] = v
+        except (ValueError, TypeError):
+            continue
+    ordered = sorted(pairs.items())
+    result["data_points"] = len(ordered)
+    if len(ordered) < 2:
+        result.update(metric_status="unknown", reason="真实收盘价数据不足；估值 PE/PB 不能用于计算收益或回撤")
+        return json.dumps(result, ensure_ascii=False)
+    dates, values = zip(*ordered)
+    result.update(date_range={"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
+                  as_of=dates[-1].isoformat(), stale_days=(date.today()-dates[-1]).days,
+                  metric_status="ok")
+    peak = values[0]
+    max_dd = 0.0
+    for value in values:
+        peak = max(peak, value)
+        max_dd = max(max_dd, (peak-value)/peak)
     if metric_type == "max_drawdown":
-        # 最大回撤
-        peak = values[0]
-        max_dd = 0
-        for v in values:
-            if v > peak:
-                peak = v
-            dd = (peak - v) / peak if peak > 0 else 0
-            if dd > max_dd:
-                max_dd = dd
         result["max_drawdown"] = round(max_dd * 100, 2)
-        result["unit"] = "%"
-        result["description"] = f"{matched_name}近{period}最大回撤为 {result['max_drawdown']}%"
-
+        result["description"] = f"{matched_name}实际数据窗口内价格最大回撤为 {result['max_drawdown']}%"
     elif metric_type == "annualized_return":
-        # 年化收益率（基于估值变化）
-        first_val = values[0]
-        last_val = values[-1]
-        years = len(values) / 250  # 约 250 个交易日/年
-        if first_val > 0 and years > 0:
-            total_return = (last_val / first_val) - 1
-            annualized = (1 + total_return) ** (1 / years) - 1
-            result["total_return"] = round(total_return * 100, 2)
-            result["annualized_return"] = round(annualized * 100, 2)
-            result["unit"] = "%"
-            result["description"] = (
-                f"{matched_name}近{period}总收益 {result['total_return']}%，"
-                f"年化 {result['annualized_return']}%"
-            )
+        elapsed_days = (dates[-1]-dates[0]).days
+        total_return = values[-1]/values[0]-1
+        result["total_return"] = round(total_return*100, 2)
+        if elapsed_days < 30:
+            result.update(metric_status="unknown", reason="实际日期跨度不足 30 天，不外推年化收益")
         else:
-            result["error"] = "数据异常，无法计算"
-
+            annualized = math.expm1(math.log(values[-1]/values[0])*365.25/elapsed_days)
+            result["annualized_return"] = round(annualized*100, 2)
     elif metric_type == "dca_return":
-        # 定投收益率模拟（等额定投）
-        n = len(values)
-        monthly_interval = max(1, n // (int(period[0]) * 12)) if period[0].isdigit() else n // 36
-        total_invested = 0
-        total_shares = 0
-        for i in range(0, n, monthly_interval):
-            total_invested += 1000  # 每期定投 1000
-            total_shares += 1000 / values[i] if values[i] > 0 else 0
-
-        if total_shares > 0:
-            current_value = total_shares * values[-1]
-            dca_return = (current_value - total_invested) / total_invested * 100
-            result["total_invested"] = total_invested
-            result["current_value"] = round(current_value, 2)
-            result["dca_return"] = round(dca_return, 2)
-            result["unit"] = "%"
-            result["description"] = (
-                f"{matched_name}近{period}定投模拟：投入¥{total_invested}，"
-                f"当前市值¥{result['current_value']}，收益率 {result['dca_return']}%"
-            )
-
-    elif metric_type == "risk_level":
-        # 风险等级评估
-        import statistics
-        mean_val = statistics.mean(values)
-        std_val = statistics.stdev(values) if len(values) > 1 else 0
-        cv = std_val / mean_val if mean_val > 0 else 0  # 变异系数
-
-        latest_val = values[-1]
-        pct_from_mean = (latest_val - mean_val) / mean_val * 100 if mean_val > 0 else 0
-
-        # 获取百分位
-        latest_pct = None
-        for mt in ["pe", "pb"]:
-            lv = get_latest_valuation(matched_code, mt)
-            if lv and lv.get("percentile") is not None:
-                latest_pct = lv["percentile"]
-                break
-
-        if cv < 0.15:
-            risk = "低风险"
-        elif cv < 0.30:
-            risk = "中等风险"
+        # 每个自然月首个可用交易日投入，不把稀疏观测点假设为交易日。
+        monthly = {}
+        for d, value in ordered:
+            monthly.setdefault((d.year, d.month), value)
+        invested = 1000*len(monthly)
+        current = sum(1000/value for value in monthly.values())*values[-1]
+        result.update(total_invested=invested, current_value=round(current, 2),
+                      dca_return=round((current/invested-1)*100, 2),
+                      simulation={"frequency":"monthly", "amount":1000, "fees_included":False})
+    else:
+        # 风险等级不能由估值水平推导，也不能将稀疏月度点当成日收益波动。
+        returns = [values[i]/values[i-1]-1 for i in range(1, len(values))]
+        gaps = [(dates[i]-dates[i-1]).days for i in range(1, len(dates))]
+        result["max_drawdown"] = round(max_dd*100, 2)
+        if len(returns) < 20 or max(gaps) > 7:
+            result.update(metric_status="unknown", risk_level="unknown", reason="连续交易日价格样本不足，不能评定波动风险")
         else:
-            risk = "高风险"
-
-        result["risk_level"] = risk
-        result["coefficient_of_variation"] = round(cv, 4)
-        result["current_vs_mean"] = round(pct_from_mean, 2)
-        result["percentile"] = latest_pct
-        result["description"] = (
-            f"{matched_name}风险等级：{risk}（变异系数{cv:.3f}），"
-            f"当前值偏离均值 {pct_from_mean:+.1f}%"
-        )
-
+            volatility = statistics.stdev(returns)*math.sqrt(252)*100
+            result["annualized_volatility"] = round(volatility, 2)
+            result["risk_level"] = "低波动" if volatility < 10 else "中波动" if volatility < 25 else "高波动"
+            result["description"] = "仅为历史价格波动分档，不代表未来风险等级或本金安全"
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -2951,7 +2913,7 @@ def _query_fund_info(args: dict) -> str:
     # 原逻辑只对"非数字 fund_code"做名称匹配，纯数字直接放行，导致 LLM 猜测的错误代码绕过防幻觉。
     if fund_code and fund_code.isdigit() and fund_name_hint:
         try:
-            holdings = list_holdings()
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
             in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
             if not in_holdings:
                 # 数字代码不在持仓表 → 可能是 LLM 猜的，用 fund_name_hint 重新匹配
@@ -3104,7 +3066,7 @@ def _query_transaction_history(args: dict) -> str:
     fund_code = args.get("fund_code", "").strip() or None
     fund_name_hint = args.get("fund_name", "").strip()
     tx_type = args.get("transaction_type", "") or None
-    limit = args.get("limit", 50)
+    limit = max(1, min(int(args.get("limit", 50)), 500))
 
     # L1.5 防幻觉校验（2026-07-30 conv#194 修复）：
     # 场景：行为金融学专家凭记忆猜 008928，但持仓实际是 008929（宏利消费红利指数C），
@@ -3112,7 +3074,7 @@ def _query_transaction_history(args: dict) -> str:
     _match_note = ""
     if fund_code and fund_name_hint:
         try:
-            holdings = list_holdings()
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
             in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
             if not in_holdings:
                 matched_code = _match_fund_code_by_name(fund_name_hint)
@@ -3131,10 +3093,14 @@ def _query_transaction_history(args: dict) -> str:
         except Exception:
             pass  # 持仓查询失败时不阻断
 
-    txs = list_transactions(fund_code=fund_code, limit=limit)
-
-    if tx_type:
-        txs = [t for t in txs if t["transaction_type"] == tx_type]
+    # 先限定用户、状态和日期，再 LIMIT；待确认交易不能作为已实施的行为证据。
+    from db.analysis_evidence import query_trade_evidence
+    evidence = query_trade_evidence(
+        user_id=args.get("user_id", "default"), fund_code=fund_code,
+        transaction_type=tx_type, limit=limit,
+        start_date=args.get("start_date"), end_date=args.get("end_date"),
+    )
+    txs = evidence.pop("transactions")
 
     for t in txs:
         tags = get_transaction_tags(t["id"])
@@ -3152,6 +3118,7 @@ def _query_transaction_history(args: dict) -> str:
         "buy_total": round(buy_total, 2),
         "sell_total": round(sell_total, 2),
         "transactions": txs,
+        **evidence,
     }
     if _match_note:
         result["_match_note"] = _match_note
@@ -3161,8 +3128,8 @@ def _query_transaction_history(args: dict) -> str:
     # 但持仓表有完整盈亏数据。注入此摘要让专家有数据支撑，避免"交易记录不完整"的误判。
     if fund_code:
         try:
-            holdings = list_holdings()
-            matched = [h for h in holdings if h.get("fund_code") == fund_code]
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
+            matched = [h for h in holdings if h.get("fund_code") == fund_code and (h.get("shares") or 0) > 0]
             if matched:
                 holding_summary = []
                 for h in matched:
@@ -3186,13 +3153,13 @@ def _query_transaction_history(args: dict) -> str:
                 # 真实交易数 vs 假设交易数说明
                 if len(txs) == 0:
                     result["_data_note"] = (
-                        f"该基金无真实交易记录（假设补仓已过滤）。"
+                        f"该基金在所选日期窗口内无已确认/已结算成交记录（待确认、假设交易未计入）。"
                         f"但持仓表显示当前持有 {len(matched)} 个账户头寸，"
                         f"盈亏数据见 holding_summary 字段，请基于此分析而非说'无数据'。"
                     )
                 elif len(txs) < 3:
                     result["_data_note"] = (
-                        f"真实交易记录仅 {len(txs)} 条（假设补仓已过滤）。"
+                        f"本次返回已确认/已结算成交记录 {len(txs)} 条（日期窗口总数见 confirmed_count）。"
                         f"持仓盈亏数据见 holding_summary 字段，请结合分析。"
                     )
         except Exception as e:

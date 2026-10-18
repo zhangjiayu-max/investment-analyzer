@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def build_portfolio_facts(conn=None) -> dict:
+def build_portfolio_facts(conn=None, snapshot: dict | None = None) -> dict:
     """
     所有分析入口调用此函数获取统一的组合事实快照。
 
@@ -17,9 +17,12 @@ def build_portfolio_facts(conn=None) -> dict:
         dict with keys: snapshot, constraints, market, recent_analyses,
                         market_state, recent_decisions
     """
+    if snapshot is None:
+        from db.portfolio import get_portfolio_snapshot
+        snapshot = get_portfolio_snapshot(conn=conn)
     facts = {
-        "snapshot": _build_snapshot(conn),
-        "constraints": _build_constraints(),
+        "snapshot": _build_snapshot(conn, snapshot=snapshot),
+        "constraints": _build_constraints(snapshot=snapshot),
         "market": _build_market_summary(),
         "recent_analyses": _build_recent_analyses(),
         "market_state": _build_market_state(),
@@ -43,7 +46,7 @@ def _get_conn_once(conn=None):
         return None, False
 
 
-def _build_snapshot(conn=None) -> dict:
+def _build_snapshot(conn=None, snapshot: dict | None = None) -> dict:
     """构建持仓快照：总市值、债基占比、过度集中基金列表。"""
     try:
         c, own = _get_conn_once(conn)
@@ -54,25 +57,29 @@ def _build_snapshot(conn=None) -> dict:
                 "overconcentrated": [],
             }
 
-        from db import list_holdings
-        holdings = list_holdings()
-        total_value = sum((h.get("current_value", 0) or 0) for h in holdings)
-        bond_value = sum(
-            (h.get("current_value", 0) or 0)
-            for h in holdings
-            if (h.get("fund_category") or "").lower() == "bond"
-        )
+        if snapshot is None:
+            from db.portfolio import get_portfolio_snapshot
+            snapshot = get_portfolio_snapshot(conn=c)
+        holdings = snapshot.get("funds", [])
+        total_value = snapshot.get("invested_value", snapshot.get("total_value", 0)) or 0
+        bond_value = snapshot.get("bond_value", 0) or 0
         bond_pct = round(bond_value / total_value * 100, 1) if total_value > 0 else 0
 
         overconcentrated = []
         for h in holdings:
             val = h.get("current_value", 0) or 0
             pct = round(val / total_value * 100, 1) if total_value > 0 else 0
-            if pct > 25:
+            threshold = snapshot.get("concentration_policy", {}).get("max_single_position_pct")
+            # 策略阈值以总资产分母；未设置 KYC 时不凭空设定用户上限。
+            policy_pct = (val / (snapshot.get("total_assets") or total_value) * 100) if (snapshot.get("total_assets") or total_value) else 0
+            if threshold is not None and policy_pct > threshold:
                 overconcentrated.append({
                     "fund_code": h.get("fund_code", ""),
                     "fund_name": h.get("fund_name", ""),
                     "pct": pct,
+                    "total_assets_pct": round(policy_pct, 2),
+                    "threshold_pct": threshold,
+                    "denominator": "total_assets" if snapshot.get("total_assets") else "invested_value",
                 })
 
         if own and c:
@@ -80,6 +87,11 @@ def _build_snapshot(conn=None) -> dict:
 
         return {
             "total_value": round(total_value, 2),
+            "invested_value": round(total_value, 2),
+            "total_assets": snapshot.get("total_assets"),
+            "cash_balance": snapshot.get("cash_balance"),
+            "fund_count": snapshot.get("fund_count", len(holdings)),
+            "record_count": snapshot.get("record_count"),
             "bond_pct": bond_pct,
             "overconcentrated": overconcentrated,
         }
@@ -92,7 +104,7 @@ def _build_snapshot(conn=None) -> dict:
         }
 
 
-def _build_constraints() -> dict:
+def _build_constraints(snapshot: dict | None = None) -> dict:
     """构建约束规则：债市温度、是否偏贵、禁加目标列表。"""
     try:
         from tools import _get_bond_temperature
@@ -103,22 +115,24 @@ def _build_constraints() -> dict:
 
         # 构建禁加目标
         no_add_targets = []
-        if bond_expensive:
-            no_add_targets.append("债券型基金（债市温度>70°，偏贵）")
+        # 温度只描述估值环境；不能据此禁止所有期限、信用风险不同的债券。
 
         # 检查集中度
         try:
             c, own = _get_conn_once(None)
             if c is not None:
-                from db import list_holdings
-                holdings = list_holdings()
-                total_value = sum((h.get("current_value", 0) or 0) for h in holdings)
+                if snapshot is None:
+                    from db.portfolio import get_portfolio_snapshot
+                    snapshot = get_portfolio_snapshot(conn=c)
+                holdings = snapshot.get("funds", [])
+                total_assets = snapshot.get("total_assets") or snapshot.get("total_value") or 0
+                threshold = snapshot.get("concentration_policy", {}).get("max_single_position_pct")
                 for h in holdings:
                     val = h.get("current_value", 0) or 0
-                    pct = round(val / total_value * 100, 1) if total_value > 0 else 0
-                    if pct > 25:
+                    pct = round(val / total_assets * 100, 1) if total_assets > 0 else 0
+                    if threshold is not None and pct > threshold:
                         no_add_targets.append(
-                            f"{h.get('fund_code','')} {h.get('fund_name','')}（占比{pct}%>25%）"
+                            f"{h.get('fund_code','')} {h.get('fund_name','')}（总资产占比{pct}%>{threshold}%）"
                         )
                 if own and c:
                     c.close()
@@ -128,6 +142,7 @@ def _build_constraints() -> dict:
         return {
             "bond_temperature": temperature,
             "bond_expensive": bond_expensive,
+            "bond_temperature_advisory": "债市温度偏高，需结合久期、信用和现金需求评估" if bond_expensive else "",
             "no_add_targets": no_add_targets,
         }
     except Exception as e:
