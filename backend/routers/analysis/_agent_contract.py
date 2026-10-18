@@ -48,7 +48,9 @@ def require_analysis_agent(name, getter):
         raise HTTPException(400, f'分析 Agent「{name}」不存在或已禁用，请先启用配置')
     if not (agent.get('system_prompt') or '').strip():
         raise HTTPException(400, f'分析 Agent「{name}」缺少 system_prompt，请先配置提示词')
-    return agent
+    from services.quality.eval_execution import get_prompt_override
+    override = get_prompt_override(name)
+    return {**agent, 'system_prompt': override} if override is not None else agent
 
 
 def require_specialist_analysis(result):

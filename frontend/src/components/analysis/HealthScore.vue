@@ -6,6 +6,9 @@ import {
 } from '../../api'
 import { useToast } from '../../composables/useToast'
 import EmptyState from '../ui/EmptyState.vue'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+import { trackFeatureClick, trackFeatureComplete } from '../../composables/useTracking'
 
 const { showToast } = useToast()
 
@@ -18,14 +21,17 @@ const DIMENSION_TIPS = {
   risk: '止损、再平衡等风控纪律执行情况',
 }
 
-const loading = ref(false)
+const fetching = ref(false)
+const confirmCalculate = ref(false)
+const { taskState, taskError, start, restoreFromServer } = useAsyncTask('health_score_calc')
+const loading = computed(() => fetching.value || ['submitting', 'running'].includes(taskState.value))
 const score = ref(null)
 const history = ref([])
 const stockBond = ref(null)
 const fearGreed = ref(null)
 
 const scoreColor = computed(() => {
-  if (!score.value) return '#999'
+  if (score.value?.total_score == null) return '#999'
   const s = score.value.total_score
   if (s >= 800) return '#10b981'
   if (s >= 600) return '#22c55e'
@@ -35,7 +41,7 @@ const scoreColor = computed(() => {
 })
 
 const scoreLevel = computed(() => {
-  if (!score.value) return ''
+  if (score.value?.total_score == null) return '数据不足'
   const s = score.value.total_score
   if (s >= 800) return '优秀'
   if (s >= 600) return '良好'
@@ -48,11 +54,11 @@ const dimensions = computed(() => {
   if (!score.value) return []
   const sc = score.value.scores || score.value
   return [
-    { key: 'quality', label: '选品质量', score: sc.quality || 0, max: 200 },
-    { key: 'diversification', label: '分散配置', score: sc.diversification || 0, max: 200 },
-    { key: 'valuation', label: '估值合理', score: sc.valuation || 0, max: 200 },
-    { key: 'behavior', label: '持有行为', score: sc.behavior || 0, max: 200 },
-    { key: 'risk', label: '风控纪律', score: sc.risk || 0, max: 200 },
+    { key: 'quality', label: '选品质量', score: sc.quality ?? null, max: 200 },
+    { key: 'diversification', label: '分散配置', score: sc.diversification ?? null, max: 200 },
+    { key: 'valuation', label: '估值合理', score: sc.valuation ?? null, max: 200 },
+    { key: 'behavior', label: '持有行为', score: sc.behavior ?? null, max: 200 },
+    { key: 'risk', label: '风控纪律', score: sc.risk ?? null, max: 200 },
   ]
 })
 
@@ -62,7 +68,7 @@ const adviceList = computed(() => {
 })
 
 async function loadData() {
-  loading.value = true
+  fetching.value = true
   try {
     const [scoreResp, histResp, sbResp, fgResp] = await Promise.allSettled([
       getTodayHealthScore(),
@@ -73,7 +79,7 @@ async function loadData() {
 
     if (scoreResp.status === 'fulfilled') {
       const d = scoreResp.value.data
-      score.value = d.result || d
+      score.value = d.status === 'empty' ? null : (d.result ?? null)
     }
     if (histResp.status === 'fulfilled') {
       history.value = histResp.value.data.scores || []
@@ -84,27 +90,43 @@ async function loadData() {
     if (fgResp.status === 'fulfilled') {
       fearGreed.value = fgResp.value.data.result || fgResp.value.data
     }
+    if (sbResp.status === 'rejected') stockBond.value = { error: '读取失败，请稍后重试' }
+    if (fgResp.status === 'rejected') fearGreed.value = { error: '读取失败，请稍后重试' }
+    if (scoreResp.status === 'rejected') showToast('健康分加载失败，请刷新重试', 'error')
   } catch (e) {
     showToast('加载失败: ' + e.message, 'error')
   } finally {
-    loading.value = false
+    fetching.value = false
   }
 }
 
-async function recalculate() {
-  loading.value = true
-  try {
-    const { data } = await calculateHealthScore()
-    score.value = data.result || data
-    showToast('健康分已更新', 'success')
-    // 重新加载历史
-    const histResp = await getHealthHistory(30)
-    history.value = histResp.data.scores || []
-  } catch (e) {
-    showToast('计算失败: ' + e.message, 'error')
-  } finally {
-    loading.value = false
+async function applyCalculation(result, notify = true) {
+  if (!result || !Object.hasOwn(result, 'total_score')) {
+    showToast('任务结果无效，请重新计算', 'error')
+    return
   }
+  score.value = result
+  if (notify) {
+    trackFeatureComplete('health_score_calculate', 'health')
+    showToast(result.data_quality?.status === 'insufficient' ? '计算完成，数据覆盖不足' : '健康分已更新', 'success')
+  }
+  try {
+    const { data } = await getHealthHistory(30)
+    history.value = data.scores || []
+  } catch { showToast('历史记录刷新失败', 'error') }
+}
+
+async function recalculate() {
+  if (loading.value) return
+  confirmCalculate.value = true
+}
+async function confirmRecalculate() {
+  confirmCalculate.value = false
+  trackFeatureClick('health_score_calculate', 'health')
+  await start(calculateHealthScore, {
+    onComplete: applyCalculation,
+    onError: error => showToast('计算失败: ' + error, 'error'),
+  })
 }
 
 const fearGreedColor = computed(() => {
@@ -117,7 +139,14 @@ const fearGreedColor = computed(() => {
   return '#10b981'
 })
 
-onMounted(loadData)
+onMounted(async () => {
+  await loadData()
+  await restoreFromServer({
+    onComplete: applyCalculation,
+    onRestore: () => loadData(),
+    onError: error => showToast('计算失败: ' + error, 'error'),
+  })
+})
 </script>
 
 <template>
@@ -132,10 +161,16 @@ onMounted(loadData)
       </button>
     </div>
 
+    <p v-if="taskError" role="status">{{ taskError }}</p>
+    <div v-if="score?.data_quality && score.data_quality.status !== 'complete'" class="card editorial-card" role="status">
+      <strong>{{ score.total_score == null ? '数据不足，暂不能生成完整评分' : '参考评分：数据覆盖不完整' }}</strong>
+      <p v-for="reason in score.data_quality.reasons" :key="reason">{{ reason }}</p>
+    </div>
+    <ConfirmDialog :visible="confirmCalculate" title="重新计算健康分" message="将重新获取相关数据并更新今日评分快照，确认开始吗？" @confirm="confirmRecalculate" @cancel="confirmCalculate = false" />
     <!-- 主分数 -->
     <div v-if="score" class="score-hero card editorial-card">
       <div class="score-circle" :style="{ borderColor: scoreColor }">
-        <span class="score-number font-jet-lg" :style="{ color: scoreColor }">{{ score.total_score }}</span>
+        <span class="score-number font-jet-lg" :style="{ color: scoreColor }">{{ score.total_score ?? '—' }}</span>
         <span class="score-max terminal-label">/1000</span>
       </div>
       <div class="score-info">
@@ -161,11 +196,11 @@ onMounted(loadData)
         <div v-for="d in dimensions" :key="d.key" class="dim-item reveal-stagger">
           <div class="dim-header">
             <span class="term-with-tip dim-label">{{ d.label }}<span class="term-tip">{{ DIMENSION_TIPS[d.key] || '' }}</span></span>
-            <span class="dim-score font-jet">{{ d.score }}/{{ d.max }}</span>
+            <span class="dim-score font-jet">{{ d.score ?? '—' }}/{{ d.max }}</span>
           </div>
           <div class="dim-bar">
             <div class="dim-fill" :style="{
-              width: (d.score / d.max * 100) + '%',
+              width: ((d.score ?? 0) / d.max * 100) + '%',
               background: d.score >= d.max * 0.7 ? '#10b981' : d.score >= d.max * 0.4 ? '#f59e0b' : '#ef4444'
             }"></div>
           </div>
@@ -196,6 +231,7 @@ onMounted(loadData)
           </span>
         </div>
       </div>
+      <p class="terminal-label">估值日期：{{ stockBond.pe_date || '未记录' }} · 债息日期：{{ stockBond.bond_date || '未记录' }}</p>
       <div class="sb-signal">
         <span class="signal-badge" :class="{
           'signal-buy': stockBond.spread > 3,
@@ -206,8 +242,10 @@ onMounted(loadData)
       </div>
     </div>
 
+    <p v-if="stockBond?.error" class="card editorial-card" role="status">股债性价比：{{ stockBond.error }}</p>
+    <p v-if="fearGreed?.error || fearGreed?.score === null" class="card editorial-card" role="status">恐贪指数：{{ fearGreed.advice || fearGreed.error }}</p>
     <!-- 恐贪指数 -->
-    <div v-if="fearGreed && !fearGreed.error" class="fear-greed card editorial-card">
+    <div v-if="fearGreed && !fearGreed.error && fearGreed.score != null" class="fear-greed card editorial-card">
       <div class="editorial-card-header"><h3 class="editorial-title"><span class="term-with-tip">恐贪指数<span class="term-tip">市场恐惧与贪婪指数，综合换手率、涨跌比、波动率等指标。0=极度恐惧（逢低买入机会），100=极度贪婪（警惕回调）</span></span></h3></div>
       <div class="fg-main">
         <div class="fg-gauge">
@@ -253,11 +291,11 @@ onMounted(loadData)
           <span class="hist-date terminal-label">{{ h.score_date }}</span>
           <div class="hist-bar">
             <div class="hist-fill" :style="{
-              width: (h.total_score / 1000 * 100) + '%',
+              width: ((h.total_score ?? 0) / 1000 * 100) + '%',
               background: h.total_score >= 600 ? '#10b981' : h.total_score >= 400 ? '#f59e0b' : '#ef4444'
             }"></div>
           </div>
-          <span class="hist-score font-jet">{{ h.total_score }}</span>
+          <span class="hist-score font-jet">{{ h.total_score ?? '数据不足' }}</span>
         </div>
       </div>
     </div>

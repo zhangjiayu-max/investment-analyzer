@@ -110,6 +110,41 @@ _EASTMONEY_UNEXPOSED = [
 ]
 
 
+# 工具副作用显式声明；调试默认仅运行读取工具。
+_WRITE_TOOLS = {'generate_portfolio_alert', 'run_investment_decision'}
+
+
+def _unexposed(source):
+    from tools import TOOLS
+    names = {_extract_tool_fields(t)['name'] for t in TOOLS}
+    items = _TTFUND_UNEXPOSED if source == 'ttfund' else _EASTMONEY_UNEXPOSED
+    return [item for item in items if f"{source}_{item['name']}" not in names]
+
+
+def _validate_debug_value(value, schema, path='arguments'):
+    import math
+    kind = schema.get('type')
+    valid = {
+        'object': lambda v: isinstance(v, dict), 'array': lambda v: isinstance(v, list),
+        'string': lambda v: isinstance(v, str), 'boolean': lambda v: isinstance(v, bool),
+        'integer': lambda v: isinstance(v, int) and not isinstance(v, bool),
+        'number': lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v),
+    }
+    if kind in valid and not valid[kind](value):
+        raise HTTPException(422, f'{path} 应为 {kind}')
+    if 'enum' in schema and value not in schema['enum']:
+        raise HTTPException(422, f'{path} 不在允许值中')
+    if isinstance(value, dict):
+        for key in schema.get('required', []):
+            if key not in value:
+                raise HTTPException(422, f'{path}.{key} 必填')
+        for key, val in value.items():
+            _validate_debug_value(val, schema.get('properties', {}).get(key, {}), f'{path}.{key}')
+    if isinstance(value, list):
+        for index, val in enumerate(value):
+            _validate_debug_value(val, schema.get('items', {}), f'{path}[{index}]')
+
+
 # ── API 端点 ──────────────────────────────────
 
 @router.get("/api/capabilities/overview")
@@ -123,8 +158,8 @@ def api_capabilities_overview():
         yingmi_exposed = sum(1 for t in TOOLS if _extract_tool_fields(t)["name"].startswith("yingmi_"))
         builtin_exposed = builtin_count - ttfund_exposed - eastmoney_exposed - yingmi_exposed
 
-        ttfund_total = ttfund_exposed + len(_TTFUND_UNEXPOSED)
-        eastmoney_total = eastmoney_exposed + len(_EASTMONEY_UNEXPOSED)
+        ttfund_total = ttfund_exposed + len(_unexposed('ttfund'))
+        eastmoney_total = eastmoney_exposed + len(_unexposed('eastmoney'))
         yingmi_total = yingmi_exposed
         total = builtin_exposed + ttfund_total + eastmoney_total + yingmi_total
         exposed = builtin_exposed + ttfund_exposed + eastmoney_exposed + yingmi_exposed
@@ -135,8 +170,8 @@ def api_capabilities_overview():
             "unexposed": total - exposed,
             "by_source": {
                 "builtin": {"total": builtin_exposed, "exposed": builtin_exposed, "unexposed": 0},
-                "ttfund": {"total": ttfund_total, "exposed": ttfund_exposed, "unexposed": len(_TTFUND_UNEXPOSED)},
-                "eastmoney": {"total": eastmoney_total, "exposed": eastmoney_exposed, "unexposed": len(_EASTMONEY_UNEXPOSED)},
+                "ttfund": {"total": ttfund_total, "exposed": ttfund_exposed, "unexposed": len(_unexposed('ttfund'))},
+                "eastmoney": {"total": eastmoney_total, "exposed": eastmoney_exposed, "unexposed": len(_unexposed('eastmoney'))},
                 "yingmi": {"total": yingmi_total, "exposed": yingmi_exposed, "unexposed": 0},
             },
         }
@@ -192,6 +227,7 @@ def api_capabilities_tools(source: str = "", category: str = "", exposed_only: b
                 "source": src,
                 "exposed": True,
                 "enabled": enabled_map.get(name, True),
+                "effect": "write" if name in _WRITE_TOOLS else "read",
                 "parameters": fields["parameters"],
                 "has_method": True,
                 "cost": "none",
@@ -199,7 +235,7 @@ def api_capabilities_tools(source: str = "", category: str = "", exposed_only: b
 
         # 2. 未暴露的 MCP 能力（ttfund + eastmoney）
         if not exposed_only:
-            for item in _TTFUND_UNEXPOSED:
+            for item in _unexposed('ttfund'):
                 name = item["name"]
                 src = "ttfund"
                 cat = "天天基金"
@@ -221,7 +257,7 @@ def api_capabilities_tools(source: str = "", category: str = "", exposed_only: b
                     "async_required": item.get("async_required", False),
                 })
 
-            for item in _EASTMONEY_UNEXPOSED:
+            for item in _unexposed('eastmoney'):
                 name = item["name"]
                 src = "eastmoney"
                 cat = "东方财富"
@@ -254,11 +290,11 @@ def api_capabilities_unexposed():
     """仅未暴露的 MCP 能力（用于扩展面板）。"""
     try:
         return {
-            "ttfund": _TTFUND_UNEXPOSED,
-            "eastmoney": _EASTMONEY_UNEXPOSED,
-            "total": len(_TTFUND_UNEXPOSED) + len(_EASTMONEY_UNEXPOSED),
-            "low_cost": sum(1 for x in _TTFUND_UNEXPOSED + _EASTMONEY_UNEXPOSED if x.get("cost") == "low"),
-            "high_cost": sum(1 for x in _TTFUND_UNEXPOSED + _EASTMONEY_UNEXPOSED if x.get("cost") == "high"),
+            "ttfund": _unexposed('ttfund'),
+            "eastmoney": _unexposed('eastmoney'),
+            "total": len(_unexposed('ttfund')) + len(_unexposed('eastmoney')),
+            "low_cost": sum(1 for x in _unexposed('ttfund') + _unexposed('eastmoney') if x.get("cost") == "low"),
+            "high_cost": sum(1 for x in _unexposed('ttfund') + _unexposed('eastmoney') if x.get("cost") == "high"),
         }
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -275,13 +311,13 @@ def api_integration_guide(name: str):
         # 查找能力定义
         item = None
         src = ""
-        for x in _TTFUND_UNEXPOSED:
+        for x in _unexposed('ttfund'):
             if x["name"] == name:
                 item = x
                 src = "ttfund"
                 break
         if not item:
-            for x in _EASTMONEY_UNEXPOSED:
+            for x in _unexposed('eastmoney'):
                 if x["name"] == name:
                     item = x
                     src = "eastmoney"
@@ -440,6 +476,7 @@ def api_capabilities_stats(days: int = 7, tool_name: str = ""):
             by_tool.append({
                 "tool_name": r["tool_name"],
                 "calls": calls,
+                "total_calls": calls,
                 "success": ok,
                 "failed": calls - ok,
                 "success_rate": round(ok / calls, 4) if calls > 0 else 0.0,
@@ -564,7 +601,7 @@ def api_capabilities_debug(body: dict):
         from tools import TOOLS, execute_tool
 
         tool_name = body.get("tool_name", "").strip()
-        arguments = body.get("arguments", {}) or {}
+        arguments = body.get("arguments", {})
         trace_id = body.get("trace_id", "").strip() or f"debug_{_uuid.uuid4().hex[:8]}"
 
         if not tool_name:
@@ -575,7 +612,19 @@ def api_capabilities_debug(body: dict):
         if tool_name not in exposed_names:
             raise HTTPException(403, f"工具 {tool_name} 未暴露，禁止调试")
 
-        # 执行（复用 execute_tool，自动写审计日志 + 超时保护）
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            registered = conn.execute('SELECT enabled FROM tool_registry WHERE name = ?', (tool_name,)).fetchone()
+        finally:
+            conn.close()
+        if registered is not None and not registered['enabled']:
+            raise HTTPException(403, '工具已禁用，禁止调试')
+        if tool_name in _WRITE_TOOLS and body.get('confirm_write') is not True:
+            raise HTTPException(409, '写入工具需要确认影响后再执行')
+        fields = next(_extract_tool_fields(t) for t in TOOLS if _extract_tool_fields(t)['name'] == tool_name)
+        _validate_debug_value(arguments, fields['parameters'])
+        # 同步工具结束后检测超时；不声称能取消已经开始的执行。
         t0 = _time.time()
         result_str = execute_tool(tool_name, arguments, trace_id=trace_id, timeout=30)
         duration_ms = int((_time.time() - t0) * 1000)

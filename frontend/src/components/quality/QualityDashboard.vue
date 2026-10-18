@@ -15,7 +15,7 @@
       <!-- Summary Cards -->
       <div class="summary-grid">
         <div class="card summary-card editorial-card reveal-stagger">
-          <div class="summary-label terminal-label">评测平均分</div>
+          <div class="summary-label terminal-label">有效评分均分</div>
           <div class="summary-value font-jet-lg" :class="scoreClass(summary.eval_avg_score)">
             {{ summary.eval_avg_score?.toFixed(1) || '-' }}
           </div>
@@ -34,7 +34,7 @@
           </div>
         </div>
         <div class="card summary-card editorial-card reveal-stagger">
-          <div class="summary-label terminal-label">总评测次数</div>
+          <div class="summary-label terminal-label">有效评分次数</div>
           <div class="summary-value font-jet-lg">
             {{ summary.scored_count || 0 }}
           </div>
@@ -61,7 +61,7 @@
       <div class="card chart-card editorial-card">
         <div class="card-header editorial-card-header">
           <h3 class="title">质量趋势</h3>
-          <select v-model="trendDays" @change="loadTrend" class="day-select meta">
+          <select v-model="trendDays" @change="loadQualityWindow" class="day-select meta">
             <option :value="7">近 7 天</option>
             <option :value="30">近 30 天</option>
             <option :value="90">近 90 天</option>
@@ -106,7 +106,7 @@
               <div class="agent-bar-fill" :style="{ width: (agent.avg_score * 10) + '%', background: scoreColor(agent.avg_score) }"></div>
             </div>
             <div class="agent-meta">
-              <span class="font-jet">{{ agent.case_count }} 用例</span>
+              <span class="font-jet">{{ agent.case_count }} 有效样本</span>
               <span class="font-jet">{{ agent.run_count }} 次运行</span>
               <span v-if="agent.good_count" class="text-success font-jet">{{ agent.good_count }} 优秀</span>
               <span v-if="agent.bad_count" class="text-danger font-jet">{{ agent.bad_count }} 较差</span>
@@ -339,8 +339,8 @@
               期望质量: {{ item.expected_quality }}
             </div>
             <div class="suggestion-actions">
-              <button class="btn-accept" @click="handleAcceptSuggestion(item.id)">接受</button>
-              <button class="btn-reject" @click="handleRejectSuggestion(item.id)">拒绝</button>
+              <button class="btn-accept" @click="confirmSuggestion(item, true)" :disabled="suggestionPending.has(item.id)">接受</button>
+              <button class="btn-reject" @click="confirmSuggestion(item, false)" :disabled="suggestionPending.has(item.id)">拒绝</button>
             </div>
           </div>
         </div>
@@ -386,7 +386,7 @@
           <span class="badge badge-danger font-jet">{{ lowQualityItems.length }}</span>
         </div>
         <div v-if="lowQualityItems.length" class="lq-list">
-          <div v-for="item in lowQualityItems" :key="item.id" class="lq-item reveal-stagger">
+          <div v-for="item in lowQualityItems" :key="item.source + item.id" class="lq-item reveal-stagger">
             <div class="lq-header">
               <span class="lq-caller">{{ item.caller }}</span>
               <span class="lq-score font-jet">{{ item.overall_score?.toFixed(1) }} 分</span>
@@ -407,13 +407,29 @@
       </div>
     </div>
   </div>
+  <ConfirmDialog :visible="confirm.visible" :title="confirm.title" :message="confirm.message" @confirm="confirm.onConfirm?.()" @cancel="confirm.visible=false" />
+  <AppToast />
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import AppToast from '../layout/AppToast.vue'
+import { useToast } from '../../composables/useToast'
 import { getQualitySummary, getQualityTrend, getLowQualityItems, getEvalStatsByAgent, getPerformanceStats, getPerformanceByAgent, getConversationEvalStats, listConversationEvaluations, getEvolutionStats, listEvalSuggestions, acceptEvalSuggestion, rejectEvalSuggestion, getExpertAlerts } from '../../api'
 
 const loading = ref(true)
+const { showToast } = useToast()
+const confirm = ref({visible:false,title:'',message:'',onConfirm:null})
+const suggestionPending = ref(new Set())
+function confirmSuggestion(item, accept) {
+  confirm.value = {visible:true,title:accept?'接受建议':'拒绝建议',message:`${accept?'将此建议转为评测用例':'拒绝此建议'}「${item.name}」？`,onConfirm:() => {
+    confirm.value.visible=false
+    if (accept) handleAcceptSuggestion(item.id)
+    else handleRejectSuggestion(item.id)
+  }}
+}
+function loadQualityWindow() { return Promise.all([loadSummary(),loadTrend(),loadLowQuality(),loadAgentStats()]) }
 const summary = ref({})
 const trend = ref([])
 const trendDays = ref(30)
@@ -447,7 +463,7 @@ onMounted(async () => {
 
 async function loadSummary() {
   try {
-    const { data } = await getQualitySummary(30)
+    const { data } = await getQualitySummary(trendDays.value)
     summary.value = data
   } catch (e) {
     console.error('Load quality summary failed:', e)
@@ -465,7 +481,7 @@ async function loadTrend() {
 
 async function loadLowQuality() {
   try {
-    const { data } = await getLowQualityItems(20)
+    const { data } = await getLowQualityItems(20,trendDays.value)
     lowQualityItems.value = data.items || []
   } catch (e) {
     console.error('Load low quality items failed:', e)
@@ -474,7 +490,7 @@ async function loadLowQuality() {
 
 async function loadAgentStats() {
   try {
-    const { data } = await getEvalStatsByAgent()
+    const { data } = await getEvalStatsByAgent(trendDays.value)
     agentStats.value = data.agents || []
   } catch (e) {
     console.error('Load agent stats failed:', e)
@@ -501,7 +517,7 @@ async function loadPerfByAgent() {
 
 async function loadConvEvalStats() {
   try {
-    const { data } = await getConversationEvalStats()
+    const { data } = await getConversationEvalStats(convEvalDays.value)
     convEvalStats.value = data.stats || null
   } catch (e) {
     console.error('Load conversation eval stats failed:', e)
@@ -545,27 +561,31 @@ async function loadExpertAlerts() {
 }
 
 async function handleAcceptSuggestion(suggestionId) {
+  if (suggestionPending.value.has(suggestionId)) return
+  suggestionPending.value.add(suggestionId)
   try {
     const { data } = await acceptEvalSuggestion(suggestionId)
-    if (data.ok) {
+    if (data?.ok !== false) {
       // 移除已接受的建议
       evalSuggestions.value = evalSuggestions.value.filter(s => s.id !== suggestionId)
     }
   } catch (e) {
-    console.error('Accept suggestion failed:', e)
-  }
+    showToast('接受失败: ' + (e.response?.data?.detail || e.message),'error')
+  } finally { suggestionPending.value.delete(suggestionId) }
 }
 
 async function handleRejectSuggestion(suggestionId) {
+  if (suggestionPending.value.has(suggestionId)) return
+  suggestionPending.value.add(suggestionId)
   try {
     const { data } = await rejectEvalSuggestion(suggestionId)
-    if (data.ok) {
+    if (data?.ok !== false) {
       // 移除已拒绝的建议
       evalSuggestions.value = evalSuggestions.value.filter(s => s.id !== suggestionId)
     }
   } catch (e) {
-    console.error('Reject suggestion failed:', e)
-  }
+    showToast('拒绝失败: ' + (e.response?.data?.detail || e.message),'error')
+  } finally { suggestionPending.value.delete(suggestionId) }
 }
 
 function refreshPerf() {

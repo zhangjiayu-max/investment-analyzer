@@ -122,7 +122,7 @@ def build_asset_overview(user_id: str = "default") -> dict:
     total_cost = _safe_float(summary.get("total_cost", 0))
     total_profit = _safe_float(summary.get("total_profit", 0))
     profit_rate = _safe_float(summary.get("profit_rate", 0))
-    cash_balance = get_total_cash_balance()
+    cash_balance = _safe_float(summary.get("cash_balance", 0))
     total_assets = total_value + cash_balance
 
     cash_ratio = cash_balance / total_assets if total_assets > 0 else 0
@@ -144,8 +144,9 @@ def build_asset_overview(user_id: str = "default") -> dict:
 
     return {
         "total_assets": round(total_assets, 2),
-        "total_liabilities": 0.0,
-        "net_worth": round(total_assets, 2),
+        "total_liabilities": None,
+        "net_worth": None,
+        "liabilities_status": "unknown",
         "cash_balance": round(cash_balance, 2),
         "cash_ratio": round(cash_ratio, 4),
         "investment_value": round(total_value, 2),
@@ -735,7 +736,7 @@ def build_four_pots_diagnosis(user_id: str = "default") -> dict:
 def _generate_actions_from_smart_add(user_id: str) -> list[dict]:
     """从智能补仓计划生成行动项。"""
     try:
-        from services.advisor.smart_add_planner import generate_smart_add_plan
+        from services.advisor.smart_add_planner import generate_smart_add_plan, _get_executable_add_amount
         plan = generate_smart_add_plan(user_id=user_id)
     except Exception as e:
         logger.warning(f"[health_v2] 生成智能补仓计划失败: {e}")
@@ -744,11 +745,11 @@ def _generate_actions_from_smart_add(user_id: str) -> list[dict]:
     actions = []
     for p in plan.get("plans", []) or []:
         pyr = p.get("pyramid") or {}
-        if not pyr.get("triggered"):
+        if not (pyr.get("triggered_tiers") or pyr.get("triggered")):
             continue
         fund_code = p.get("fund_code", "")
         fund_name = p.get("fund_name", fund_code)
-        amount = pyr.get("suggested_amount") or pyr.get("released_amount", 0)
+        amount = _get_executable_add_amount(p)
         if amount <= 0:
             continue
 
@@ -788,16 +789,21 @@ def _generate_actions_from_smart_add(user_id: str) -> list[dict]:
 
 
 def _generate_actions_from_cash(user_id: str, asset_overview: dict) -> list[dict]:
-    """根据现金占比生成行动项。"""
+    """仅对必要支出和应急金以外的现金生成行动项。"""
+    from db.expense import get_cashflow
+    cf = get_cashflow(user_id)
+    if not cf["data_available"]:
+        return []
     cash_ratio = asset_overview.get("cash_ratio", 0)
-    cash_balance = asset_overview.get("cash_balance", 0)
+    cash_balance = max(0, asset_overview.get("cash_balance", 0) - cf["protected_cash"])
     if cash_ratio <= 0.03 or cash_balance <= 0:
         return []
 
     return [{
         "action_id": "cash_deploy",  # H-2：去掉日期后缀
-        "title": "现金占比偏高，建议增配债券或低估权益",
-        "subtitle": f"当前现金 {cash_ratio:.1%}（¥{cash_balance:,.0f}），可适当配置",
+        "title": "必要预留以外仍有现金，可评估配置方案",
+        "subtitle": f"扣除账单和应急金后，现金最多可用 ¥{cash_balance:,.0f}，需结合投资计划确认",
+        "amount": round(cash_balance, 2),
         "impact": 60,
         "urgency": 50,
         "category": "cash_deploy",
@@ -908,8 +914,12 @@ def _persist_actions(actions: list, user_id: str = "default") -> list[dict]:
 def get_health_v2_dashboard(user_id: str = "default", force_refresh: bool = False) -> dict:
     """获取健康度诊断仪表盘数据。"""
     global _DASHBOARD_CACHE
+    from db.expense import get_cashflow
+    from services.finance.household_finance import build_household_diagnosis
+    household_cashflow = get_cashflow(user_id)
+    household_signature = json.dumps(household_cashflow, sort_keys=True, ensure_ascii=False)
     now = time.time()
-    if not force_refresh and _DASHBOARD_CACHE["data"] and _DASHBOARD_CACHE["user_id"] == user_id and (now - _DASHBOARD_CACHE["ts"]) < _CACHE_TTL:
+    if not force_refresh and _DASHBOARD_CACHE["data"] and _DASHBOARD_CACHE["user_id"] == user_id and _DASHBOARD_CACHE.get("household_signature") == household_signature and (now - _DASHBOARD_CACHE["ts"]) < _CACHE_TTL:
         return _DASHBOARD_CACHE["data"]
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -942,6 +952,8 @@ def get_health_v2_dashboard(user_id: str = "default", force_refresh: bool = Fals
         "four_pots": four_pots,
         "actions": actions,
         "roadmap": _build_roadmap(actions),
+        "household_cashflow": household_cashflow,
+        "household_diagnosis": build_household_diagnosis(user_id, household_cashflow),
     }
 
     # 保存快照
@@ -962,7 +974,7 @@ def get_health_v2_dashboard(user_id: str = "default", force_refresh: bool = Fals
     except Exception as e:
         logger.warning(f"[health_v2] 保存快照失败: {e}")
 
-    _DASHBOARD_CACHE = {"data": result, "ts": now, "user_id": user_id}
+    _DASHBOARD_CACHE = {"data": result, "ts": now, "user_id": user_id, "household_signature": household_signature}
     return result
 
 

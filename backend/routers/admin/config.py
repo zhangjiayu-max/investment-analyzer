@@ -35,6 +35,11 @@ async def get_config_api(key: str):
 @router.put("/api/system-config/{key:path}")
 async def update_config_api(key: str, req: UpdateConfigRequest):
     """更新单个配置。"""
+    from db.config import validate_config_value
+    try:
+        validate_config_value(key, req.value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     success = update_config(key, req.value)
     if not success:
         raise HTTPException(404, f"配置项 '{key}' 不存在")

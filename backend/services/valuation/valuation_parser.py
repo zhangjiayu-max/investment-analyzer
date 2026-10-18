@@ -1,41 +1,25 @@
 """估值图片解析服务。"""
 
 import logging
+import math
 import re
 import uuid
-from datetime import date
-from pathlib import Path
 
-from config import IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR, IMAGE_PARSER_MODEL_TYPE
+from config import IMAGES_DIR, IMAGE_PARSER_MODEL_TYPE
 
 logger = logging.getLogger(__name__)
 from db._conn import _get_conn
 from db.valuations import save_valuation, save_dd_valuation
 from services.image_parser import ImageParser, DDImageParser
+from services.valuation.image_paths import resolve_valuation_image, valuation_image_location
 
 
 def parse_single_valuation(path: str, model_type: str = "", source_url: str | None = None, snapshot_date: str | None = None) -> dict:
     """解析单张估值图片并存储结果（同步函数，供并发调用）。自动识别图片类型。"""
     model_type = model_type or IMAGE_PARSER_MODEL_TYPE
     trace_id = uuid.uuid4().hex[:12]
-    img_path = Path(path)
-    # 规范化：去掉 DB 中可能已存储的 data/images/ data/dd_images/ 等前缀
-    # 避免与下面 IMAGES_DIR 等 base 路径重复拼接
-    path_str = str(img_path)
-    for prefix in ['data/images/', 'data/dd_images/', 'data/']:
-        if path_str.startswith(prefix):
-            path_str = path_str[len(prefix):]
-            break
-    img_path = Path(path_str)
-    if not img_path.is_absolute():
-        for base in [IMAGES_DIR, VALUATION_IMAGES_DIR, DD_IMAGES_DIR]:
-            candidate = base / img_path
-            if candidate.exists():
-                img_path = candidate
-                break
-        else:
-            img_path = IMAGES_DIR / path_str
-    if not path or not img_path.exists():
+    img_path = resolve_valuation_image(path)
+    if not path or not img_path.is_file():
         return {"ok": False, "error": f"图片路径无效: {img_path}", "path": path}
 
     # 自动判断图片类型：如果路径包含 dd_images，使用 DDImageParser
@@ -53,32 +37,36 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
         result["source_path"] = str(img_path)
 
         if result.get("ok"):
-            # 保存到 dd_valuations 表
-            try:
-                rel_path = f"data/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
-            except ValueError:
-                rel_path = f"data/dd_images/{path}"
-            image_url = f"/static/dd_images/{img_path.relative_to(DD_IMAGES_DIR)}"
+            rel_path, image_url = valuation_image_location(img_path)
             dd_id = save_dd_valuation(result, rel_path, image_url)
             result["dd_id"] = dd_id
             result["type"] = "dd"
 
-            # 更新 analysis_records
-            conn = _get_conn()
-            existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (rel_path,)).fetchone()
-            if existing:
-                conn.execute("""UPDATE analysis_records SET status='success', updated_at=datetime('now','localtime') WHERE id=?""", (existing[0],))
-            else:
-                conn.execute("""INSERT INTO analysis_records (image_path, image_url, status) VALUES (?, ?, 'success')""",
-                             (rel_path, image_url))
-            conn.commit()
-            conn.close()
-
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "估值表解析失败"), "data": result, "path": path, "trace_id": trace_id}
         return {"ok": result.get("ok", False), "data": result, "path": path, "trace_id": trace_id}
     else:
         # 普通估值图片解析
         parser = ImageParser(model_type=model_type, trace_id=trace_id)
         result = parser.parse(str(img_path))
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "未识别到有效的指数及估值数据", "path": path, "trace_id": trace_id}
+        index_code = str(result.get("index_code") or "").strip()
+        index_name = str(result.get("index_name") or "").strip()
+        value = result.get("current_value")
+        valid_value = value is None
+        try:
+            if value is not None:
+                value = float(str(value).strip().replace(",", "").removesuffix("%").strip())
+                valid_value = math.isfinite(value)
+        except (TypeError, ValueError):
+            valid_value = False
+        if result.get("ok") is False or not index_code or index_code.upper() == "UNKNOWN" or not index_name or not valid_value:
+            return {"ok": False, "error": result.get("error") or "未识别到有效的指数及估值数据", "data": result, "path": path, "trace_id": trace_id}
+        result["index_code"] = index_code
+        result["index_name"] = index_name
+        result["current_value"] = value
+        original_image_path, _ = valuation_image_location(img_path)
 
         # 先重命名为指数名_指标类型，再存 DB（确保 source_image 指向最终路径）
         index_name = result.get("index_name", "")
@@ -91,8 +79,7 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
             if not new_path.exists():
                 img_path.rename(new_path)
                 img_path = new_path
-            else:
-                img_path = new_path
+            # 同名目标已存在时保留本次图片，防止把新估值指向旧图片。
             try:
                 new_rel_path = str(img_path.relative_to(IMAGES_DIR))
             except ValueError:
@@ -115,21 +102,22 @@ def parse_single_valuation(path: str, model_type: str = "", source_url: str | No
             logger.warning(f"索引估值数据失败: {e}")
 
         # 创建/更新 analysis_record
-        image_rel = new_rel_path or path
-        image_full_path = f"data/images/{image_rel}" if not image_rel.startswith("data/") else image_rel
-        snap_date = snapshot_date or date.today().isoformat()
+        image_full_path, image_url = valuation_image_location(img_path)
         conn = _get_conn()
-        existing = conn.execute("SELECT id FROM analysis_records WHERE image_path = ?", (image_full_path,)).fetchone()
+        existing = conn.execute(
+            "SELECT id FROM analysis_records WHERE image_path IN (?, ?) ORDER BY id LIMIT 1",
+            (original_image_path, image_full_path),
+        ).fetchone()
         if existing:
             conn.execute("""UPDATE analysis_records SET
-                index_name=?, index_code=?, metric_type=?, status='success',
+                image_path=?, image_url=?, index_name=?, index_code=?, metric_type=?, status='success',
                 updated_at=datetime('now','localtime') WHERE id=?""",
-                (result.get("index_name"), result.get("index_code"), result.get("metric_type"), existing[0]))
+                (image_full_path, image_url, result.get("index_name"), result.get("index_code"), result.get("metric_type"), existing[0]))
         else:
             conn.execute("""INSERT INTO analysis_records
                 (article_id, image_index, image_path, image_url, index_name, index_code, metric_type, status)
                 VALUES (NULL, 0, ?, ?, ?, ?, ?, 'success')""",
-                (image_full_path, f"/static/images/{image_rel}",
+                (image_full_path, image_url,
                  result.get("index_name"), result.get("index_code"), result.get("metric_type")))
         conn.commit()
         conn.close()

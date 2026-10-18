@@ -999,10 +999,13 @@ def list_analysis_agents() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_analysis_agent(agent_id: int) -> dict | None:
-    """获取单个分析 Agent（仅返回未禁用的）。"""
+def get_analysis_agent(agent_id: int, include_inactive: bool = False) -> dict | None:
+    """执行入口默认仅返回启用项；管理入口可显式包含停用项。"""
     conn = _get_conn()
-    row = conn.execute("SELECT * FROM analysis_agents WHERE id = ? AND is_active = 1", (agent_id,)).fetchone()
+    query = "SELECT * FROM analysis_agents WHERE id = ?"
+    if not include_inactive:
+        query += " AND is_active = 1"
+    row = conn.execute(query, (agent_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -1083,7 +1086,7 @@ def get_analysis_history_status(history_id: int) -> dict | None:
     from db.async_tasks import cleanup_stale_async_tasks
     cleanup_stale_async_tasks(_conn=conn)
     row = conn.execute(
-        "SELECT id, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
+        "SELECT id, index_code, valuation_context, status, result, token_usage, error_msg FROM analysis_history WHERE id = ?",
         (history_id,),
     ).fetchone()
     conn.close()

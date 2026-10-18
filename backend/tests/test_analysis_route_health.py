@@ -190,6 +190,18 @@ def setup_enhanced_data(routes, monkeypatch):
     }] * 3
     conn.execute.return_value.lastrowid = 88
     monkeypatch.setattr(routes['enhanced'], '_get_conn', lambda: conn)
+    # 候选筛选已共用快照服务，此处只隔离分析/持久化边界；真实筛选由
+    # test_super_value_contract 覆盖，不能用重复同日的假 SQL 行冒充历史。
+    monkeypatch.setattr(routes['enhanced'], '_scan_super_value_impl', lambda **kwargs: {
+        'snapshot_id': 'analysis-health-snapshot', 'as_of_date': '2026-10-18',
+        'cutoff_date': '2026-10-08',
+        'opportunities': [{
+            'index_code': '000300', 'index_name': '沪深300', 'metric_type': '市盈率',
+            'current_percentile': 10, 'current_value': 10, 'zscore': -1, 'score': 60,
+            'latest_date': '2026-10-17', 'stale_days': 1, 'data_source': '螺丝钉',
+            'data_freshness': 'fresh', 'consecutive_drop_days': 0, 'drop_7d': 0,
+        }],
+    })
     monkeypatch.setattr(db._conn, '_get_conn', lambda: conn)
     monkeypatch.setattr(db, 'get_config_float', lambda k, d: d)
     monkeypatch.setattr(db, 'get_config_int', lambda k, d: d)
@@ -469,7 +481,7 @@ def test_primary_result_save_failure_is_error(routes, monkeypatch, key):
     else:
         import db.agent_analysis_log
         llm, conn = setup_enhanced_data(routes, monkeypatch)
-        monkeypatch.setattr(llm, '_call_llm', lambda **kw: response(json.dumps({'overall_summary': '有效分析'})))
+        monkeypatch.setattr(llm, '_call_llm', lambda **kw: response(json.dumps({'overall_summary': '有效分析', 'strategies': [{'index_code': '000300', 'opportunity_type': '真低估', 'action': '观望', 'confidence': 'low'}]})))
         original_cursor = conn.execute.return_value
         def execute(sql, *args):
             if sql.startswith('INSERT'):
@@ -509,7 +521,7 @@ def test_completed_result_survives_optional_log_completion_error(routes, monkeyp
     import db.agent_analysis_log
     if key == 'enhanced':
         llm, conn = setup_enhanced_data(routes, monkeypatch)
-        monkeypatch.setattr(llm, '_call_llm', lambda **kw: response(json.dumps({'overall_summary': '有效分析'})))
+        monkeypatch.setattr(llm, '_call_llm', lambda **kw: response(json.dumps({'overall_summary': '有效分析', 'strategies': [{'index_code': '000300', 'opportunity_type': '真低估', 'action': '观望', 'confidence': 'low'}]})))
         monkeypatch.setattr(db.agent_analysis_log, 'complete_analysis_log', Mock(side_effect=RuntimeError('log unavailable')))
     else:
         monkeypatch.setattr(mod, 'complete_analysis_log', Mock(side_effect=RuntimeError('log unavailable')))

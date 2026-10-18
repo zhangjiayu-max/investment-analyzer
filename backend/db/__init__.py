@@ -195,6 +195,11 @@ from db.expense import (
     update_expense, delete_expense, get_expense_summary, get_expense_trend,
     copy_fixed_expenses, get_cashflow, get_expense_categories,
 )
+from db.recurring_expenses import (
+    init_recurring_expense_tables, create_recurring_template, get_recurring_template,
+    list_recurring_templates, update_recurring_template, delete_recurring_template,
+    list_recurring_bills, pay_recurring_bill, get_recurring_summary,
+)
 
 # 回测结果持久化
 from db.backtest_results import (
@@ -1573,6 +1578,7 @@ def init_db():
 
     # ── 每月支出记录表（2026-10-14）──
     init_expense_tables(conn)
+    init_recurring_expense_tables(conn)
 
     # ── 回测结果持久化表 ──────────────────────────────────
     init_backtest_tables(conn)

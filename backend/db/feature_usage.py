@@ -97,8 +97,8 @@ def get_feature_usage_stats(days: int = 30) -> dict:
         page_rows = conn.execute("""
             SELECT
                 page_key,
-                COUNT(*) AS visits,
-                CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms
+                SUM(CASE WHEN action_type = 'page_enter' THEN 1 ELSE 0 END) AS visits,
+                CAST(SUM(CASE WHEN action_type = 'page_leave' THEN duration_ms ELSE 0 END) / NULLIF(SUM(CASE WHEN action_type = 'page_enter' THEN 1 ELSE 0 END), 0) AS INTEGER) AS avg_duration_ms
             FROM feature_usage
             WHERE created_at >= ?
             GROUP BY page_key
@@ -109,7 +109,8 @@ def get_feature_usage_stats(days: int = 30) -> dict:
         feature_rows = conn.execute("""
             SELECT
                 feature_key,
-                COUNT(*) AS clicks
+                SUM(CASE WHEN action_type = 'feature_click' THEN 1 ELSE 0 END) AS clicks,
+                SUM(CASE WHEN action_type = 'feature_complete' THEN 1 ELSE 0 END) AS completions
             FROM feature_usage
             WHERE feature_key IS NOT NULL AND feature_key != ''
               AND created_at >= ?

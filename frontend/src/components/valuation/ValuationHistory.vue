@@ -5,8 +5,7 @@ async function getEcharts() {
   if (!echartsModule) echartsModule = await import('echarts')
   return echartsModule
 }
-import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, listLiuyiValuations, getLiuyiValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
-import { useAsyncTask } from '../../composables/useAsyncTask'
+import { listValuationIndexes, getValuationHistory, getIndexInfo, runAnalysis, pollIndexAnalysisStatus, getAsyncTaskStatus, listAsyncTasks, listAnalysisHistory, getAnalysisHistoryDetail, deleteAnalysisHistory, refreshValuationPrices, listDDValuations, getDDValuation, listLiuyiValuations, getLiuyiValuation, getMarketTemperature, getSuperValue, getSuperValueDeep, getEnhancedStrategy, getValuationQueryStats, onlineValuationQuery } from '../../api'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import { isDark } from '../../composables/useTheme'
 import { useToast } from '../../composables/useToast'
@@ -58,12 +57,13 @@ const liuyiSearchQuery = ref('')
 const liuyiSortKey = ref('')
 const liuyiSortAsc = ref(true)
 
-// 分析状态：按指数 code 独立存储，支持并发分析多个指数
-const analysisLoadingMap = ref({})   // { [indexCode]: boolean }
-const analysisResultMap = ref({})    // { [indexCode]: {id, result, agent_name, token_usage, created_at} }
+// 分析状态：按指数与指标独立存储，支持并发分析
+const analysisLoadingMap = ref({})   // { [index+metric]: boolean }
+const analysisResultMap = ref({})    // { [index+metric]: report }
 const analysisHistory = ref([])
 
 // 超性价比
+const superValueError = ref('')
 const superValueLoading = ref(false)
 const superValueData = ref(null)
 const superValueDeepLoading = ref(false)
@@ -73,14 +73,16 @@ const strategyData = ref(null)
 const breakdownLabels = {
   valuation: '估值水位',
   consecutive: '连续走低期数',
-  drop_7d: '近7期跌幅',
+  drop_7d: '近期分位变化',
   zscore: 'Z-score',
   acceleration: '趋势',
 }
 
 // 当前选中指数的 loading/result（computed 代理）
-const analysisLoading = computed(() => !!analysisLoadingMap.value[selectedCode.value])
-const analysisResult = computed(() => analysisResultMap.value[selectedCode.value] || null)
+const analysisKey = (code, metric) => JSON.stringify([code, metric || null])
+const currentAnalysisKey = computed(() => analysisKey(selectedCode.value, selectedMetric.value))
+const analysisLoading = computed(() => !!analysisLoadingMap.value[currentAnalysisKey.value])
+const analysisResult = computed(() => analysisResultMap.value[currentAnalysisKey.value] || null)
 const runningCount = computed(() => Object.values(analysisLoadingMap.value).filter(Boolean).length)
 const refreshingPrices = ref(false)
 const historyLoading = ref(false)
@@ -312,93 +314,89 @@ const selectedIndexName = computed(() => {
   return idx?.index_name || selectedCode.value
 })
 
-const { taskState: indexAnalysisTaskState, start: startIndexAnalysisTask, restore: restoreIndexAnalysisTask, restoreFromServer: restoreIndexAnalysisTaskFromServer } = useAsyncTask('index_analysis')
-
+// 每个任务独立轮询，不与其他指数或指标共享定时器/回调。
+const analysisWatchers = new Map()
+let disposed = false
+let restorePromise = null
+function watchAnalysisTask(taskId, historyId, code, metric) {
+  const key = analysisKey(code, metric)
+  const id = taskId ? `task:${taskId}` : `history:${historyId}`
+  if (disposed || analysisWatchers.has(id)) return
+  const entry = { timer: null, cancel: null }
+  analysisWatchers.set(id, entry)
+  analysisLoadingMap.value = { ...analysisLoadingMap.value, [key]: true }
+  const current = () => !disposed && analysisWatchers.get(id) === entry
+  function finish(status) {
+    if (!current()) return
+    const payload = typeof status.result === 'object' && status.result !== null ? status.result : { result: status.result }
+    analysisResultMap.value = { ...analysisResultMap.value, [key]: {
+      ...payload, id: payload.history_id || historyId, metric_type: metric,
+      result: status.status === 'error' ? '分析失败：' + (status.error || status.error_msg || '未知错误') : payload.result || '',
+      error: status.status === 'error', agent_name: payload.agent_name || '指数深度分析师',
+      token_usage: payload.token_usage || status.token_usage || 0,
+      created_at: payload.created_at || status.created_at || new Date().toISOString(),
+    } }
+    analysisLoadingMap.value = { ...analysisLoadingMap.value, [key]: false }
+    analysisWatchers.delete(id)
+    if (currentAnalysisKey.value === key) loadAnalysisHistory()
+  }
+  if (!taskId) {
+    entry.cancel = pollIndexAnalysisStatus(historyId, status => {
+      if (['done', 'error'].includes(status.status)) finish(status)
+    })
+    return
+  }
+  async function poll() {
+    if (!current()) return
+    try {
+      const { data } = await getAsyncTaskStatus(taskId)
+      if (!current()) return
+      if (['done', 'error'].includes(data.status)) { finish(data); return }
+    } catch (e) {
+      if (!current()) return
+      if (e.response?.status === 404) { finish({ status: 'error', error: '任务已过期，请重新分析' }); return }
+      // 暂时断网保留任务凭据，下一次轮询继续恢复。
+    }
+    if (current()) entry.timer = setTimeout(poll, 3000)
+  }
+  entry.timer = setTimeout(poll, 3000)
+}
+async function restoreAnalysisTasks() {
+  if (restorePromise) return restorePromise
+  restorePromise = (async () => {
+    try {
+      const { data } = await listAsyncTasks('index_analysis', 'running', 10000)
+      for (const task of data.tasks || []) {
+        if (disposed) return
+        let context = task.result || {}
+        if (typeof context === 'string') { try { context = JSON.parse(context) } catch { context = {} } }
+        if (!context.index_code && task.source_id) {
+          try { context = (await getAnalysisHistoryDetail(task.source_id)).data || {} } catch { continue }
+        }
+        if (context.index_code) watchAnalysisTask(task.id, context.history_id || task.source_id, context.index_code, context.metric_type)
+      }
+    } catch (e) { console.error('Failed to restore index analysis tasks:', e) }
+  })().finally(() => { restorePromise = null })
+  return restorePromise
+}
 async function handleRunAnalysis() {
-  if (!selectedCode.value) return
+  if (!selectedCode.value || !selectedMetric.value || analysisLoading.value) return
   const code = selectedCode.value
+  const metric = selectedMetric.value
+  const key = analysisKey(code, metric)
   const name = selectedIndexName.value
   showConfirmRun.value = false
-  // 设置当前指数为 loading
-  analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: true }
-  // 清空当前指数的旧结果
-  const newResultMap = { ...analysisResultMap.value }
-  delete newResultMap[code]
-  analysisResultMap.value = newResultMap
+  analysisLoadingMap.value = { ...analysisLoadingMap.value, [key]: true }
+  const results = { ...analysisResultMap.value }; delete results[key]; analysisResultMap.value = results
   try {
-    const { data } = await runAnalysis(code, name)
-    const historyId = data.id
-    const taskId = data.task_id
-    analysisResultMap.value = {
-      ...analysisResultMap.value,
-      [code]: {
-        id: historyId,
-        result: '分析已提交，正在后台生成结果...',
-        agent_name: '指数深度分析师',
-        token_usage: 0,
-        created_at: new Date().toISOString(),
-      }
-    }
-    // 如果后端返回了 task_id，使用 useAsyncTask 轮询；否则回退到原有轮询
-    if (taskId) {
-      // 用 useAsyncTask 的轮询机制
-      const { data: triggerData } = { data: { task_id: taskId } }
-      // 手动触发 start 的轮询逻辑
-      await startIndexAnalysisTask(async () => ({ data: { task_id: taskId } }), {
-        onComplete: (result) => {
-          analysisResultMap.value = {
-            ...analysisResultMap.value,
-            [code]: {
-              id: historyId,
-              result: result?.result || result || '',
-              agent_name: '指数深度分析师',
-              token_usage: result?.token_usage || 0,
-              created_at: new Date().toISOString(),
-            }
-          }
-          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-          loadAnalysisHistory()
-        },
-        onError: (err) => {
-          analysisResultMap.value = {
-            ...analysisResultMap.value,
-            [code]: { result: '分析失败：' + (err || '未知错误'), error: true }
-          }
-          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-        }
-      })
-    } else {
-      // 回退：使用原有轮询
-      pollIndexAnalysisStatus(historyId, (status) => {
-        if (status.status === 'done') {
-          analysisResultMap.value = {
-            ...analysisResultMap.value,
-            [code]: {
-              id: historyId,
-              result: status.result,
-              agent_name: '指数深度分析师',
-              token_usage: status.token_usage || 0,
-              created_at: new Date().toISOString(),
-            }
-          }
-          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-          loadAnalysisHistory()
-        } else if (status.status === 'error') {
-          analysisResultMap.value = {
-            ...analysisResultMap.value,
-            [code]: { result: '分析失败：' + (status.error || '未知错误'), error: true }
-          }
-          analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
-        }
-      })
-    }
+    const { data } = await runAnalysis(code, name, null, metric)
+    if (disposed) return
+    analysisResultMap.value = { ...analysisResultMap.value, [key]: { ...data, result: '分析已提交，正在后台生成结果...', agent_name: '指数深度分析师', created_at: new Date().toISOString() } }
+    watchAnalysisTask(data.task_id, data.id, code, metric)
   } catch (e) {
-    console.error('Analysis failed:', e)
-    analysisResultMap.value = {
-      ...analysisResultMap.value,
-      [code]: { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true }
-    }
-    analysisLoadingMap.value = { ...analysisLoadingMap.value, [code]: false }
+    if (disposed) return
+    analysisResultMap.value = { ...analysisResultMap.value, [key]: { result: '分析失败：' + (e.response?.data?.detail || e.message), error: true } }
+    analysisLoadingMap.value = { ...analysisLoadingMap.value, [key]: false }
   }
 }
 
@@ -408,6 +406,7 @@ async function handleRefreshPrices() {
     const { data } = await refreshValuationPrices()
     showToast(`行情价格已刷新，更新了 ${data.updated} 只指数`, 'success')
     if (selectedCode.value) loadHistory()
+    if (superValueData.value || outerTab.value === 'super-value') loadSuperValue()
   } catch (e) {
     showToast('价格刷新失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {
@@ -415,46 +414,43 @@ async function handleRefreshPrices() {
   }
 }
 
+let analysisHistoryGeneration = 0
 async function loadAnalysisHistory() {
-  if (!selectedCode.value) return
+  const version = ++analysisHistoryGeneration
+  const code = selectedCode.value
+  const metric = selectedMetric.value
+  const key = analysisKey(code, metric)
+  const current = () => !disposed && version === analysisHistoryGeneration && key === currentAnalysisKey.value
+  analysisHistory.value = []
+  if (!code) return
   historyLoading.value = true
   try {
-    const { data } = await listAnalysisHistory(selectedCode.value)
-    analysisHistory.value = data.history || data.items || []
-
-    // 从历史记录中恢复最新一条到 analysisResultMap（用于页面切换后恢复）
-    if (analysisHistory.value.length > 0 && selectedCode.value) {
-      const latest = analysisHistory.value[0]
-      if (!analysisResultMap.value[selectedCode.value]) {
-        analysisResultMap.value = {
-          ...analysisResultMap.value,
-          [selectedCode.value]: {
-            id: latest.id,
-            result: latest.result,
-            agent_name: latest.agent_name || '指数深度分析师',
-            token_usage: latest.token_usage || 0,
-            created_at: latest.created_at,
-          }
-        }
-      }
+    const { data } = await listAnalysisHistory(code)
+    if (!current()) return
+    // 无指标的旧报告保留在历史中，不能冒充当前指标的报告。
+    analysisHistory.value = (data.history || data.items || []).filter(item => !item.metric_type || item.metric_type === metric)
+    const latestReport = analysisHistory.value.find(item => item.metric_type === metric && (!item.status || item.status === 'done'))
+    if (latestReport && !analysisLoadingMap.value[key] && !analysisResultMap.value[key]) {
+      analysisResultMap.value = { ...analysisResultMap.value, [key]: { ...latestReport, agent_name: latestReport.agent_name || '指数深度分析师' } }
     }
-  } catch (e) {
-    console.error('Failed to load analysis history:', e)
-  } finally {
-    historyLoading.value = false
-  }
+  } catch (e) { if (current()) console.error('Failed to load analysis history:', e) }
+  finally { if (current()) historyLoading.value = false }
 }
 
+let detailGeneration = 0
 async function viewHistoryItem(item) {
+  const version = ++detailGeneration
+  const key = currentAnalysisKey.value
   try {
     const { data } = await getAnalysisHistoryDetail(item.id)
-    viewingHistory.value = data
+    if (!disposed && version === detailGeneration && key === currentAnalysisKey.value) viewingHistory.value = data
   } catch (e) {
     console.error('Failed to load detail:', e)
   }
 }
 
 function closeHistoryDetail() {
+  ++detailGeneration
   viewingHistory.value = null
 }
 
@@ -504,55 +500,91 @@ async function loadDDRecords() {
   }
 }
 
+let scanGeneration = 0
+let deepGeneration = 0
+let strategyGeneration = 0
+function applyCandidateSnapshot(data) {
+  const previous = superValueData.value
+  if (!previous || (data.snapshot_id && data.snapshot_id !== previous.snapshot_id) || (data.opportunities?.length === 0 && (data.empty_reason || data.status === 'no_candidates'))) {
+    superValueData.value = data
+    superValueDeepData.value = null
+    strategyData.value = null
+    return
+  }
+  // 同一快照只合并补充证据，评分字段始终取规则扫描。
+  const additions = new Map((data.opportunities || []).map(item => [analysisKey(item.index_code, item.metric_type), item]))
+  superValueData.value = { ...previous, opportunities: (previous.opportunities || []).map(item => {
+    const extra = additions.get(analysisKey(item.index_code, item.metric_type))
+    if (!extra) return item
+    const merged = { ...item }
+    for (const field of ['current_verification', 'historical_score', 'forecast_signal', 'online_pe', 'online_data_date']) {
+      if (extra[field] !== undefined) merged[field] = extra[field]
+    }
+    return merged
+  }) }
+}
 async function loadSuperValue() {
-  if (superValueData.value) return  // 已加载过，不重复请求
+  const version = ++scanGeneration
+  ++deepGeneration; ++strategyGeneration
+  superValueDeepLoading.value = false; strategyLoading.value = false
   superValueLoading.value = true
+  superValueError.value = ''
+  superValueDeepData.value = null
+  strategyData.value = null
   try {
     const { data } = await getSuperValue()
-    superValueData.value = data
+    if (!disposed && version === scanGeneration) superValueData.value = data
   } catch (e) {
-    console.error('Failed to load super value:', e)
-  } finally {
-    superValueLoading.value = false
-  }
+    if (!disposed && version === scanGeneration) {
+      superValueData.value = null
+      superValueError.value = e.response?.data?.detail || e.message || '扫描失败'
+    }
+  } finally { if (!disposed && version === scanGeneration) superValueLoading.value = false }
 }
-
-// 超性价比深度解读（规则筛选 + Agent 编排：在线补数据 + 预测信号 + LLM 解读）
 async function loadSuperValueDeep() {
+  if (superValueDeepLoading.value) return
+  const version = ++deepGeneration
+  const snapshotAtStart = superValueData.value?.snapshot_id
   superValueDeepLoading.value = true
   superValueDeepData.value = null
   try {
     const { data } = await getSuperValueDeep()
+    if (disposed || version !== deepGeneration || snapshotAtStart !== superValueData.value?.snapshot_id) return
+    applyCandidateSnapshot(data)
     superValueDeepData.value = data
-    // 深度解读返回的 opportunities 含在线补数据和预测信号，覆盖原 superValueData
-    if (data?.opportunities?.length) {
-      superValueData.value = data
-    }
   } catch (e) {
-    console.error('Failed to load super value deep:', e)
-    superValueDeepData.value = { error: e?.message || '深度解读失败' }
-  } finally {
-    superValueDeepLoading.value = false
-  }
+    if (!disposed && version === deepGeneration) superValueDeepData.value = { error: e.response?.data?.detail || e.message || '深度解读失败' }
+  } finally { if (!disposed && version === deepGeneration) superValueDeepLoading.value = false }
 }
-
-// 按 index_code 查找深度解读结果
 function getDeepAnalysis(code) {
-  if (!superValueDeepData.value?.deep_analysis) return null
-  return superValueDeepData.value.deep_analysis.find(d => d.index_code === code) || null
+  return superValueDeepData.value?.deep_analysis?.find(item => item.index_code === code) || null
 }
-
 async function loadStrategy() {
-  if (strategyData.value) return
+  if (strategyLoading.value) return
+  const version = ++strategyGeneration
+  const snapshotAtStart = superValueData.value?.snapshot_id
   strategyLoading.value = true
   try {
     const { data } = await getEnhancedStrategy()
+    if (disposed || version !== strategyGeneration || snapshotAtStart !== superValueData.value?.snapshot_id) return
+    if (Array.isArray(data.opportunities)) applyCandidateSnapshot(data)
     strategyData.value = data
   } catch (e) {
-    console.error('Failed to load enhanced strategy:', e)
-  } finally {
-    strategyLoading.value = false
-  }
+    if (!disposed && version === strategyGeneration) strategyData.value = { error: e.response?.data?.detail || e.message || '增强策略分析失败' }
+  } finally { if (!disposed && version === strategyGeneration) strategyLoading.value = false }
+}
+const superValueEmptyText = computed(() => ({
+  no_data: '暂无可用估值数据，请先导入估值。',
+  all_stale: '估值数据均已过期，请更新数据后重新扫描。',
+  insufficient_history: '可比历史观测不足，暂无法评分。',
+  below_threshold: '暂无满足低估准入与评分条件的指数。',
+}[superValueData.value?.empty_reason] || '暂无满足筛选条件的指数。'))
+function strategyActionClass(action) {
+  return 'sv-action-' + ({ '立即买入': 'buy', '分批建仓': 'buy', '观望': 'hold', '回避': 'avoid' }[action] || 'hold')
+}
+function confirmDeepAnalysis(kind) {
+  confirm.value = { visible: true, title: '确认 AI 分析', message: '将检索外部数据并调用模型生成解读，是否继续？', danger: false,
+    onConfirm: () => { confirm.value.visible = false; (kind === 'strategy' ? loadStrategy : loadSuperValueDeep)() } }
 }
 
 async function loadDDIndexList(recordId) {
@@ -849,38 +881,27 @@ const sourceImageUrl = computed(() => {
   return null
 })
 
-onMounted(async () => {
-  await restoreIndexAnalysisTaskFromServer({
-    onComplete: () => { loadAnalysisHistory() },
-    onError: (err) => { console.error('指数分析任务失败:', err) }
-  })
+onMounted(() => {
+  restoreAnalysisTasks()
   loadIndexes()
   loadMarketTemperature()
   loadQueryStats()
   document.addEventListener('click', handleOutsideClick)
-  // 加载分析历史（用于恢复最新结果）
-  if (selectedCode.value) {
-    loadAnalysisHistory()
-  }
 })
 onUnmounted(() => {
+  disposed = true
+  ++analysisHistoryGeneration; ++scanGeneration; ++deepGeneration; ++strategyGeneration; ++historyGeneration
+  for (const entry of analysisWatchers.values()) { clearTimeout(entry.timer); entry.cancel?.() }
+  analysisWatchers.clear()
+  trendChart?.dispose()
   document.removeEventListener('click', handleOutsideClick)
 })
-// KeepAlive 激活时重新加载数据（切换页面回来时触发）
-onActivated(async () => {
-  // 重新加载市场温度
+onActivated(() => {
+  loadIndexes()
   loadMarketTemperature()
-  // 恢复异步任务状态
-  await restoreIndexAnalysisTaskFromServer({
-    onComplete: () => { loadAnalysisHistory() },
-    onError: (err) => { console.error('指数分析任务失败:', err) }
-  })
-  // 如果在增强策略 tab，重新加载数据
-  if (outerTab.value === 'super-value') {
-    loadSuperValue()
-    loadStrategy()
-  }
-  // 刷新监控统计
+  restoreAnalysisTasks()
+  if (selectedCode.value) loadAnalysisHistory()
+  if (outerTab.value === 'super-value') loadSuperValue()
   loadQueryStats()
 })
 
@@ -903,12 +924,10 @@ async function handleOnlineQuery() {
   onlineQueryLoading.value = true
   try {
     const { data } = await onlineValuationQuery(selectedCode.value, selectedMetric.value)
-    if (data.ok) {
-      showToast(`在线查询成功（来源：${data.data.source}）`)
-      loadQueryStats()
-    } else {
-      showToast(data.error || '在线查询失败', 'error')
-    }
+    showToast(`在线查询成功（来源：${data.data?.source || data.source || '在线数据'}）`)
+    loadQueryStats()
+    loadHistory()
+    if (superValueData.value || outerTab.value === 'super-value') loadSuperValue()
   } catch (e) {
     showToast('在线查询失败: ' + (e.message || e), 'error')
   } finally {
@@ -926,6 +945,7 @@ const SOURCE_LABELS = {
 }
 // 切换指数或指标类型时重新加载数据
 watch([selectedCode, selectedMetric], () => {
+  closeHistoryDetail()
   imageLoadError.value = false
   if (selectedCode.value && selectedMetric.value) loadHistory()
   // 切换指数时，如果当前在分析 tab，也重新加载分析历史
@@ -935,11 +955,13 @@ watch(activeTab, (tab) => {
   if (tab === 'analysis' && selectedCode.value) loadAnalysisHistory()
 })
 watch(outerTab, (tab) => {
+  if (tab === 'super-value') loadSuperValue()
   if (tab === 'dd-image' && ddRecords.value.length === 0) loadDDRecords()
   if (tab === 'liuyi-image' && liuyiRecords.value.length === 0) loadLiuyiRecords()
 })
 
-defineExpose({ loadHistory })
+async function refreshValuationData() { await loadIndexes(); if (selectedCode.value && selectedMetric.value) await loadHistory(); if (superValueData.value || outerTab.value === 'super-value') await loadSuperValue() }
+defineExpose({ loadHistory: refreshValuationData })
 </script>
 
 <template>
@@ -964,7 +986,7 @@ defineExpose({ loadHistory })
         </svg>
         六亿图片估值
       </button>
-      <button :class="['outer-tab-btn', { active: outerTab === 'super-value' }]" @click="outerTab = 'super-value'; loadSuperValue()">
+      <button :class="['outer-tab-btn', { active: outerTab === 'super-value' }]" @click="outerTab = 'super-value'">
         <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
         </svg>
@@ -1090,20 +1112,13 @@ defineExpose({ loadHistory })
       </button>
     </div>
 
-    <!-- Confirm Dialog -->
-    <Teleport to="body">
-      <div v-if="showConfirmRun" class="modal-overlay" @click.self="showConfirmRun = false">
-        <div class="modal-dialog">
-          <h3 class="modal-title">AI 市场分析</h3>
-          <p class="modal-desc">将基于「{{ selectedIndexName }}」的估值数据和最新财经新闻，调用 AI 生成市场分析报告。</p>
-          <p class="modal-warn">此操作将消耗 Token，确认继续？</p>
-          <div class="modal-actions">
-            <button class="btn btn-outline" @click="showConfirmRun = false">取消</button>
-            <button class="btn btn-primary" @click="handleRunAnalysis" title="使用「指数深度分析师」Agent 执行分析">确认分析</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <ConfirmDialog
+      :visible="showConfirmRun"
+      title="AI 市场分析"
+      :message="`将基于「${selectedIndexName}」的${selectedMetric}估值和财经新闻调用 AI 生成报告，此操作将消耗 Token。是否继续？`"
+      @confirm="handleRunAnalysis"
+      @cancel="showConfirmRun = false"
+    />
 
     <!-- Main Tab Bar -->
     <div class="tab-bar">
@@ -1353,6 +1368,19 @@ defineExpose({ loadHistory })
             <span class="meta-item terminal-label font-jet">{{ formatAnalysisTime(analysisResult.created_at) }}</span>
           </div>
         </div>
+        <div v-if="analysisResult.evidence" class="sv-agent-meta">
+          <span>主指标：{{ analysisResult.evidence.primary_metric || analysisResult.metric_type }}</span>
+          <span>估值截至：{{ analysisResult.evidence.valuation_asof || '缺失' }}</span>
+          <span>时效：{{ ({ fresh: '有效', stale: '过期', missing: '缺失', unknown: '未知' })[analysisResult.evidence.freshness] || '未知' }}</span>
+          <span v-for="source in analysisResult.evidence.sources || []" :key="source.source + source.metric_type">{{ source.source }} · {{ source.metric_type }} · {{ source.asof || '日期缺失' }}</span>
+        </div>
+        <p v-for="warning in analysisResult.evidence?.warnings || []" :key="warning" class="sv-agent-error">{{ warning }}</p>
+        <div v-if="analysisResult.evidence?.news?.length" class="sv-agent-meta">
+          <span v-for="news in analysisResult.evidence.news" :key="news.url || news.title">
+            <a v-if="/^https?:\/\//i.test(news.url || '')" :href="news.url" target="_blank" rel="noopener noreferrer">{{ news.title }}</a><span v-else>{{ news.title }}</span>
+            · {{ news.published_at || '新闻日期缺失' }} · {{ news.source }}
+          </span>
+        </div>
         <div class="analysis-content markdown-body" v-html="renderMarkdown(analysisResult.result)"></div>
       </div>
 
@@ -1381,7 +1409,7 @@ defineExpose({ loadHistory })
             <div class="history-item-main" @click="viewHistoryItem(item)">
               <div class="history-item-top">
                 <span class="history-date font-jet">{{ formatAnalysisTime(item.created_at) }}</span>
-                <span class="history-index">{{ item.index_name || item.index_code }}</span>
+                <span class="history-index">{{ item.index_name || item.index_code }} · {{ item.metric_type || '旧报告（指标未记录）' }}</span>
                 <span v-if="item.agent_name" class="history-agent terminal-label">{{ item.agent_name }}</span>
               </div>
               <div class="history-item-preview">
@@ -1685,6 +1713,8 @@ defineExpose({ loadHistory })
     <!-- ════════ Super Value Tab (outerTab === 'super-value') ════════ -->
     <template v-if="outerTab === 'super-value'">
       <div class="super-value-page">
+        <button class="btn-ghost btn-sm" :disabled="superValueLoading" @click="loadSuperValue">刷新扫描</button>
+        <p v-if="superValueError" class="sv-agent-error">扫描失败：{{ superValueError }}</p>
         <div v-if="superValueLoading" class="loading-state">
           <div class="spinner-lg"></div>
           <span>扫描中...</span>
@@ -1700,10 +1730,15 @@ defineExpose({ loadHistory })
               <span>·</span>
               <span class="font-jet">{{ superValueData.scan_time }}</span>
             </div>
-            <button class="sv-deep-btn" :disabled="superValueDeepLoading" @click="loadSuperValueDeep">
+            <button class="sv-deep-btn" :disabled="superValueDeepLoading || superValueDeepData?.enabled === false || !superValueData.opportunities?.length" @click="confirmDeepAnalysis('deep')">
               <span v-if="superValueDeepLoading" class="spinner-sm"></span>
               {{ superValueDeepLoading ? '深度解读中...' : '深度解读' }}
             </button>
+          </div>
+          <p v-if="superValueDeepData?.enabled === false" class="sv-agent-meta">深度解读未启用，当前展示规则扫描结果。</p>
+          <p v-if="superValueDeepData?.status === 'partial'" class="sv-agent-error">部分外部数据或模型解读未完成，规则评分仍来自历史快照。</p>
+          <div v-if="superValueData.coverage?.length" class="sv-agent-meta">
+            <span v-for="source in superValueData.coverage" :key="source.source">{{ source.source }}：{{ source.status }}，{{ source.records }}条；可比序列 {{ source.usable_series || 0 }}<span v-if="source.reference_only_records">，仅交叉参考 {{ source.reference_only_records }}条</span></span>
           </div>
           <!-- Agent 元信息 -->
           <div v-if="superValueDeepData?.agent_meta && !superValueDeepData?.error" class="sv-agent-meta">
@@ -1735,7 +1770,8 @@ defineExpose({ loadHistory })
                   <span v-if="item.current_value">· <span class="font-jet">{{ item.current_value }}</span></span>
                   <span v-if="item.zscore != null">· <span class="terminal-label">Z-score</span> <b class="font-jet">{{ item.zscore }}</b></span>
                   <span v-if="item.consecutive_drop_days > 0">· <span class="terminal-label">连续走低</span> <b class="font-jet">{{ item.consecutive_drop_days }}期</b><span v-if="item.consecutive_window && item.consecutive_window.span_days != null" class="terminal-label">（{{ item.consecutive_window.start_date }}→{{ item.consecutive_window.end_date }}，跨{{ item.consecutive_window.span_days }}天）</span></span>
-                  <span v-if="item.drop_7d > 0">· <span class="terminal-label">7期跌</span> <b class="font-jet">{{ item.drop_7d }}%</b></span>
+                  <span v-if="item.recent_window">· <span class="terminal-label">近{{ item.recent_window.observations }}条观测分位变化</span> <b class="font-jet">{{ item.recent_window.percentile_change_pp }}个百分点</b>（{{ item.recent_window.start_date }}→{{ item.recent_window.end_date }}）</span>
+                  <span v-else-if="item.drop_7d > 0">· <span class="terminal-label">近7条观测便宜程度下降</span> <b class="font-jet">{{ item.drop_7d }}个百分点</b></span>
                   <span class="sv-source terminal-label">{{ item.data_source }} · {{ item.data_points }}条</span>
                 </div>
                 <div v-if="item.tags?.length" class="sv-tags">
@@ -1754,11 +1790,16 @@ defineExpose({ loadHistory })
                   </div>
                 </div>
                 <!-- Agent 深度解读条（在线补数据 + 预测信号 + LLM 解读） -->
-                <div v-if="item.online_pe != null || item.forecast_signal || getDeepAnalysis(item.index_code)" class="sv-deep-bar">
+                <div v-if="item.current_verification || item.online_pe != null || item.forecast_signal || getDeepAnalysis(item.index_code)" class="sv-deep-bar">
                   <!-- 在线补数据 -->
-                  <div v-if="item.online_pe != null" class="sv-deep-row">
+                  <div v-if="item.current_verification" class="sv-deep-row">
+                    <span class="sv-deep-tag sv-tag-online">最新核验（独立于历史评分）</span>
+                    <span>{{ item.current_verification.metric_type || '指标缺失' }} · {{ item.current_verification.current_value ?? '数值缺失' }} · 分位 {{ item.current_verification.percentile ?? '缺失' }}</span>
+                    <span>{{ item.current_verification.snapshot_date || '日期缺失' }} · {{ item.current_verification.source }} · {{ item.current_verification.status }}</span>
+                  </div>
+                  <div v-else-if="item.online_pe != null" class="sv-deep-row">
                     <span class="sv-deep-tag sv-tag-online">在线最新</span>
-                    <span class="terminal-label">{{ item.metric_short || 'PE' }}</span>
+                    <span class="terminal-label">PE</span>
                     <b class="font-jet">{{ item.online_pe }}</b>
                     <span v-if="item.online_data_date" class="terminal-label">({{ item.online_data_date }})</span>
                   </div>
@@ -1781,7 +1822,7 @@ defineExpose({ loadHistory })
                       </span>
                     </div>
                     <div v-if="getDeepAnalysis(item.index_code).catalysts?.length" class="sv-deep-row">
-                      <span class="terminal-label">催化剂</span>
+                      <span class="terminal-label">潜在催化剂（待核验）</span>
                       <span>{{ getDeepAnalysis(item.index_code).catalysts.join('、') }}</span>
                     </div>
                     <div v-if="getDeepAnalysis(item.index_code).action_detail" class="sv-deep-row sv-deep-detail">
@@ -1793,7 +1834,7 @@ defineExpose({ loadHistory })
             </div>
           </div>
           <div v-else class="empty-state" style="padding:2rem">
-            <p>暂无超性价比指数（所有指数评分均低于 40 分）</p>
+            <p>{{ superValueEmptyText }}</p>
           </div>
 
           <!-- 增强策略分析 -->
@@ -1801,10 +1842,10 @@ defineExpose({ loadHistory })
             <div class="sv-strategy-header editorial-card-header">
               <h3 class="title"><Icon name="brain" size="15" class="title-icon" /> 增强策略分析</h3>
               <button
-                v-if="!strategyData && !strategyLoading"
                 class="btn btn-primary btn-sm"
-                @click="loadStrategy"
-              >AI 深度分析</button>
+                :disabled="strategyLoading || !superValueData.opportunities?.length"
+                @click="confirmDeepAnalysis('strategy')"
+              >{{ strategyData ? '重新分析' : 'AI 深度分析' }}</button>
               <span v-if="strategyLoading" class="spinner-sm"></span>
             </div>
 
@@ -1814,6 +1855,8 @@ defineExpose({ loadHistory })
             </div>
 
             <div v-else-if="strategyData">
+              <p v-if="strategyData.error" class="sv-agent-error">{{ strategyData.error }}</p>
+              <p v-if="strategyData.enabled === false" class="sv-agent-meta">增强策略解读未启用，当前展示规则扫描结果。</p>
               <div v-if="strategyData.agent_name || strategyData.token_usage" class="sv-strategy-meta">
                 <span v-if="strategyData.agent_name" class="terminal-label">{{ strategyData.agent_name }}</span>
                 <span v-if="strategyData.token_usage" class="terminal-label">· <span class="font-jet">{{ strategyData.token_usage }}</span> tokens</span>
@@ -1825,7 +1868,7 @@ defineExpose({ loadHistory })
                 <div v-for="s in strategyData.strategies" :key="s.index_code" class="sv-strategy-card editorial-card reveal-stagger">
                   <div class="sv-strategy-top">
                     <span class="sv-strategy-name editorial-title">{{ s.index_name }}</span>
-                    <span :class="['sv-action-badge', 'sv-action-' + (s.action || '').replace(/[立即买入分批建仓观望回避]/g, m => ({'立即买入':'buy','分批建仓':'buy','观望':'hold','回避':'avoid'}[m] || 'hold'))]">
+                    <span :class="['sv-action-badge', strategyActionClass(s.action)]">
                       {{ s.action }}
                     </span>
                     <span :class="['sv-type-badge', s.opportunity_type === '真低估' ? 'sv-type-good' : s.opportunity_type === '价值陷阱' ? 'sv-type-bad' : 'sv-type-neutral']">
@@ -1853,7 +1896,7 @@ defineExpose({ loadHistory })
                       <span class="font-jet">{{ s.recovery_time }}</span>
                     </div>
                     <div v-if="s.catalysts?.length" class="sv-strategy-row">
-                      <span class="sv-strategy-label terminal-label">催化剂</span>
+                      <span class="sv-strategy-label terminal-label">潜在催化剂（待核验）</span>
                       <span>{{ s.catalysts.join('、') }}</span>
                     </div>
                     <div v-if="s.risk_factors?.length" class="sv-strategy-row">

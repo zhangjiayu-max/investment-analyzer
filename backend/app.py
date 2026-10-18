@@ -896,10 +896,10 @@ async def _auto_daily_eval():
                 eval_result = await run_daily_eval()
                 logging.info(f"每日评测完成: avg={eval_result.get('avg_score')}")
 
-                # Step 2: 检查并晋升 Shadow
+                # Step 2: 生成待人工审核的 Shadow 建议
                 from infra.shadow_mode import auto_promote_shadows
                 promoted = await auto_promote_shadows()
-                logging.info(f"Shadow 晋升: {len(promoted)} 个")
+                logging.info(f"Shadow 待审核建议: {len(promoted)} 个")
 
                 # Step 3: 自动生成 Eval 用例
                 from infra.auto_eval_generator import auto_generate_eval_cases
@@ -2173,20 +2173,24 @@ async def fetch_recent_valuations():
 async def list_shadow_configs_api(active_only: bool = True):
     """列出 Shadow 配置。"""
     from infra.shadow_mode import list_shadow_configs
-    return {"configs": list_shadow_configs(active_only=active_only)}
+    from db.config import get_config
+    return {"configs": list_shadow_configs(active_only=active_only),
+            "enabled": get_config('llm_cost.auto_shadow_mode', 'false') == 'true',
+            "supported_types": ['chat'], "daily_limit": 20}
 
 
 @app.post("/api/shadow/configs")
 async def create_shadow_config_api(body: dict):
     """创建 Shadow 配置。"""
     from infra.shadow_mode import create_shadow_config
-    config_id = create_shadow_config(
-        name=body.get("name", "未命名"),
-        agent_type=body.get("agent_type", "ai"),
-        current_prompt=body.get("current_prompt", ""),
-        candidate_prompt=body.get("candidate_prompt", ""),
-        traffic_pct=body.get("traffic_pct", 0.1),
-    )
+    try:
+        config_id = create_shadow_config(
+            name=body.get("name", ""), agent_type=body.get("agent_type", "chat"),
+            current_prompt=body.get("current_prompt", ""), candidate_prompt=body.get("candidate_prompt", ""),
+            traffic_pct=body.get("traffic_pct", 0.1),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     return {"ok": True, "id": config_id}
 
 
@@ -2194,7 +2198,14 @@ async def create_shadow_config_api(body: dict):
 async def toggle_shadow_config_api(config_id: int, body: dict):
     """启用/禁用 Shadow 配置。"""
     from infra.shadow_mode import toggle_shadow_config
-    toggle_shadow_config(config_id, body.get("is_active", True))
+    if not isinstance(body.get('is_active'), bool):
+        raise HTTPException(422, 'is_active 必须为布尔值')
+    try:
+        found = toggle_shadow_config(config_id, body['is_active'])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if not found:
+        raise HTTPException(404, '配置不存在')
     return {"ok": True}
 
 
@@ -2202,7 +2213,8 @@ async def toggle_shadow_config_api(config_id: int, body: dict):
 async def delete_shadow_config_api(config_id: int):
     """删除 Shadow 配置。"""
     from infra.shadow_mode import delete_shadow_config
-    delete_shadow_config(config_id)
+    if not delete_shadow_config(config_id):
+        raise HTTPException(404, '配置不存在')
     return {"ok": True}
 
 

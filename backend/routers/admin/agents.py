@@ -203,13 +203,16 @@ async def list_agent_versions_api(agent_id: int):
 async def rollback_agent_prompt_api(agent_id: int, version_id: int):
     """回滚到指定版本的提示词。"""
     version = get_prompt_version(version_id)
-    if not version:
+    if not version or version['agent_id'] != agent_id or version['agent_type'] != 'conversation':
         raise HTTPException(404, "版本不存在")
     agent = get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent 不存在")
     save_prompt_version(agent_id, 'conversation', agent['system_prompt'])
     update_agent(agent_id, system_prompt=version['system_prompt'])
+    if agent.get('is_specialist'):
+        from db.agents import clear_specialist_cache
+        clear_specialist_cache()
     return {"ok": True, "system_prompt": version['system_prompt']}
 
 
@@ -234,9 +237,9 @@ async def get_regression_result_api(agent_id: int, agent_type: str = "conversati
 async def rollback_analysis_agent_prompt_api(agent_id: int, version_id: int):
     """回滚分析 Agent 到指定版本的提示词。"""
     version = get_prompt_version(version_id)
-    if not version:
+    if not version or version['agent_id'] != agent_id or version['agent_type'] != 'analysis':
         raise HTTPException(404, "版本不存在")
-    current = get_analysis_agent(agent_id)
+    current = get_analysis_agent(agent_id, include_inactive=True)
     if not current:
         raise HTTPException(404, "Agent 不存在")
     save_prompt_version(agent_id, 'analysis', current['system_prompt'])

@@ -191,7 +191,7 @@ async def cancel_analyze(article_id: int):
     # 2. 直接标记所有 pending/error 记录为 cancelled
     records = get_analysis_records(article_id)
     for r in records:
-        if r["status"] in ("pending", "error"):
+        if r["status"] in ("pending", "error", "cancelled", "timeout", "analyzing"):
             update_analysis_record(r["id"], status="cancelled", error_msg="用户取消分析")
 
     # 3. 更新文章状态为 error
@@ -609,6 +609,24 @@ def _clean_article_html(html: str) -> str:
     return html.strip()
 
 
+def _downloaded_image_entries(image_urls: list, local_paths: list) -> list[dict]:
+    """下载结果会跳过失败项；用 img_原始序号 文件名恢复来源。"""
+    entries = []
+    for position, local_path in enumerate(local_paths):
+        match = re.fullmatch(r"img_(\d+)", Path(local_path).stem)
+        if match:
+            image_index = int(match.group(1))
+        elif len(local_paths) == len(image_urls):
+            # 兼容完整、有序的下载结果；部分成功时不能按位置猜测来源。
+            image_index = position
+        else:
+            raise ValueError("无法确定已下载图片的原始序号")
+        if not 0 <= image_index < len(image_urls):
+            raise ValueError("已下载图片的原始序号超出文章图片范围")
+        entries.append({"index": image_index, "url": image_urls[image_index], "local_path": str(local_path)})
+    return entries
+
+
 async def _background_add_article(article_id: int, url: str):
     """全流程后台任务：解析文章 → 下载图片 → 分析估值。"""
     logger.info(f"[article:{article_id}] 开始后台解析: {url[:50]}...")
@@ -635,17 +653,22 @@ async def _background_add_article(article_id: int, url: str):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         local_paths = await download_images(images, str(save_dir))
+        if not local_paths:
+            update_article(article_id, status="error", image_count=0,
+                           error_msg=f"图片全部下载失败（{len(images)} 张）")
+            return
+        image_entries = _downloaded_image_entries(images, local_paths)
 
         manifest = {
             "url": url, "title": title, "article_date": article_date,
-            "images": [{"index": i, "url": u, "local_path": str(lp)} for i, (u, lp) in enumerate(zip(images, local_paths))],
+            "images": image_entries,
         }
         manifest_path = save_dir / "manifest.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-        for i, (u, lp) in enumerate(zip(images, local_paths)):
-            create_analysis_record(article_id, i, str(lp), u)
+        for entry in image_entries:
+            create_analysis_record(article_id, entry["index"], entry["local_path"], entry["url"])
 
         images_dir_str = str(save_dir)
         try:
@@ -660,55 +683,8 @@ async def _background_add_article(article_id: int, url: str):
 
         # 3. 自动分析
         update_article(article_id, status="analyzing")
-        records = get_analysis_records(article_id)
-        pending = [r for r in records if r["status"] in ("pending", "error", "cancelled", "timeout")]
-        parser = ImageParser()
-        success = 0
-        failed = 0
-
-        for record in pending:
-            rid = record["id"]
-            img_path = record["image_path"]
-            if not os.path.isabs(img_path):
-                img_path = str(ROOT / img_path)
-            if not os.path.exists(img_path):
-                update_analysis_record(rid, status="error", error_msg="文件不存在")
-                failed += 1
-                continue
-
-            try:
-                async with _vision_semaphore:
-                    parse_result = await asyncio.wait_for(
-                        asyncio.to_thread(parser.parse, img_path), timeout=600,
-                    )
-                # 与图片估值一致：识别到 index_code 即视为解析成功，
-                # current_value 缺失（简化版估值卡片无 PE/PB 统计表）只记 warning 不计失败
-                has_index = parse_result and parse_result.get("index_code")
-                if has_index:
-                    save_valuation(parse_result, source_image=img_path, source_url=url, snapshot_date=article_date)
-                    warn_msg = "AI 返回空值（无当前值）" if parse_result.get("current_value") is None else None
-                    update_analysis_record(rid, status="success",
-                        index_code=parse_result.get("index_code"), index_name=parse_result.get("index_name"),
-                        metric_type=parse_result.get("metric_type"),
-                        error_msg=warn_msg,
-                        raw_response=json.dumps(parse_result, ensure_ascii=False))
-                    success += 1
-                else:
-                    update_analysis_record(rid, status="error",
-                        index_code=parse_result.get("index_code") if parse_result else None,
-                        error_msg="AI 未能提取到数据",
-                        raw_response=json.dumps(parse_result, ensure_ascii=False) if parse_result else "")
-                    failed += 1
-            except asyncio.TimeoutError:
-                update_analysis_record(rid, status="timeout", error_msg="分析超时")
-                failed += 1
-            except Exception as e:
-                update_analysis_record(rid, status="error", error_msg=str(e))
-                failed += 1
-
-        err_msg = f"{failed} 张失败" if failed > 0 else None
-        update_article(article_id, status="analyzed", error_msg=err_msg)
-        logger.info(f"[article:{article_id}] 解析完成: success={success}, failed={failed}")
+        _analyze_cancel.discard(article_id)
+        await _background_analyze(article_id)
 
     except Exception as e:
         logger.error(f"[article:{article_id}] 后台任务异常: {e}")
@@ -731,22 +707,24 @@ async def _background_download(article_id: int, article: dict):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         local_paths = await download_images(images, str(save_dir))
+        if not local_paths:
+            update_article(article_id, status="error", image_count=0,
+                           error_msg=f"图片全部下载失败（{len(images)} 张）")
+            return
+        image_entries = _downloaded_image_entries(images, local_paths)
 
         manifest = {
             "url": article["url"],
             "title": article["title"],
             "article_date": article_date,
-            "images": [
-                {"index": i, "url": url, "local_path": str(lp)}
-                for i, (url, lp) in enumerate(zip(images, local_paths))
-            ],
+            "images": image_entries,
         }
         manifest_path = save_dir / "manifest.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-        for i, (url, lp) in enumerate(zip(images, local_paths)):
-            create_analysis_record(article_id, i, str(lp), url)
+        for entry in image_entries:
+            create_analysis_record(article_id, entry["index"], entry["local_path"], entry["url"])
 
         # 归一化 images_dir 为相对路径（相对于项目根）
         images_dir_str = str(save_dir)
@@ -765,21 +743,48 @@ async def _background_download(article_id: int, article: dict):
         update_article(article_id, status="error", error_msg=str(e))
 
 
+def _has_index_data(result) -> bool:
+    """只接受可入库的指数结果，避免无关图片生成 UNKNOWN 估值。"""
+    if not isinstance(result, dict):
+        return False
+    code = result.get("index_code")
+    return isinstance(code, str) and bool(code.strip()) and code.strip().upper() != "UNKNOWN"
+
+
+def _refresh_article_analysis_status(article_id: int):
+    """根据全部图片结果更新文章状态，保留部分失败提示。"""
+    records = get_analysis_records(article_id)
+    if any(r["status"] == "analyzing" for r in records):
+        return
+    success = sum(r["status"] == "success" for r in records)
+    failed = sum(r["status"] in ("error", "timeout", "cancelled") for r in records)
+    error_msg = f"{failed} 张图片分析失败" if failed else ""
+    update_article(article_id, status="analyzed" if success else "error",
+                   error_msg=error_msg or ("" if success else "没有可用的图片分析结果"))
+
+
 async def _background_analyze(article_id: int):
     """后台分析任务。单张图片超时 10 分钟，取消时立即中断当前图片。"""
     IMAGE_TIMEOUT = 600  # 10 分钟
     current_task = None  # 当前图片的 asyncio Task，用于取消中断
+    cancelled = False
 
     def _cancel_remaining(records_list, from_index):
         """标记从 from_index 开始的所有待处理记录为已取消。"""
         for r in records_list[from_index:]:
-            if r["status"] in ("pending", "error"):
+            if r["status"] in ("pending", "error", "cancelled", "timeout", "analyzing"):
                 update_analysis_record(r["id"], status="cancelled", error_msg="用户取消分析")
 
     try:
         article = get_article(article_id)
+        if not article:
+            return
         records = get_analysis_records(article_id)
         pending = [r for r in records if r["status"] in ("pending", "error", "cancelled", "timeout")]
+        # 自动添加文章也走此入口；保留本地引用，取消 API 清理全局进度后仍可安全收尾。
+        progress = _analyze_progress.setdefault(article_id, {
+            "total": len(pending), "done": 0, "success": 0, "failed": 0, "current_record_id": None,
+        })
 
         parser = ImageParser()
         success = 0
@@ -788,7 +793,7 @@ async def _background_analyze(article_id: int):
         for idx, record in enumerate(pending):
             # 循环开头检查取消
             if article_id in _analyze_cancel:
-                _analyze_cancel.discard(article_id)
+                cancelled = True
                 _cancel_remaining(pending, idx)
                 update_article(article_id, status="error", error_msg="用户取消分析")
                 break
@@ -800,13 +805,14 @@ async def _background_analyze(article_id: int):
                 img_path = str(ROOT / img_path)
 
             # 记录当前正在分析的图片
-            _analyze_progress[article_id]["current_record_id"] = rid
+            progress["current_record_id"] = rid
 
             if not os.path.exists(img_path):
                 update_analysis_record(rid, status="error", error_msg="文件不存在")
                 failed += 1
-                _analyze_progress[article_id]["done"] += 1
-                _analyze_progress[article_id]["failed"] = failed
+                progress["done"] += 1
+                progress["failed"] = failed
+                progress["current_record_id"] = None
                 continue
 
             try:
@@ -820,13 +826,13 @@ async def _background_analyze(article_id: int):
                 result = await asyncio.wait_for(current_task, timeout=IMAGE_TIMEOUT)
 
                 # 与图片估值一致：识别到 index_code 即视为解析成功
-                has_index = result and result.get("index_code")
+                has_index = _has_index_data(result)
                 if has_index:
-                    vid = save_valuation(
+                    save_valuation(
                         result,
                         source_image=img_path,
                         source_url=article["url"],
-                        snapshot_date=article.get("publish_time", "")[:10] or None,
+                        snapshot_date=(article.get("publish_time") or "")[:10] or None,
                     )
                     warn_msg = "AI 返回空值（无当前值）" if result.get("current_value") is None else None
                     update_analysis_record(rid,
@@ -841,9 +847,9 @@ async def _background_analyze(article_id: int):
                 else:
                     update_analysis_record(rid,
                         status="error",
-                        index_code=result.get("index_code"),
-                        index_name=result.get("index_name"),
-                        metric_type=result.get("metric_type"),
+                        index_code=result.get("index_code") if isinstance(result, dict) else None,
+                        index_name=result.get("index_name") if isinstance(result, dict) else None,
+                        metric_type=result.get("metric_type") if isinstance(result, dict) else None,
                         error_msg="AI 未能提取到数据",
                         raw_response=json.dumps(result, ensure_ascii=False) if result else "",
                     )
@@ -854,7 +860,7 @@ async def _background_analyze(article_id: int):
             except asyncio.CancelledError:
                 # 被用户取消
                 update_analysis_record(rid, status="cancelled", error_msg="用户取消分析")
-                _analyze_cancel.discard(article_id)
+                cancelled = True
                 _cancel_remaining(pending, idx + 1)
                 update_article(article_id, status="error", error_msg="用户取消分析")
                 break
@@ -865,14 +871,14 @@ async def _background_analyze(article_id: int):
                 current_task = None
                 _analyze_tasks.pop(article_id, None)
 
-            _analyze_progress[article_id]["done"] += 1
-            _analyze_progress[article_id]["success"] = success
-            _analyze_progress[article_id]["failed"] = failed
-            _analyze_progress[article_id]["current_record_id"] = None
+            progress["done"] += 1
+            progress["success"] = success
+            progress["failed"] = failed
+            progress["current_record_id"] = None
 
             # 每处理完一张后检查取消
             if article_id in _analyze_cancel:
-                _analyze_cancel.discard(article_id)
+                cancelled = True
                 _cancel_remaining(pending, idx + 1)
                 update_article(article_id, status="error", error_msg="用户取消分析")
                 break
@@ -880,13 +886,11 @@ async def _background_analyze(article_id: int):
             await asyncio.sleep(0.3)
 
         # 仅当未被取消时才根据结果设置文章状态
-        if article_id not in _analyze_cancel:
-            all_records = get_analysis_records(article_id)
-            total_success = len([r for r in all_records if r["status"] == "success"])
-            if total_success > 0:
-                update_article(article_id, status="analyzed", error_msg="")
-            elif failed > 0:
-                update_article(article_id, status="error", error_msg=f"{failed} 张图片分析失败")
+        if not cancelled and article_id not in _analyze_cancel:
+            _refresh_article_analysis_status(article_id)
+    except asyncio.CancelledError:
+        _cancel_remaining(get_analysis_records(article_id), 0)
+        update_article(article_id, status="error", error_msg="用户取消分析")
     except Exception as e:
         update_article(article_id, status="error", error_msg=str(e))
     finally:
@@ -899,6 +903,7 @@ async def _background_analyze(article_id: int):
 async def _background_reanalyze(record_id: int):
     """后台重新分析单张图片（10分钟超时，不阻塞 event loop）。"""
     IMAGE_TIMEOUT = 600
+    record = None
     try:
         record = get_analysis_record(record_id)
         if not record:
@@ -923,7 +928,7 @@ async def _background_reanalyze(record_id: int):
             )
 
         # 与图片估值一致：识别到 index_code 即视为解析成功
-        has_index = result and result.get("index_code")
+        has_index = _has_index_data(result)
         if not has_index:
             update_analysis_record(record_id,
                 status="error",
@@ -932,11 +937,11 @@ async def _background_reanalyze(record_id: int):
             )
             return
 
-        vid = save_valuation(
+        save_valuation(
             result,
             source_image=img_path,
             source_url=article["url"] if article else None,
-            snapshot_date=article.get("publish_time", "")[:10] if article else None,
+            snapshot_date=(article.get("publish_time") or "")[:10] or None if article else None,
         )
         warn_msg = "AI 返回空值（无当前值）" if result.get("current_value") is None else None
         update_analysis_record(record_id,
@@ -953,6 +958,8 @@ async def _background_reanalyze(record_id: int):
         update_analysis_record(record_id, status="error", error_msg=str(e))
     finally:
         _reanalyze_tasks.pop(record_id, None)
+        if record and record["article_id"] and record["article_id"] not in _analyze_progress:
+            _refresh_article_analysis_status(record["article_id"])
 
 
 async def _batch_crawl_author_articles(articles: list):

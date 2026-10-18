@@ -20,6 +20,12 @@ const saving = ref(false)
 const showDeleteConfirm = ref(false)
 const showGenerateDialog = ref(false)
 const showOptimizeConfirm = ref(false)
+const showSaveConfirm = ref(false)
+const loadError = ref('')
+const versionsError = ref('')
+const regressionError = ref('')
+let _versionsRequest = 0
+let _regressionRequest = 0
 const generateForm = ref({ name: '', description: '' })
 const aiLoading = ref(false)
 
@@ -37,12 +43,13 @@ const showRegression = ref(false)
 
 async function loadAgents() {
   loading.value = true
+  loadError.value = ''
   try {
     const [r1, r2] = await Promise.all([listAgents(), listAnalysisAgents()])
     agents.value = r1.data.agents || []
     analysisAgents.value = r2.data.agents || r2.data || []
   } catch (e) {
-    console.error('Failed to load agents:', e)
+    loadError.value = 'Agent 加载失败：' + e.message
   } finally {
     loading.value = false
   }
@@ -53,6 +60,16 @@ const currentList = computed(() =>
 )
 
 function selectAgent(agent) {
+  if (saving.value || aiLoading.value) return
+  _versionsRequest++
+  _regressionRequest++
+  versions.value = []
+  showVersions.value = false
+  versionsError.value = ''
+  regressionError.value = ''
+  rollbackTarget.value = null
+  showRollbackConfirm.value = false
+  showSaveConfirm.value = false
   selectedAgent.value = { ...agent }
   editingAgent.value = null
   // 重置回归测试状态
@@ -62,19 +79,36 @@ function selectAgent(agent) {
   loadRegression()
 }
 
+function switchAgentTab(tab) {
+  if (saving.value || aiLoading.value) return
+  activeTab.value = tab
+  selectedAgent.value = null
+  editingAgent.value = null
+  versions.value = []
+  showVersions.value = false
+  regressionResult.value = null
+  _versionsRequest++
+  _regressionRequest++
+}
+
 async function loadRegression() {
   if (!selectedAgent.value) return
+  const request = ++_regressionRequest
   regressionLoading.value = true
+  regressionError.value = ''
   try {
     const agentType = activeTab.value === 'conversation'
       ? (selectedAgent.value.is_specialist ? 'specialist' : 'conversation')
       : 'analysis'
     const { data } = await getAgentRegressionResult(selectedAgent.value.id, agentType)
-    regressionResult.value = data
+    if (request === _regressionRequest) regressionResult.value = data
   } catch (e) {
-    regressionResult.value = null
+    if (request === _regressionRequest) {
+      regressionResult.value = null
+      regressionError.value = '回归结果加载失败：' + e.message
+    }
   } finally {
-    regressionLoading.value = false
+    if (request === _regressionRequest) regressionLoading.value = false
   }
 }
 
@@ -96,6 +130,7 @@ function statusIcon(status) {
   if (status === 'degraded') return '📉'
   if (status === 'error') return '❌'
   if (status === 'new') return '🆕'
+  if (status === 'skipped') return '⏭'
   return '➡️'
 }
 
@@ -104,6 +139,7 @@ function startEdit() {
 }
 
 function cancelEdit() {
+  if (saving.value || aiLoading.value) return
   editingAgent.value = null
 }
 
@@ -168,17 +204,19 @@ async function aiGenerate() {
 // 版本历史
 async function loadVersions() {
   if (!selectedAgent.value) return
+  const request = ++_versionsRequest
   versionsLoading.value = true
+  versionsError.value = ''
   try {
     const agentId = selectedAgent.value.id
     const { data } = activeTab.value === 'conversation'
       ? await listAgentVersions(agentId)
       : await listAnalysisAgentVersions(agentId)
-    versions.value = data.versions || []
+    if (request === _versionsRequest) versions.value = data.versions || []
   } catch (e) {
-    console.error('Failed to load versions:', e)
+    if (request === _versionsRequest) versionsError.value = '历史版本加载失败：' + e.message
   } finally {
-    versionsLoading.value = false
+    if (request === _versionsRequest) versionsLoading.value = false
   }
 }
 
@@ -198,12 +236,14 @@ function formatVersionTime(ts) {
 }
 
 function confirmRollback(version) {
-  rollbackTarget.value = version
+  rollbackTarget.value = { ...version, targetAgentId: selectedAgent.value.id, targetTab: activeTab.value }
   showRollbackConfirm.value = true
 }
 
 async function doRollback() {
-  if (!rollbackTarget.value || !selectedAgent.value) return
+  if (saving.value || !rollbackTarget.value || !selectedAgent.value) return
+  if (rollbackTarget.value.targetAgentId !== selectedAgent.value.id || rollbackTarget.value.targetTab !== activeTab.value) return
+  saving.value = true
   try {
     const agentId = selectedAgent.value.id
     const versionId = rollbackTarget.value.id
@@ -220,11 +260,14 @@ async function doRollback() {
   } catch (e) {
     showToast('回滚失败: ' + (e.response?.data?.detail || e.message), 'error')
     showRollbackConfirm.value = false
+  } finally {
+    saving.value = false
   }
 }
 
 async function saveEdit() {
-  if (!editingAgent.value) return
+  if (saving.value || !editingAgent.value) return
+  showSaveConfirm.value = false
   saving.value = true
   try {
     const { id, name, description, system_prompt, knowledge_scope, icon, is_active } = editingAgent.value
@@ -239,6 +282,7 @@ async function saveEdit() {
       showToast('Prompt 已变更，回归测试将在后台运行...', 'info')
     }
     selectedAgent.value = { ...editingAgent.value }
+    versions.value = []
     editingAgent.value = null
     await loadAgents()
     // 延迟加载回归测试结果
@@ -257,7 +301,8 @@ async function saveEdit() {
 }
 
 async function handleDelete() {
-  if (!selectedAgent.value) return
+  if (saving.value || !selectedAgent.value) return
+  saving.value = true
   try {
     await deleteAgent(selectedAgent.value.id)
     showToast('删除成功')
@@ -267,6 +312,8 @@ async function handleDelete() {
   } catch (e) {
     showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
     showDeleteConfirm.value = false
+  } finally {
+    saving.value = false
   }
 }
 
@@ -305,13 +352,14 @@ onUnmounted(() => {
 
     <!-- Tab Bar -->
     <div class="tab-bar">
-      <button :class="['tab-btn', { active: activeTab === 'conversation' }]" @click="activeTab = 'conversation'; selectedAgent = null; editingAgent = null">
+      <button :class="['tab-btn', { active: activeTab === 'conversation' }]" @click="switchAgentTab('conversation')">
         对话 Agent <span class="tab-count font-jet">{{ agents.length }}</span>
       </button>
-      <button :class="['tab-btn', { active: activeTab === 'analysis' }]" @click="activeTab = 'analysis'; selectedAgent = null; editingAgent = null">
+      <button :class="['tab-btn', { active: activeTab === 'analysis' }]" @click="switchAgentTab('analysis')">
         分析 Agent <span class="tab-count font-jet">{{ analysisAgents.length }}</span>
       </button>
     </div>
+    <p v-if="loadError" role="alert" style="color: var(--color-danger)">{{ loadError }}</p>
 
     <!-- Loading -->
     <div v-if="loading" class="loading-state">
@@ -360,10 +408,10 @@ onUnmounted(() => {
               >删除</button>
             </div>
             <div class="detail-actions" v-else>
-              <button class="btn-primary btn-sm" @click="saveEdit" :disabled="saving">
+              <button class="btn-primary btn-sm" @click="showSaveConfirm = true" :disabled="saving || aiLoading">
                 {{ saving ? '保存中...' : '保存' }}
               </button>
-              <button class="btn-outline btn-sm" @click="cancelEdit">取消</button>
+              <button class="btn-outline btn-sm" @click="cancelEdit" :disabled="saving || aiLoading">取消</button>
             </div>
           </div>
 
@@ -399,6 +447,7 @@ onUnmounted(() => {
                   <div v-if="versionsLoading" class="version-loading">
                     <span class="spinner-sm"></span> 加载中...
                   </div>
+                  <div v-else-if="versionsError" role="alert">{{ versionsError }}</div>
                   <div v-else-if="versions.length === 0" class="version-empty">暂无历史版本</div>
                   <div v-else v-for="v in versions" :key="v.id" class="version-item">
                     <div class="version-info">
@@ -420,6 +469,7 @@ onUnmounted(() => {
               </button>
               <Transition name="fade">
                 <div v-if="showRegression" class="regression-panel">
+                  <div v-if="regressionError" role="alert">{{ regressionError }}</div>
                   <div v-if="regressionLoading" class="version-loading">
                     <span class="spinner-sm"></span> 加载中...
                   </div>
@@ -429,12 +479,15 @@ onUnmounted(() => {
                   <div v-else-if="regressionResult.status === 'running'" class="regression-status running">
                     <span class="spinner-sm"></span> 回归测试运行中...
                   </div>
-                  <div v-else-if="regressionResult.status === 'error'" class="regression-status error">
+                  <div v-else-if="regressionResult.status === 'error' && !regressionResult.cases?.length" class="regression-status error">
                     测试失败: {{ regressionResult.error }}
                   </div>
-                  <div v-else-if="regressionResult.status === 'completed'">
+                  <div v-else-if="['completed','partial','skipped','error'].includes(regressionResult.status)">
                     <div v-if="regressionResult.message" class="version-empty">{{ regressionResult.message }}</div>
                     <template v-else>
+                      <p v-if="regressionResult.status === 'partial'" role="status">部分用例未完成评分，请检查错误或跳过原因。</p>
+                      <p v-if="regressionResult.status === 'skipped'" role="status">全部用例已跳过，没有有效回归评分。</p>
+                      <p v-if="regressionResult.status === 'error'" role="alert">回归评分失败，没有有效结果。</p>
                       <div class="regression-summary">
                         <div class="regression-stat">
                           <span class="stat-num font-jet-lg">{{ regressionResult.summary?.total || 0 }}</span>
@@ -453,6 +506,7 @@ onUnmounted(() => {
                           <span class="stat-lbl terminal-label">持平</span>
                         </div>
                       </div>
+                      <p class="terminal-label">首次评分 {{ regressionResult.summary?.new || 0 }} · 跳过 {{ regressionResult.summary?.skipped || 0 }} · 错误 {{ regressionResult.summary?.error || 0 }}</p>
                       <div class="regression-cases">
                         <div v-for="c in regressionResult.cases" :key="c.case_id" class="regression-case">
                           <span class="regression-status-icon">{{ statusIcon(c.status) }}</span>
@@ -460,6 +514,7 @@ onUnmounted(() => {
                           <span class="regression-score font-jet" :style="{ color: scoreColor(c.score) }">
                             {{ c.score?.toFixed(1) || '-' }}分
                           </span>
+                          <span v-if="['error','skipped'].includes(c.status)">{{ c.reason }}</span>
                           <span v-if="c.old_avg" class="regression-old-avg font-jet">
                             (旧: {{ c.old_avg?.toFixed(1) }})
                           </span>
@@ -519,47 +574,18 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Delete Confirm -->
-    <Teleport to="body">
-      <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="showDeleteConfirm = false">
-        <div class="modal-dialog">
-          <h3 class="modal-title">确认删除</h3>
-          <p class="modal-desc">确定删除 Agent「{{ selectedAgent?.name }}」？此操作不可撤销。</p>
-          <div class="modal-actions">
-            <button class="btn-secondary" @click="showDeleteConfirm = false">取消</button>
-            <button class="btn-danger" @click="handleDelete">确认删除</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <!-- Rollback Confirm -->
-    <Teleport to="body">
-      <div v-if="showRollbackConfirm" class="modal-overlay" @click.self="showRollbackConfirm = false">
-        <div class="modal-dialog">
-          <h3 class="modal-title">确认回滚</h3>
-          <p class="modal-desc">将回滚到 v{{ rollbackTarget?.version }}（{{ formatVersionTime(rollbackTarget?.created_at) }}）。当前提示词会自动保存为新版本，确认继续？</p>
-          <div class="modal-actions">
-            <button class="btn-secondary" @click="showRollbackConfirm = false">取消</button>
-            <button class="btn-primary" @click="doRollback">确认回滚</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <!-- AI Optimize Confirm -->
-    <Teleport to="body">
-      <div v-if="showOptimizeConfirm" class="modal-overlay" @click.self="showOptimizeConfirm = false">
-        <div class="modal-dialog">
-          <h3 class="modal-title">AI 优化提示词</h3>
-          <p class="modal-desc">AI 将基于当前提示词进行优化重写，补充缺失的结构（如 Few-shot 示例、负面约束等）。优化后内容将替换当前提示词，请确认继续？</p>
-          <div class="modal-actions">
-            <button class="btn-secondary" @click="showOptimizeConfirm = false">取消</button>
-            <button class="btn-primary" @click="showOptimizeConfirm = false; aiOptimize()">确认优化</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <ConfirmDialog :visible="showDeleteConfirm" title="确认删除" :danger="true" :loading="saving"
+      :message="`确定删除 Agent「${selectedAgent?.name}」？此操作不可撤销。`"
+      @confirm="handleDelete" @cancel="showDeleteConfirm = false" />
+    <ConfirmDialog :visible="showRollbackConfirm" title="确认回滚" :loading="saving"
+      :message="`将 Agent「${selectedAgent?.name}」回滚到 v${rollbackTarget?.version}。当前提示词会保存为新版本，确认继续？`"
+      @confirm="doRollback" @cancel="showRollbackConfirm = false" />
+    <ConfirmDialog :visible="showOptimizeConfirm" title="AI 优化提示词"
+      message="将调用 AI 生成优化草稿，检查后保存才会发布。确认继续？"
+      @confirm="showOptimizeConfirm = false; aiOptimize()" @cancel="showOptimizeConfirm = false" />
+    <ConfirmDialog :visible="showSaveConfirm" title="发布 Agent 配置" :loading="saving"
+      :message="`确认保存 Agent「${editingAgent?.name}」的配置与提示词${activeTab === 'analysis' ? `，状态：${editingAgent?.is_active ? '启用' : '停用'}` : ''}？`"
+      @confirm="saveEdit" @cancel="showSaveConfirm = false" />
 
     <!-- AI Generate Dialog -->
     <Teleport to="body">

@@ -12,6 +12,7 @@ import {
 import { useToast } from '../../composables/useToast'
 import Icon from '../ui/Icon.vue'
 import EmptyState from '../ui/EmptyState.vue'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 
 const { showToast } = useToast()
 
@@ -221,7 +222,7 @@ async function expandStatTool(name) {
       const { data } = await getCapabilitiesRecent(name, 5)
       toolRecentMap.value = {
         ...toolRecentMap.value,
-        [name]: { loading: false, records: data.records || data || [] },
+        [name]: { loading: false, records: data.items || [] },
       }
     } catch (e) {
       toolRecentMap.value = {
@@ -302,7 +303,7 @@ const debugResultCollapsed = ref(false)
 const debugHistory = ref([])
 const DEBUG_HISTORY_KEY = 'cap_debug_history'
 
-const exposedTools = computed(() => tools.value.filter(t => t.exposed))
+const exposedTools = computed(() => tools.value.filter(t => t.exposed && t.enabled))
 const selectedDebugTool = computed(() => tools.value.find(t => t.name === debugToolName.value))
 
 const selectedDebugParams = computed(() => {
@@ -333,9 +334,9 @@ function buildDebugArgs() {
     if (p.type === 'number' || p.type === 'integer') {
       out[p.name] = Number(raw)
     } else if (p.type === 'boolean') {
-      out[p.name] = !!raw
-    } else if (p.type === 'array') {
-      out[p.name] = String(raw).split(',').map(s => s.trim()).filter(Boolean)
+      out[p.name] = raw === true || raw === 'true'
+    } else if (p.type === 'array' || p.type === 'object') {
+      out[p.name] = typeof raw === 'string' ? JSON.parse(raw) : raw
     } else {
       out[p.name] = raw
     }
@@ -343,17 +344,24 @@ function buildDebugArgs() {
   return out
 }
 
-async function runDebug() {
+const debugConfirm = ref(false)
+async function runDebug(confirmed = false) {
+  if (selectedDebugTool.value?.effect === 'write' && confirmed !== true) {
+    debugConfirm.value = true
+    return
+  }
+  debugConfirm.value = false
   if (!debugToolName.value) {
     showToast('请先选择工具', 'warning')
     return
   }
   debugRunning.value = true
   debugResult.value = null
-  const args = buildDebugArgs()
+  let args
+  try { args = buildDebugArgs() } catch (e) { debugRunning.value = false; showToast('参数 JSON 格式错误', 'error'); return }
   const startTs = Date.now()
   try {
-    const { data } = await debugTool(debugToolName.value, args)
+    const { data } = await debugTool(debugToolName.value, args, confirmed === true)
     debugResult.value = {
       success: data.success !== false,
       duration_ms: data.duration_ms ?? (Date.now() - startTs),
@@ -444,6 +452,7 @@ onMounted(() => {
 </script>
 
 <template>
+  <ConfirmDialog :visible="debugConfirm" title="确认写工具调试" :message="`执行 ${debugToolName} 将写入业务记录并可能触发分析，是否继续？`" @confirm="runDebug(true)" @cancel="debugConfirm = false" />
   <div class="cap-page">
     <header class="page-header">
       <div>
@@ -797,7 +806,7 @@ onMounted(() => {
                   <tr class="tool-row" :class="{ warn: (t.success_rate ?? 1) < 0.9 }"
                       @click="expandStatTool(t.tool_name)">
                     <td class="font-jet">{{ t.tool_name }}</td>
-                    <td class="font-jet">{{ t.total_calls }}</td>
+                    <td class="font-jet">{{ t.calls }}</td>
                     <td class="font-jet" :class="{ 'warn-text': (t.success_rate ?? 1) < 0.9 }">
                       {{ formatPercent(t.success_rate) }}
                     </td>
@@ -815,7 +824,7 @@ onMounted(() => {
                             <span class="err-cat-label">{{ cat }}</span>
                             <div class="err-cat-bar">
                               <div class="err-cat-fill"
-                                :style="{ width: ((cnt || 0) / Math.max(t.total_calls || 1, 1) * 100) + '%' }">
+                                :style="{ width: ((cnt || 0) / Math.max(t.calls || 1, 1) * 100) + '%' }">
                               </div>
                             </div>
                             <span class="err-cat-num font-jet">{{ cnt }}</span>
@@ -864,6 +873,7 @@ onMounted(() => {
     </div><!-- /Tab 2：调用统计 -->
 
     <!-- ── Tab 3：调试台 ── -->
+    <p v-if="activeTab === 'debug'">同步工具超时在执行结束后检测，开始后无法保证取消。数组和对象参数请填写 JSON。</p>
     <div v-if="activeTab === 'debug'" class="tab-pane debug-pane">
       <section class="editorial-card debug-section">
         <!-- 工具选择 -->

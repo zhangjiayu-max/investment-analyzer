@@ -42,29 +42,48 @@ _CACHE_TTL = 300  # 秒
 # ============ 辅助函数 ============
 
 
-def _get_holding_valuations(holdings: list) -> list[dict]:
-    """获取持仓对应的估值数据。"""
-    indexes = list_valuation_indexes()
-    val_map = {}
-    for idx in indexes:
-        code = idx.get("index_code", "")
-        name = idx.get("index_name", "")
-        latest = get_latest_valuation(code)
-        if latest:
-            val_map[name] = latest
+def _holding_value(holding: dict) -> float:
+    """持仓表使用 current_value，同时兼容历史 market_value 字段。"""
+    return max(0, _safe_float(holding.get("current_value") if holding.get("current_value") is not None else holding.get("market_value")))
 
+
+def _valuation_percentile(valuation: dict | None) -> float | None:
+    """缺失和真实零分位分开处理；统一 PE/PB 百分制。"""
+    if not valuation:
+        return None
+    values = []
+    for key in ("pe_percentile", "pb_percentile"):
+        raw = valuation.get(key)
+        if raw is not None:
+            try:
+                value = float(raw)
+                if 0 <= value <= 100:
+                    values.append(value)
+            except (TypeError, ValueError):
+                pass
+    if not values and valuation.get("percentile") is not None:
+        try:
+            value = float(valuation["percentile"])
+            if 0 <= value <= 100:
+                values.append(value)
+        except (TypeError, ValueError):
+            pass
+    return sum(values) / len(values) if values else None
+
+
+def _get_holding_valuations(holdings: list) -> list[dict]:
+    """按明确指数映射查询 PE/PB，避免名称子串匹配到其他指数。"""
     result = []
-    for h in holdings:
-        name = h.get("fund_name", "")
-        matched_val = None
-        for vn, vv in val_map.items():
-            if vn in name or name in vn:
-                matched_val = vv
-                break
-        result.append({
-            **h,
-            "valuation": matched_val,
-        })
+    for holding in holdings:
+        code = holding.get("index_code")
+        valuation = {}
+        if code:
+            for metric, key in (("市盈率", "pe_percentile"), ("市净率", "pb_percentile")):
+                row = get_latest_valuation(code, metric_type=metric, max_days=7)
+                if row:
+                    valuation[key] = row.get("percentile")
+                    valuation[key + "_date"] = row.get("snapshot_date")
+        result.append({**holding, "valuation": valuation or None})
     return result
 
 
@@ -93,10 +112,10 @@ def _get_trade_records() -> list[dict]:
 
 # ============ 五维度评分 ============
 
-def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
+def calc_quality_score(holdings_with_val: list) -> tuple[int | None, dict]:
     """选品质量（200分）：同类排名、费率水平、估值合理性。"""
     if not holdings_with_val:
-        return 100, {"reason": "无持仓数据，给予中性分"}
+        return None, {"reason": "缺少持仓数据", "coverage": 0}
 
     import akshare as ak
     total = 0
@@ -104,6 +123,7 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
     good_count = 0
     bad_count = 0
     details = []
+    missing_data = []
 
     for h in holdings_with_val:
         fund_code = h.get("fund_code", "")
@@ -135,9 +155,11 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
                     fund_score += 15
                     fund_reasons.append(f"排名后10%")
             else:
-                fund_score += 40  # 无数据给中性分
+                fund_score += 40  # 仅为参考分，覆盖不足明确标记
+                missing_data.append(f"{fund_code}:ranking")
         except Exception:
             fund_score += 40
+            missing_data.append(f"{fund_code}:ranking")
 
         # 2. 费率水平（60分）
         try:
@@ -171,17 +193,21 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
                         fund_reasons.append(f"高费率{mgmt_fee}%")
                 else:
                     fund_score += 35
+                    missing_data.append(f"{fund_code}:fees")
             else:
                 fund_score += 35
+                missing_data.append(f"{fund_code}:fees")
         except Exception:
             fund_score += 35
+            missing_data.append(f"{fund_code}:fees")
 
         # 3. 估值合理性（60分）— 保留原逻辑但降低权重
         val = h.get("valuation")
         if val:
-            pe_pct = _safe_float(val.get("pe_percentile"))
-            pb_pct = _safe_float(val.get("pb_percentile"))
-            avg_pct = (pe_pct + pb_pct) / 2 if pe_pct and pb_pct else pe_pct or pb_pct or 50
+            avg_pct = _valuation_percentile(val)
+            if avg_pct is None:
+                missing_data.append(f"{fund_code}:valuation")
+                avg_pct = 50
             if avg_pct < 30:
                 fund_score += 60
                 fund_reasons.append(f"估值低{avg_pct:.0f}%")
@@ -220,6 +246,7 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
         "bad_count": bad_count,
         "avg_score": avg_score,
         "top_holdings": details[:5],
+        "missing_data": missing_data,
     }
     return avg_score, detail
 
@@ -227,7 +254,7 @@ def calc_quality_score(holdings_with_val: list) -> tuple[int, dict]:
 def calc_diversification_score(holdings: list) -> tuple[int, dict]:
     """分散配置（200分）：股债比例、持仓数量、集中度。"""
     if not holdings:
-        return 100, {"reason": "无持仓"}
+        return None, {"reason": "缺少持仓数据", "coverage": 0}
 
     score = 0
 
@@ -245,9 +272,9 @@ def calc_diversification_score(holdings: list) -> tuple[int, dict]:
         score += 15
 
     # 2. 集中度（70分）— 最大单只占比
-    total_value = sum(_safe_float(h.get("market_value")) for h in holdings)
+    total_value = sum(_holding_value(h) for h in holdings)
     if total_value > 0:
-        max_pct = max(_safe_float(h.get("market_value")) / total_value * 100 for h in holdings)
+        max_pct = max(_holding_value(h) / total_value * 100 for h in holdings)
         if max_pct <= 15:
             score += 70
         elif max_pct <= 20:
@@ -262,12 +289,11 @@ def calc_diversification_score(holdings: list) -> tuple[int, dict]:
         score += 35
 
     # 3. 股债比例（70分）— 简化判断
-    equity_types = ["股票型", "混合型", "指数型", "ETF", "QDII"]
-    bond_types = ["债券型", "货币型"]
-    equity_count = sum(1 for h in holdings if any(t in h.get("fund_type", "") for t in equity_types))
-    bond_count = sum(1 for h in holdings if any(t in h.get("fund_type", "") for t in bond_types))
-
-    equity_ratio = equity_count / n * 100 if n > 0 else 50
+    equity_types = ["股票型", "混合型", "指数型", "ETF", "QDII", "equity", "hybrid", "index", "qdii"]
+    bond_types = ["债券型", "货币型", "bond", "money_market"]
+    equity_value = sum(_holding_value(h) for h in holdings
+                       if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in equity_types))
+    equity_ratio = equity_value / total_value * 100 if total_value > 0 else 0
     # 理想股债比 40-70%
     if 40 <= equity_ratio <= 70:
         score += 70
@@ -284,33 +310,27 @@ def calc_diversification_score(holdings: list) -> tuple[int, dict]:
         "holding_count": n,
         "max_single_pct": round(max_pct, 1) if total_value > 0 else 0,
         "equity_ratio": round(equity_ratio, 1),
-        "equity_count": equity_count,
-        "bond_count": bond_count,
+        "equity_count": sum(1 for h in holdings if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in equity_types)),
+        "bond_count": sum(1 for h in holdings if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in bond_types)),
     }
     return score, detail
 
 
-def calc_valuation_score(holdings_with_val: list) -> tuple[int, dict]:
+def calc_valuation_score(holdings_with_val: list) -> tuple[int | None, dict]:
     """估值合理性（200分）：持仓整体估值百分位。"""
     if not holdings_with_val:
-        return 100, {"reason": "无估值数据"}
+        return None, {"reason": "缺少估值数据", "coverage": 0}
 
     pcts = []
-    for h in holdings_with_val:
-        val = h.get("valuation")
-        if not val:
-            continue
-        pe_pct = _safe_float(val.get("pe_percentile"))
-        pb_pct = _safe_float(val.get("pb_percentile"))
-        avg = (pe_pct + pb_pct) / 2 if pe_pct and pb_pct else pe_pct or pb_pct
-        if avg > 0:
-            pcts.append(avg)
-
+    for holding in holdings_with_val:
+        pct = _valuation_percentile(holding.get("valuation"))
+        if pct is not None:
+            pcts.append((pct, _holding_value(holding)))
     if not pcts:
-        return 100, {"reason": "无有效百分位"}
-
-    portfolio_pct = sum(pcts) / len(pcts)
-
+        return None, {"reason": "缺少有效估值分位", "coverage": 0}
+    weight = sum(value for _, value in pcts)
+    portfolio_pct = (sum(pct * value for pct, value in pcts) / weight
+                     if weight > 0 else sum(pct for pct, _ in pcts) / len(pcts))
     # 低估=高分
     if portfolio_pct <= 20:
         score = 200
@@ -328,16 +348,17 @@ def calc_valuation_score(holdings_with_val: list) -> tuple[int, dict]:
     detail = {
         "portfolio_avg_percentile": round(portfolio_pct, 1),
         "index_count": len(pcts),
-        "undervalued_count": sum(1 for p in pcts if p < 30),
-        "overvalued_count": sum(1 for p in pcts if p > 70),
+        "undervalued_count": sum(1 for p, _ in pcts if p < 30),
+        "overvalued_count": sum(1 for p, _ in pcts if p > 70),
+        "coverage": len(pcts) / len(holdings_with_val),
     }
     return score, detail
 
 
-def calc_behavior_score(trades: list) -> tuple[int, dict]:
+def calc_behavior_score(trades: list) -> tuple[int | None, dict]:
     """持有行为（200分）：交易频率、追涨杀跌、持有时长。"""
     if not trades:
-        return 140, {"reason": "无交易记录，给予偏高分"}
+        return None, {"reason": "缺少交易记录，无法评估持有行为", "coverage": 0}
 
     score = 0
 
@@ -472,14 +493,14 @@ def _find_holding_by_code(fund_code: str) -> dict | None:
 def calc_risk_score(holdings: list, holdings_with_val: list) -> tuple[int, dict]:
     """风控纪律（200分）：仓位控制、回撤管理。"""
     if not holdings:
-        return 100, {"reason": "无持仓"}
+        return None, {"reason": "缺少持仓数据", "coverage": 0}
 
     score = 0
-    total_value = sum(_safe_float(h.get("market_value")) for h in holdings)
+    total_value = sum(_holding_value(h) for h in holdings)
 
     # 1. 单只仓位控制（80分）
     if total_value > 0:
-        max_pct = max(_safe_float(h.get("market_value")) / total_value * 100 for h in holdings)
+        max_pct = max(_holding_value(h) / total_value * 100 for h in holdings)
         if max_pct <= 10:
             score += 80
         elif max_pct <= 15:
@@ -499,9 +520,9 @@ def calc_risk_score(holdings: list, holdings_with_val: list) -> tuple[int, dict]
         val = h.get("valuation")
         if not val:
             continue
-        pe_pct = _safe_float(val.get("pe_percentile"))
-        if pe_pct > 80:
-            overvalued_value += _safe_float(h.get("market_value"))
+        pct = _valuation_percentile(val)
+        if pct is not None and pct > 80:
+            overvalued_value += _holding_value(h)
 
     if total_value > 0:
         overvalued_pct = overvalued_value / total_value * 100
@@ -560,12 +581,26 @@ def _calc_health_score_sync() -> dict:
     sb, db = calc_behavior_score(trades)
     sr, dr = calc_risk_score(active_holdings, holdings_with_val)
 
-    total = sq + sd + sv + sb + sr
+    scores = {"quality": sq, "diversification": sd, "valuation": sv, "behavior": sb, "risk": sr}
+    reasons = []
+    if not active_holdings:
+        reasons.append("缺少持仓数据")
+    if active_holdings and not all(_holding_value(h) > 0 for h in active_holdings):
+        reasons.append("部分持仓缺少有效市值")
+    if sv is None or dv.get("coverage", 1) < 1:
+        reasons.append("持仓估值覆盖不足")
+    if sb is None:
+        reasons.append("缺少交易记录，持有行为不可评估")
+    if dq.get("missing_data"):
+        reasons.append("部分基金排名或费率数据不可用")
+    total = sum(scores.values()) if all(v is not None for v in scores.values()) else None
+    data_quality = {"status": "insufficient" if total is None else ("partial" if reasons else "complete"),
+                    "reasons": reasons}
 
     # 生成建议
     advice = []
     if dq.get("bad_count", 0) > 0:
-        advice.append(f"有 {dq['bad_count']} 只基金处于高估区域，考虑减仓或止盈")
+        advice.append(f"有 {dq['bad_count']} 只基金综合质量偏低，请检查排名、费率和估值依据")
     if dd.get("max_single_pct", 0) > 20:
         advice.append(f"最大单只仓位 {dd['max_single_pct']}%，建议控制在15%以内")
     if dd.get("equity_ratio", 50) > 80:
@@ -583,13 +618,15 @@ def _calc_health_score_sync() -> dict:
     if dr.get("overvalued_pct", 0) > 30:
         advice.append(f"高估持仓占比 {dr['overvalued_pct']}%，建议分批止盈")
 
-    if not advice:
-        advice.append("整体投资行为健康，继续保持")
+    if reasons:
+        advice = ["数据覆盖不足，请补齐后再评估"]
+    elif not advice:
+        advice.append("已覆盖的投资指标未发现明显异常")
 
     # LLM 总结（已在线程池中，直接同步调用即可，不再嵌套 to_thread）
     summary = ""
     try:
-        if get_config("llm_cost.page_llm_summary", "false") != "true":
+        if total is None or reasons or get_config("llm_cost.page_llm_summary", "false") != "true":
             raise RuntimeError("页面 LLM 总结已关闭")
         prompt = f"""你是理财顾问。根据以下健康分数据，用3-5句话给出通俗易懂的总结和建议。
 
@@ -631,6 +668,7 @@ def _calc_health_score_sync() -> dict:
         },
         "advice": advice,
         "summary": summary,
+        "data_quality": data_quality,
     }
 
     # 保存到 DB
@@ -643,7 +681,7 @@ def _calc_health_score_sync() -> dict:
         score_behavior=sb,
         score_risk=sr,
         advice=advice,
-        detail=result["details"],
+        detail={**result["details"], "_data_quality": data_quality, "_summary": summary},
     )
 
     # 接入统一日志（health_score 类型，agent_id=NULL）
@@ -672,28 +710,15 @@ def _calc_health_score_sync() -> dict:
     return result
 
 
-async def calc_health_score() -> dict:
-    """计算综合理财健康分（带 5 分钟内存缓存，akshare 调用在线程池执行）。"""
+async def calc_health_score(force: bool = False) -> dict:
+    """主动重算绕过缓存；异常保留为失败，不伪造零分或返回过期成功。"""
     now = time.time()
     cached = _HEALTH_SCORE_CACHE.get("data")
-    if cached is not None and (now - _HEALTH_SCORE_CACHE["ts"]) < _CACHE_TTL:
+    if not force and cached is not None and (now - _HEALTH_SCORE_CACHE["ts"]) < _CACHE_TTL:
         return cached
-    try:
-        result = await asyncio.to_thread(_calc_health_score_sync)
-        _HEALTH_SCORE_CACHE["data"] = result
-        _HEALTH_SCORE_CACHE["ts"] = now
-        return result
-    except Exception as e:
-        logger.warning(f"[health] 计算失败，降级返回: {e}")
-        return cached or {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "total_score": 0,
-            "scores": {},
-            "details": {},
-            "advice": [],
-            "summary": "",
-            "actions": [],
-        }
+    result = await asyncio.to_thread(_calc_health_score_sync)
+    _HEALTH_SCORE_CACHE.update(data=result, ts=time.time())
+    return result
 
 
 # ============ 股债性价比（FED模型） ============
@@ -701,14 +726,16 @@ async def calc_health_score() -> dict:
 def _calc_stock_bond_ratio_sync() -> dict:
     """FED模型同步实现（运行在线程池中）。"""
     # 获取沪深300估值（用 index_code 而非 index_name）
-    hs300 = get_latest_valuation("399300.SZ")
+    hs300 = get_latest_valuation("399300.SZ", metric_type="市盈率", max_days=7)
     if not hs300:
         # 尝试其他名称
         for code in ["399300.SZ", "000300.SH", "399300"]:
-            hs300 = get_latest_valuation(code)
+            hs300 = get_latest_valuation(code, metric_type="市盈率", max_days=7)
             if hs300:
                 break
 
+    if hs300 and hs300.get("metric_type") not in (None, "市盈率"):
+        return {"error": "沪深300估值指标不是市盈率，无法计算股债性价比"}
     pe = _safe_float(hs300.get("current_value") or hs300.get("pe_ttm") or hs300.get("pe") or hs300.get("metric_value")) if hs300 else 0
     if pe <= 0:
         return {"error": "无法获取沪深300 PE数据"}
@@ -718,7 +745,14 @@ def _calc_stock_bond_ratio_sync() -> dict:
     # 获取国债收益率（从DB或akshare）
     from db.health_score import get_latest_bond_yield
     bond = get_latest_bond_yield()
-    bond_yield = _safe_float(bond.get("yield_10y")) if bond else 0
+    bond_date = bond.get("trade_date") if bond else None
+    bond_source = "local_bond_yield"
+    def fresh_date(value):
+        try:
+            return 0 <= (datetime.now().date() - datetime.strptime(str(value)[:10], "%Y-%m-%d").date()).days <= 7
+        except (TypeError, ValueError):
+            return False
+    bond_yield = _safe_float(bond.get("yield_10y")) if bond and fresh_date(bond_date) else 0
 
     if bond_yield <= 0:
         # 尝试从akshare获取
@@ -726,18 +760,19 @@ def _calc_stock_bond_ratio_sync() -> dict:
             import akshare as ak
             df = ak.bond_zh_us_rate(start_date=(datetime.now() - timedelta(days=30)).strftime("%Y%m%d"))
             if df is not None and len(df) > 0:
-                bond_yield = float(df.iloc[-1].get("中国国债收益率10年", 0))
+                row = df.iloc[-1]
+                bond_date = str(row.get("日期", row.get("date", "")))[:10]
+                if fresh_date(bond_date):
+                    bond_yield = _safe_float(row.get("中国国债收益率10年", 0))
+                    bond_source = "akshare_bond_zh_us_rate"
         except Exception:
             pass
 
     if bond_yield <= 0:
-        bond_yield = 2.5  # 兜底假设
+        return {"error": "缺少可验证的10年国债收益率，暂不能计算股债性价比",
+                "data_quality": {"status": "insufficient", "reasons": ["缺少国债收益率"]}}
 
-    # bond_yield 可能是百分比形式（如2.5）或小数形式（如0.025）
-    if bond_yield > 1:
-        bond_yield_decimal = bond_yield / 100
-    else:
-        bond_yield_decimal = bond_yield
+    bond_yield_decimal = bond_yield / 100
 
     spread = earnings_yield - bond_yield_decimal
     spread_pct = round(spread * 100, 2)
@@ -760,8 +795,11 @@ def _calc_stock_bond_ratio_sync() -> dict:
 
     result = {
         "hs300_pe": round(pe, 2),
+        "pe_date": hs300.get("snapshot_date"),
+        "bond_date": bond_date,
+        "bond_source": bond_source,
         "earnings_yield": round(earnings_yield * 100, 2),
-        "bond_yield_10y": round(bond_yield, 2) if bond_yield > 1 else round(bond_yield * 100, 2),
+        "bond_yield_10y": round(bond_yield, 2),
         "spread": spread_pct,
         "signal": signal,
         "advice": advice,
@@ -772,8 +810,8 @@ def _calc_stock_bond_ratio_sync() -> dict:
         # 计算当前股债比例
         holdings = list_holdings() or []
         active = [h for h in holdings if (h.get("shares") or 0) > 0]
-        equity_types = ["股票型", "混合型", "指数型", "ETF", "QDII"]
-        bond_types = ["债券型", "货币型"]
+        equity_types = ["股票型", "混合型", "指数型", "ETF", "QDII", "equity", "hybrid", "index", "qdii"]
+        bond_types = ["债券型", "货币型", "bond", "money_market"]
         equity_value = sum(
             (h.get("current_value") or 0) for h in active
             if any(t in (h.get("fund_type") or h.get("fund_category") or "") for t in equity_types)
@@ -787,7 +825,7 @@ def _calc_stock_bond_ratio_sync() -> dict:
         bond_pct = 100 - stock_pct
 
         # 用沪深300估值判断建议股债比
-        val = get_latest_valuation("399300.SZ")
+        val = get_latest_valuation("399300.SZ", metric_type="市盈率", max_days=7)
         percentile = val.get("percentile", 50) if val else 50
 
         if percentile < 20:
@@ -859,9 +897,9 @@ def _calc_fear_greed_index_sync() -> dict:
             # 映射到0-100：-10%→0, 0%→50, +10%→100
             factors["market_trend"] = max(0, min(100, (pct_20d + 10) / 20 * 100))
         else:
-            factors["market_trend"] = 50
+            factors["market_trend"] = None
     except Exception:
-        factors["market_trend"] = 50
+        factors["market_trend"] = None
 
     # 2. 涨跌家数比（权重20%）
     try:
@@ -874,11 +912,11 @@ def _calc_fear_greed_index_sync() -> dict:
                 up_ratio = up / total * 100
                 factors["up_down_ratio"] = max(0, min(100, up_ratio))
             else:
-                factors["up_down_ratio"] = 50
+                factors["up_down_ratio"] = None
         else:
-            factors["up_down_ratio"] = 50
+            factors["up_down_ratio"] = None
     except Exception:
-        factors["up_down_ratio"] = 50
+        factors["up_down_ratio"] = None
 
     # 3. 北向资金（权重15%）
     try:
@@ -898,9 +936,9 @@ def _calc_fear_greed_index_sync() -> dict:
             # z-score 映射到 0-100: -2→0, 0→50, +2→100
             factors["north_flow"] = max(0, min(100, (z_score / 4 + 0.5) * 100))
         else:
-            factors["north_flow"] = 50
+            factors["north_flow"] = None
     except Exception:
-        factors["north_flow"] = 50
+        factors["north_flow"] = None
 
     # 4. 换手率（权重15%）
     try:
@@ -926,11 +964,11 @@ def _calc_fear_greed_index_sync() -> dict:
                 else:
                     factors["turnover"] = 90
             else:
-                factors["turnover"] = 50
+                factors["turnover"] = None
         else:
-            factors["turnover"] = 50
+            factors["turnover"] = None
     except Exception:
-        factors["turnover"] = 50
+        factors["turnover"] = None
 
     # 5. 融资余额变化（权重10%）
     try:
@@ -951,13 +989,13 @@ def _calc_fear_greed_index_sync() -> dict:
                     # 融资增加→贪婪，减少→恐惧
                     factors["margin"] = max(0, min(100, 50 + change_pct * 10))
                 else:
-                    factors["margin"] = 50
+                    factors["margin"] = None
             else:
-                factors["margin"] = 50
+                factors["margin"] = None
         else:
-            factors["margin"] = 50
+            factors["margin"] = None
     except Exception:
-        factors["margin"] = 50
+        factors["margin"] = None
 
     # 加权计算
     weights = {
@@ -968,8 +1006,14 @@ def _calc_fear_greed_index_sync() -> dict:
         "margin": 0.15,
     }
 
-    total_score = sum(factors.get(k, 50) * w for k, w in weights.items())
-    total_score = round(max(0, min(100, total_score)))
+    available = {key: value for key, value in factors.items() if value is not None}
+    missing = [key for key in weights if key not in available]
+    if missing:
+        return {"score": None, "zone": "数据不足", "advice": "市场数据覆盖不足，暂不能判断市场情绪",
+                "factors": factors, "error": "缺少市场情绪指标",
+                "data_quality": {"status": "insufficient", "reasons": missing,
+                                 "coverage": len(available) / len(weights)}}
+    total_score = round(max(0, min(100, sum(factors[key] * weight for key, weight in weights.items()))))
 
     if total_score <= 20:
         zone = "极度恐慌"
@@ -992,6 +1036,7 @@ def _calc_fear_greed_index_sync() -> dict:
         "zone": zone,
         "advice": advice,
         "factors": {k: round(v, 1) for k, v in factors.items()},
+        "data_quality": {"status": "complete", "coverage": 1, "reasons": []},
     }
 
     # === 恐贪指数增强：结合持仓给建议 ===
@@ -1103,12 +1148,9 @@ async def calc_fear_greed_index() -> dict:
         return result
     except Exception as e:
         logger.warning(f"[fear_greed] 计算失败，降级返回: {e}")
-        return cached or {
-            "score": 50,
-            "zone": "中性",
-            "advice": "数据暂时不可用",
-            "factors": {},
-        }
+        return {"score": None, "zone": "数据不足", "error": "市场数据暂时不可用",
+                "advice": "数据暂时不可用，无法判断市场情绪", "factors": {},
+                "data_quality": {"status": "insufficient", "reasons": ["市场数据查询失败"]}}
 
 
 # ============ API 端点 ============
@@ -1125,13 +1167,15 @@ async def calculate_health_score():
 
     async def _run():
         try:
-            result = await calc_health_score()
+            result = await calc_health_score(force=True)
             update_async_task(task_id, status="done", result=result)
         except Exception as e:
             logger.error(f"任务 {task_id} 失败: {e}", exc_info=True)
             update_async_task(task_id, status="error", error_msg=str(e))
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"task_id": task_id, "status": "running"}
 
 
@@ -1141,8 +1185,7 @@ async def get_today_score():
     today = datetime.now().strftime("%Y-%m-%d")
     score = get_health_score(today)
     if not score:
-        result = await calc_health_score()
-        return {"status": "ok", "result": result}
+        return {"status": "empty", "result": None}
     return {"status": "ok", "result": score}
 
 

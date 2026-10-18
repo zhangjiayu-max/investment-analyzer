@@ -6,7 +6,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 
 from db import (
     copy_fixed_expenses,
@@ -19,7 +19,16 @@ from db import (
     get_expense_trend,
     list_expenses,
     update_expense,
+    create_recurring_template,
+    get_recurring_template,
+    list_recurring_templates,
+    update_recurring_template,
+    delete_recurring_template,
+    list_recurring_bills,
+    pay_recurring_bill,
+    get_recurring_summary,
 )
+from db.expense import set_expense_month_complete
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +58,41 @@ class CopyFixedRequest(BaseModel):
     to_month: str
 
 
+class ExpenseMonthStatusRequest(BaseModel):
+    month: str
+    complete: StrictBool
+
+
+class RecurringTemplateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    category: str
+    amount: StrictFloat = Field(gt=0, allow_inf_nan=False)
+    frequency: str
+    start_month: str
+    end_month: str | None = None
+    due_day: StrictInt = Field(default=1, ge=1, le=31)
+    active: StrictBool = True
+    note: str = Field(default="", max_length=2000)
+
+
+class RecurringTemplateUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    category: str | None = None
+    amount: StrictFloat | None = Field(default=None, gt=0, allow_inf_nan=False)
+    frequency: str | None = None
+    start_month: str | None = None
+    end_month: str | None = None
+    due_day: StrictInt | None = Field(default=None, ge=1, le=31)
+    active: StrictBool | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class RecurringBillPayRequest(BaseModel):
+    month: str
+
+
 @router.get("/api/expense/categories")
 def api_categories():
     """支出分类常量（固定/浮动两组）。"""
@@ -76,6 +120,15 @@ def api_list(month: str | None = None):
     """按月查询明细；month 为空返回全部。"""
     try:
         return {"items": list_expenses(month=month)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/api/expense/month-status")
+def api_month_status(req: ExpenseMonthStatusRequest):
+    try:
+        set_expense_month_complete(req.month, req.complete)
+        return get_cashflow(month=req.month)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -123,6 +176,58 @@ def api_copy_fixed(req: CopyFixedRequest):
 
 
 @router.get("/api/expense/cashflow")
-def api_cashflow():
-    """收支视图：收入 - 支出 = 可投资结余。"""
-    return get_cashflow()
+def api_cashflow(month: str | None = None):
+    """统一现金流，包含待付账单、月均预留和应急储备上限。"""
+    try:
+        return get_cashflow(month=month)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/api/expense/templates")
+def api_recurring_templates():
+    return {"items": list_recurring_templates()}
+
+
+@router.post("/api/expense/templates")
+def api_create_recurring_template(req: RecurringTemplateCreateRequest):
+    try:
+        return {"ok": True, "id": create_recurring_template(**req.model_dump())}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/api/expense/templates/{template_id}")
+def api_update_recurring_template(template_id: int, req: RecurringTemplateUpdateRequest):
+    fields = req.model_dump(exclude_unset=True)
+    try:
+        if not update_recurring_template(template_id, **fields):
+            raise HTTPException(status_code=404, detail="模板不存在或无字段可更新")
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/api/expense/templates/{template_id}")
+def api_delete_recurring_template(template_id: int):
+    if not delete_recurring_template(template_id):
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return {"ok": True}
+
+
+@router.get("/api/expense/bills")
+def api_recurring_bills(month: str):
+    try:
+        return {"items": list_recurring_bills(month), "summary": get_recurring_summary(month)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/expense/templates/{template_id}/pay")
+def api_pay_recurring_bill(template_id: int, req: RecurringBillPayRequest):
+    if get_recurring_template(template_id) is None:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    try:
+        return {"ok": True, "expense_id": pay_recurring_bill(template_id, req.month)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

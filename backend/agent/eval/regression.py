@@ -54,7 +54,7 @@ def set_regression_result(agent_id: int, agent_type: str, result: dict):
     """存储回归测试结果（内存 + DB 持久化）。"""
     _regression_results[_result_key(agent_id, agent_type)] = result
     # 同步写入 DB（仅 completed/error 状态持久化，running 状态不写）
-    if result.get("status") in ("completed", "error"):
+    if result.get("status") in ("completed", "partial", "skipped", "error"):
         try:
             from db.eval import save_regression_result
             save_regression_result(agent_id, agent_type, result)
@@ -87,38 +87,25 @@ async def run_regression_tests(agent_id: int, agent_type: str = "conversation"):
                 "status": "completed",
                 "message": "该 Agent 没有关联的评测用例",
                 "cases": [],
-                "summary": {"total": 0, "improved": 0, "degraded": 0, "unchanged": 0},
+                "summary": {"total": 0, "scored":0,"improved": 0, "degraded": 0, "unchanged": 0,"new":0,"skipped":0,"error":0},
             })
             return
 
         results = []
-        improved = 0
-        degraded = 0
-        unchanged = 0
-
+        counts = {key:0 for key in ('improved','degraded','unchanged','new','skipped','error')}
         for case in cases:
             case_result = await _run_single_case(case, score_eval_result)
             results.append(case_result)
-
-            if case_result["status"] == "improved":
-                improved += 1
-            elif case_result["status"] == "degraded":
-                degraded += 1
-            else:
-                unchanged += 1
-
-        set_regression_result(agent_id, agent_type, {
-            "status": "completed",
-            "completed_at": time.time(),
-            "cases": results,
-            "summary": {
-                "total": len(cases),
-                "improved": improved,
-                "degraded": degraded,
-                "unchanged": unchanged,
-            },
+            counts[case_result['status']] += 1
+        scored = sum(counts[key] for key in ('improved','degraded','unchanged','new'))
+        state = ('error' if not scored and counts['error'] else 'skipped' if not scored
+                 else 'partial' if counts['error'] or counts['skipped'] else 'completed')
+        set_regression_result(agent_id,agent_type,{
+            'status':state,'completed_at':time.time(),'cases':results,
+            'summary':{'total':len(cases),'scored':scored,**counts},
+            'error':'没有成功评分的用例' if state=='error' else '',
         })
-        logger.info(f"回归测试完成: {len(cases)} 用例, {improved} 提升, {degraded} 退步, {unchanged} 持平")
+        logger.info('回归测试终结: %s %s',state,counts)
 
     except Exception as e:
         logger.error(f"回归测试失败: {e}")
@@ -141,6 +128,7 @@ async def _run_single_case(case: dict, score_fn) -> dict:
     old_avg = get_eval_case_avg_score(case_id)
 
     start = time.time()
+    run_id = None
     try:
         # 运行分析
         result_data = await _execute_analysis(case)
@@ -151,13 +139,19 @@ async def _run_single_case(case: dict, score_fn) -> dict:
             case_id=case_id,
             analysis_type=analysis_type,
             result_summary=result_data[:500],
-            result_data=result_data[:5000],
+            result_data=result_data,
+            case_snapshot=case,
             duration_ms=duration_ms,
         )
 
         # 评分
         expected_quality = case.get("expected_quality", "")
-        score, reason = await score_fn(expected_quality, result_data, analysis_type)
+        if not expected_quality.strip():
+            update_eval_run(run_id,score_status='skipped',score_reason='未设置质量标准')
+            return {'case_id':case_id,'case_name':case_name,'score':None,'reason':'未设置质量标准','old_avg':old_avg,'duration_ms':duration_ms,'status':'skipped'}
+        score, reason = await asyncio.to_thread(lambda: asyncio.run(score_fn(expected_quality, result_data, analysis_type)))
+        if score <= 0 or reason.startswith('评分失败'):
+            raise RuntimeError(reason)
         update_eval_run(run_id, score=score, score_reason=reason)
 
         # 判断变化
@@ -185,73 +179,23 @@ async def _run_single_case(case: dict, score_fn) -> dict:
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
+        from services.quality.eval_execution import UnsupportedEvaluation
+        skipped = isinstance(e,UnsupportedEvaluation)
+        if run_id:
+            update_eval_run(run_id,score_status='skipped' if skipped else 'error',score_reason=str(e))
         return {
             "case_id": case_id,
             "case_name": case_name,
-            "score": 0,
-            "reason": f"运行失败: {str(e)[:100]}",
+            "score": None,
+            "reason": str(e)[:150],
             "old_avg": round(old_avg, 2) if old_avg else None,
             "duration_ms": duration_ms,
-            "status": "error",
+            "status": "skipped" if skipped else "error",
         }
 
 
 async def _execute_analysis(case: dict) -> str:
-    """根据 analysis_type 执行对应的分析，返回结果文本。"""
-    import json
-    from fastapi.responses import StreamingResponse
-
-    input_params = json.loads(case.get("input_params", "{}"))
-    analysis_type = case.get("analysis_type", "ai")
-
-    if analysis_type == "panorama":
-        from routers.analysis.panorama import panorama_analysis_api
-        from models.portfolio import PanoramaAnalysisRequest
-        result = await panorama_analysis_api(PanoramaAnalysisRequest())
-        if isinstance(result, StreamingResponse):
-            return "流式输出（已在后台执行）"
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    elif analysis_type == "deep_dive":
-        from routers.analysis.deep_dive import fund_deep_dive_api
-        from models.portfolio import DeepDiveRequest
-        holding_id = input_params.get("holding_id")
-        result = await fund_deep_dive_api(holding_id, DeepDiveRequest())
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    elif analysis_type == "trade_review":
-        from routers.analysis.trade_review import trade_review_api
-        from models.portfolio import TradeReviewRequest
-        result = await trade_review_api(TradeReviewRequest(
-            start_date=input_params.get("start_date", ""),
-            end_date=input_params.get("end_date", ""),
-        ))
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    elif analysis_type == "what_if":
-        from routers.analysis.what_if import what_if_analysis_api
-        from models.portfolio import WhatIfRequest
-        result = await what_if_analysis_api(WhatIfRequest(
-            scenario=input_params.get("scenario", ""),
-            parameter=input_params.get("parameter", ""),
-        ))
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    elif analysis_type == "diversification_ai":
-        from routers.analysis.diversification import portfolio_diversification_ai_summary
-        result = await portfolio_diversification_ai_summary()
-        if isinstance(result, dict) and result.get("status") == "running":
-            result = await _await_portfolio_record_result(result["id"])
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    elif analysis_type == "ai":
-        from routers.analysis.portfolio_ai import portfolio_ai_analysis_api
-        from models.portfolio import PortfolioAiAnalysisRequest
-        question = input_params.get("question", "")
-        result = await portfolio_ai_analysis_api(PortfolioAiAnalysisRequest(question=question))
-        if isinstance(result, dict) and result.get("status") == "running":
-            result = await _await_portfolio_record_result(result["id"])
-        return json.dumps(result, ensure_ascii=False)[:5000]
-
-    else:
-        raise ValueError(f"不支持的分析类型: {analysis_type}")
+    """Agent 修改后回归也等待真实执行终态，与治理评测保持一致。"""
+    from services.quality.eval_execution import execute_case
+    result = await execute_case(case)
+    return json.dumps(result,ensure_ascii=False)

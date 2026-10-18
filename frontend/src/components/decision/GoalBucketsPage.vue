@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, reactive, ref } from 'vue'
 import {
   createGoalBucket,
   deleteGoalBucket,
@@ -7,11 +7,13 @@ import {
   updateGoalBucket,
   syncGoalBuckets,
   listDecisions,
-  getDecisionPrecheck,
+  getDecisionPrecheck, getExpenseCashflow,
 } from '../../api'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import Icon from '../ui/Icon.vue'
+import HouseholdCashflowCard from '../family/HouseholdCashflowCard.vue'
+import { shanghaiMonth } from '../../utils/expenseDates'
 
 const { showToast } = useToast()
 
@@ -36,6 +38,9 @@ const saving = ref(false)
 const deleting = ref(false)
 const items = ref([])
 const summary = ref({})
+const cashflow = ref(null)
+let loadSequence = 0
+let activatedBefore = false
 const editingId = ref(null)
 const confirmDelete = ref({ visible: false, item: null })
 
@@ -92,15 +97,21 @@ function resetForm() {
 }
 
 async function load() {
+  const sequence = ++loadSequence
   loading.value = true
+  cashflow.value = null
+  const cashflowRequest = getExpenseCashflow(shanghaiMonth()).then(({ data }) => { if (sequence === loadSequence) cashflow.value = data }).catch(() => { if (sequence === loadSequence) cashflow.value = null })
   try {
     const { data } = await listGoalBuckets()
+    if (sequence !== loadSequence) return
     items.value = data.items || []
     summary.value = data.summary || {}
   } catch (e) {
+    if (sequence !== loadSequence) return
     showToast('加载资金桶失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
-    loading.value = false
+    await cashflowRequest
+    if (sequence === loadSequence) loading.value = false
   }
 }
 
@@ -111,6 +122,7 @@ async function syncFromPortfolio() {
     const { data } = await syncGoalBuckets()
     items.value = data.buckets || items.value
     showToast(`已同步 ${data.synced || 0} 个资金桶`, 'success')
+    await load()
   } catch (e) {
     showToast('同步失败: ' + (e.response?.data?.detail || e.message), 'error')
   } finally {
@@ -189,6 +201,9 @@ async function doDelete() {
 }
 
 onMounted(load)
+onActivated(() => { if (activatedBefore) { load(); loadRecentDecisions() }; activatedBefore = true })
+onDeactivated(() => { ++loadSequence })
+onBeforeUnmount(() => { ++loadSequence })
 
 // ── 决策预检查展示 ──
 const recentDecisions = ref([])
@@ -237,6 +252,8 @@ onMounted(loadRecentDecisions)
         </button>
       </div>
     </header>
+
+    <HouseholdCashflowCard :cashflow="cashflow" />
 
     <section class="summary-strip">
       <div class="summary-cell">

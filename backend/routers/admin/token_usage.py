@@ -1,8 +1,10 @@
 """Token 用量 + 运行状态 + 性能监控路由 — /api/token-usage/*, /api/running-agents, /api/performance/*"""
 
 import time
+from datetime import date as Date
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 
 from db import (
     list_token_usage, count_token_usage, get_token_usage_summary,
@@ -16,7 +18,7 @@ router = APIRouter(tags=["token-usage"])
 
 
 @router.get("/api/token-usage")
-async def get_token_usage_api(days: int = 7):
+async def get_token_usage_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     """获取 Token 用量统计。"""
     conn = _get_conn()
     table_exists = conn.execute(
@@ -29,20 +31,20 @@ async def get_token_usage_api(days: int = 7):
     # 排除 embedding_index（本地 embedding 模型，非 LLM 调用），仅统计 LLM token
     row = conn.execute("""
         SELECT COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
-        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
-    """, (f"-{days} days",)).fetchone()
+        FROM token_usage WHERE created_at >= datetime('now','localtime','start of day', ?) AND COALESCE(caller,'') != 'embedding_index'
+    """, (f"-{days - 1} days",)).fetchone()
 
     daily = conn.execute("""
         SELECT date(created_at) as day, COUNT(*) as calls, SUM(total_tokens) as tokens
-        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
+        FROM token_usage WHERE created_at >= datetime('now','localtime','start of day', ?) AND COALESCE(caller,'') != 'embedding_index'
         GROUP BY date(created_at) ORDER BY day DESC
-    """, (f"-{days} days",)).fetchall()
+    """, (f"-{days - 1} days",)).fetchall()
 
     by_model = conn.execute("""
         SELECT model, COUNT(*) as calls, SUM(prompt_tokens) as prompt, SUM(completion_tokens) as completion, SUM(total_tokens) as total
-        FROM token_usage WHERE created_at >= datetime('now', ?) AND caller != 'embedding_index'
+        FROM token_usage WHERE created_at >= datetime('now','localtime','start of day', ?) AND COALESCE(caller,'') != 'embedding_index'
         GROUP BY model ORDER BY total DESC
-    """, (f"-{days} days",)).fetchall()
+    """, (f"-{days - 1} days",)).fetchall()
 
     conn.close()
     return {
@@ -58,7 +60,7 @@ async def get_token_usage_api(days: int = 7):
 
 
 @router.get("/api/token-usage/recent")
-async def get_token_usage_recent(page: int = 1, page_size: int = 20, days: int = 7, caller: str = None, model: str = None):
+async def get_token_usage_recent(page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=200)] = 20, days: Annotated[int, Query(ge=1, le=3650)] = 7, caller: str = None, model: str = None):
     """获取最近 LLM 调用记录（分页 + 筛选）。"""
     offset = (page - 1) * page_size
     records = list_token_usage(days=days, limit=page_size, offset=offset, caller=caller, model=model)
@@ -67,7 +69,7 @@ async def get_token_usage_recent(page: int = 1, page_size: int = 20, days: int =
 
 
 @router.get("/api/token-usage/summary")
-async def get_token_usage_summary_api(days: int = 30):
+async def get_token_usage_summary_api(days: Annotated[int, Query(ge=1, le=3650)] = 30):
     """获取 Token 用量汇总。"""
     return get_token_usage_summary(days=days)
 
@@ -79,13 +81,13 @@ async def get_token_budget_api():
 
 
 @router.get("/api/token-usage/by-caller")
-async def get_token_usage_by_caller_api(days: int = 7):
+async def get_token_usage_by_caller_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     """按 caller 分组统计。"""
     return {"items": get_token_usage_by_caller(days=days)}
 
 
 @router.get("/api/token-usage/daily")
-async def get_token_usage_daily_api(days: int = 30):
+async def get_token_usage_daily_api(days: Annotated[int, Query(ge=1, le=3650)] = 30):
     """按天获取 Token 用量趋势。"""
     return {"items": get_token_usage_daily(days=days)}
 
@@ -107,13 +109,13 @@ async def get_running_agents():
 
 
 @router.get("/api/performance/stats")
-async def get_performance_stats_api(days: int = 7):
+async def get_performance_stats_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     """获取 Agent 调用性能统计。"""
     return get_performance_stats(days=days)
 
 
 @router.get("/api/performance/by-agent")
-async def get_performance_by_agent_api(days: int = 7):
+async def get_performance_by_agent_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     """按 Agent 分组统计性能。"""
     return {"items": get_performance_by_agent(days=days)}
 
@@ -127,23 +129,26 @@ async def clear_token_usage():
         conn.commit()
         return {"ok": True, "message": "Token 用量数据已清空"}
     except Exception as e:
-        return {"ok": False, "message": str(e)}
+        conn.rollback()
+        raise HTTPException(500, 'Token 用量清空失败') from e
+    finally:
+        conn.close()
 
 
 @router.get("/api/token-usage/cost")
-async def get_token_cost_api(days: int = 7):
+async def get_token_cost_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     from db import get_cost_estimate
     return get_cost_estimate(days=days)
 
 
 @router.get("/api/token-usage/hourly")
-async def get_token_usage_hourly_api(date: str = None):
+async def get_token_usage_hourly_api(date: Date | None = None):
     from db import get_token_usage_hourly
-    return {"items": get_token_usage_hourly(date)}
+    return {"items": get_token_usage_hourly(date.isoformat() if date else None)}
 
 
 @router.get("/api/token-usage/by-model")
-async def get_token_usage_by_model_api(days: int = 7):
+async def get_token_usage_by_model_api(days: Annotated[int, Query(ge=1, le=3650)] = 7):
     from db import get_token_usage_by_model
     return {"items": get_token_usage_by_model(days=days)}
 
@@ -151,4 +156,4 @@ async def get_token_usage_by_model_api(days: int = 7):
 @router.get("/api/token-usage/trace/{trace_id}")
 async def get_trace_token_api(trace_id: str):
     from db import get_trace_tokens
-    return {"items": get_trace_tokens(trace_id)}
+    return get_trace_tokens(trace_id)

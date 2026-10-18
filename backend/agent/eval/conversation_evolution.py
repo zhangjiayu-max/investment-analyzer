@@ -62,7 +62,7 @@ async def process_conversation_evaluation(conversation_id: int, evaluation: dict
             fix_results = await _auto_root_cause_to_fix(conversation_id, evaluation)
             if fix_results:
                 results["auto_fixes"] = fix_results
-                logger.info(f"自动修复链路: {len(fix_results)} 个根因已创建 Shadow")
+                logger.info(f"自动修复链路: {len(fix_results)} 个根因已生成候选记录")
         except Exception as e:
             logger.error(f"自动根因修复链路失败: {e}")
 
@@ -423,7 +423,7 @@ async def _auto_root_cause_to_fix(conversation_id: int, evaluation: dict):
     """低分 → 根因 → 自动生成 prompt 修复 → 进入 Shadow。"""
     from infra.root_cause_analyzer import batch_analyze
     from db.eval import create_prompt_version, get_active_prompt
-    from infra.shadow_mode import create_shadow_config
+    from infra.shadow_mode import create_shadow_config, supports_shadow
     from db.portfolio import list_all_bad_cases
 
     # 1. 收集最近的 Bad Case
@@ -489,21 +489,30 @@ async def _auto_root_cause_to_fix(conversation_id: int, evaluation: dict):
                       f"{'; '.join(s[:50] for s in suggestions[:3])}",
         )
 
-        # 8. 创建 Shadow config（自动对比新旧版本）
-        shadow_id = create_shadow_config(
-            name=f"auto-fix: {agent_type} {root_cause}",
-            agent_type=agent_type,
-            current_prompt=active["prompt_content"],
-            candidate_prompt=improved_prompt,
-            traffic_pct=0.1,
-            prompt_version_id=version_id,
-        )
+        # 8. 未接入真实调用的专家只保留草稿，不中断其他根因的候选生成。
+        shadow_id = None
+        reason = "该 Agent 尚未接入 Shadow，候选仅保存为草稿，待人工评测"
+        if supports_shadow(agent_type):
+            try:
+                shadow_id = create_shadow_config(
+                    name=f"auto-fix: {agent_type} {root_cause}",
+                    agent_type=agent_type,
+                    current_prompt=active["prompt_content"],
+                    candidate_prompt=improved_prompt,
+                    traffic_pct=0.1,
+                    prompt_version_id=version_id,
+                )
+            except ValueError as exc:
+                reason = str(exc)
+                logger.warning("Shadow候选未创建，保留草稿 v%s: %s", version_id, exc)
 
         fixes_applied.append({
             "root_cause": root_cause,
             "case_count": len(results),
             "version_id": version_id,
             "shadow_id": shadow_id,
+            "status": "shadow_created" if shadow_id else "draft_only",
+            "reason": "" if shadow_id else reason,
         })
 
         logger.info(

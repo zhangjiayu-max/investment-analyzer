@@ -3037,6 +3037,13 @@ def _append_specialist_synthesis_context(llm_messages: list, specialist_results:
 
 def build_orchestrator_system_prompt() -> str:
     """从数据库动态生成 Orchestrator 的 system prompt。"""
+    from services.quality.eval_execution import get_prompt_override
+    override = get_prompt_override('orchestrator')
+    if override is not None:
+        return override
+    configured = get_config('agent.orchestrator_prompt', '')
+    if configured:
+        return configured
     specialists = load_specialist_agents()
     team_lines = []
     for key, info in specialists.items():

@@ -36,7 +36,21 @@ def _run_with_safe_timeout(fn, *args, timeout_s: float, timeout_msg: str = ""):
 _online_cache: dict[str, dict] = {}  # key: f"{index_code}:{metric_type}"
 
 
-def _normalize_percentile(val) -> float | None:
+def _mark_online_source_age(data: dict) -> dict:
+    """抓取时间不是估值日期；保留未知日期和真实数据年龄。"""
+    try:
+        source_day = date.fromisoformat(str(data.get('snapshot_date') or '')[:10])
+        age = (date.today() - source_day).days
+        if age < 0:
+            raise ValueError('future source date')
+    except (TypeError, ValueError):
+        data.update(days_old=None, is_expired=True, date_verified=False)
+    else:
+        data.update(days_old=age, is_expired=age > 3, date_verified=True)
+    return data
+
+
+def _normalize_percentile(val, *, fractional: bool = True) -> float | None:
     """P2-4.1: 统一百分位字段为 float 类型（0-100 区间）。
 
     历史数据存在多种格式，影响评分逻辑（如 dca_add 的估值维度比较）。
@@ -50,7 +64,8 @@ def _normalize_percentile(val) -> float | None:
         - 1 ≤ val ≤ 100 → 已是百分比，原样返回
         - val > 100 → 异常值，截断到 100
         - val < 0 → 异常值，截断到 0
-      - 字符串 "13.89%" / "13.89" → 13.89（按上述 float 规则处理）
+      - 带百分号的字符串已是百分制，0.5% → 0.5
+      - fractional=False 用于已归一化的数据库数值，避免读取时再次乘 100
       - 无法解析 → None
     """
     if val is None or val == "":
@@ -58,7 +73,7 @@ def _normalize_percentile(val) -> float | None:
 
     def _to_pct(v: float) -> float:
         """归一化到 0-100 区间。"""
-        if 0 < v < 1:
+        if fractional and 0 < v < 1:
             return round(v * 100, 4)
         if v > 100:
             return 100.0
@@ -70,6 +85,9 @@ def _normalize_percentile(val) -> float | None:
         return _to_pct(float(val))
     if isinstance(val, str):
         try:
+            if '%' in val:
+                # 显式百分号已给出单位，0.5% 就是 0.5，不能再乘 100。
+                return _normalize_percentile(float(val.replace('%', '').strip()), fractional=False)
             return _to_pct(float(val.replace('%', '').strip()))
         except ValueError:
             return None
@@ -129,13 +147,10 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
         data.get("background_color"),
         source_image, source_url, data.get("raw_json"),
     ))
-    if cur.lastrowid:
-        valuation_id = cur.lastrowid
-    else:
-        valuation_id = conn.execute(
-            "SELECT id FROM index_valuations WHERE index_code=? AND snapshot_date=?",
-            (data.get("index_code"), snapshot_date)
-        ).fetchone()[0]
+    valuation_id = conn.execute(
+        "SELECT id FROM index_valuations WHERE index_code=? AND snapshot_date=? AND metric_type=?",
+        (data.get("index_code"), snapshot_date, metric_type)
+    ).fetchone()[0]
     conn.commit()
     conn.close()
     return valuation_id
@@ -146,7 +161,8 @@ def _apply_percentile_normalize(row: dict) -> dict:
     if row is None:
         return None
     if "percentile" in row:
-        row["percentile"] = _normalize_percentile(row.get("percentile"))
+        # save_valuation 已将数值转换为百分制，读取不能再次放大低于 1% 的值。
+        row["percentile"] = _normalize_percentile(row.get("percentile"), fractional=False)
     return row
 
 
@@ -154,29 +170,41 @@ def _normalize_valuation_result(result: dict | None) -> dict | None:
     """确保所有估值查询出口使用 0-100 百分制。"""
     if result is None:
         return None
-    result["percentile"] = _normalize_percentile(result.get("percentile"))
+    fractional = result.get("data_source") not in ("manual", "螺丝钉")
+    result["percentile"] = _normalize_percentile(result.get("percentile"), fractional=fractional)
     if "fallback_pb_percentile" in result:
         result["fallback_pb_percentile"] = _normalize_percentile(
-            result.get("fallback_pb_percentile")
+            result.get("fallback_pb_percentile"), fractional=False
         )
     return result
+
+
+def _index_code_candidates(index_code: str) -> list[str]:
+    """查询兼容标准代码和历史带后缀代码。"""
+    base = normalize_index_code(index_code)
+    return list(dict.fromkeys([
+        index_code, base,
+        *[f"{base}{suffix}" for suffix in (".WI", ".CSI", ".SH", ".SZ", ".SI", ".GI", ".HI", ".MI", ".CNI")],
+    ]))
 
 
 def get_valuation_history(index_code: str, days: int = 30, metric_type: str = None) -> list[dict]:
     """查询某指数最近 N 天的估值历史。"""
     conn = _get_conn()
+    candidates = _index_code_candidates(index_code)
+    placeholders = ','.join('?' * len(candidates))
     if metric_type:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ? AND metric_type = ?
+            WHERE index_code IN ({placeholders}) AND metric_type = ?
             ORDER BY snapshot_date DESC LIMIT ?
-        """, (index_code, metric_type, days)).fetchall()
+        """, (*candidates, metric_type, days)).fetchall()
     else:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT * FROM index_valuations
-            WHERE index_code = ?
+            WHERE index_code IN ({placeholders})
             ORDER BY snapshot_date DESC LIMIT ?
-        """, (index_code, days)).fetchall()
+        """, (*candidates, days)).fetchall()
     conn.close()
     # P2-4.1: 读取容错，percentile 统一为 float
     return [_apply_percentile_normalize(dict(r)) for r in rows]
@@ -197,14 +225,7 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
     # 构造候选代码列表：原始code + 后缀变体（双向兼容）
     # - 传入不带后缀（H30217）→ 加带后缀变体（H30217.CSI/H30217.WI...）
     # - 传入带后缀（H30217.CSI）→ 加去后缀变体（H30217）
-    candidates = [index_code]
-    if '.' not in index_code:
-        for suffix in ['.WI', '.CSI', '.SH', '.SZ', '.SI']:
-            candidates.append(f'{index_code}{suffix}')
-    else:
-        base = index_code.split('.')[0]
-        if base and base not in candidates:
-            candidates.append(base)
+    candidates = _index_code_candidates(index_code)
     placeholders = ','.join('?' * len(candidates))
     if metric_type:
         row = conn.execute(f"""
@@ -922,14 +943,8 @@ def get_online_valuation_cached(index_code: str, metric_type: str, max_days: int
             return None
         row = dict(row)
         row["data_source"] = f"online_{row.get('source', 'unknown')}"
-        row["is_expired"] = False
         row["cached"] = True
-        if row.get("snapshot_date"):
-            try:
-                days_old = (datetime.now() - datetime.fromisoformat(row["snapshot_date"])).days
-                row["days_old"] = days_old
-            except Exception:
-                row["days_old"] = 0
+        _mark_online_source_age(row)
         return row
     except Exception as e:
         logger.warning(f"读取在线估值缓存失败: {e}")
@@ -1026,7 +1041,7 @@ def _online_fallback_uncached(index_code: str, metric_type: str, start_ts: datet
             online_data["source"] = "akshare"
             online_data["is_expired"] = False
             online_data["degraded"] = True
-            online_data["days_old"] = 0
+            _mark_online_source_age(online_data)
             online_data["_cached_at"] = datetime.now()
             _online_cache[cache_key] = online_data
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
@@ -1054,7 +1069,7 @@ def _online_fallback_uncached(index_code: str, metric_type: str, start_ts: datet
             online_data["source"] = "ttfund"
             online_data["is_expired"] = False
             online_data["degraded"] = True
-            online_data["days_old"] = 0
+            _mark_online_source_age(online_data)
             online_data["_cached_at"] = datetime.now()
             _online_cache[cache_key] = online_data
             result = {k: v for k, v in online_data.items() if k != "_cached_at"}
@@ -1116,7 +1131,7 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
-            "snapshot_date": result.get("date") or datetime.now().strftime("%Y-%m-%d"),
+            "snapshot_date": result.get("date"),
             "percentile_window": "近3年",  # P2-5: 标注百分位口径
             "dividend_yield": result.get("dividend_yield"),
         }
@@ -1197,7 +1212,7 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
-            "snapshot_date": quote.get("quote_time") or datetime.now().strftime("%Y-%m-%d"),
+            "snapshot_date": valuation.get("update_date") or valuation.get("date") or quote.get("quote_time"),
             "percentile_window": "近10年",
             "dividend_yield": valuation.get("dividend_yield"),
             "roe": valuation.get("roe"),
@@ -1269,7 +1284,8 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
     if cached:
         if (datetime.now() - cached["_cached_at"]).total_seconds() < cache_ttl:
             result = {k: v for k, v in cached.items() if k != "_cached_at"}
-            result["source"] = "akshare_online_cached"
+            result["cached"] = True
+            _mark_online_source_age(result)
             logger.debug(f"[valuation] 主动在线查询命中缓存 {index_code}")
             return result
         else:
@@ -1288,7 +1304,7 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
             online_data["data_source"] = "online"
             online_data["source"] = "akshare_online"
             online_data["is_expired"] = False
-            online_data["days_old"] = 0
+            _mark_online_source_age(online_data)
             # 统一 percentile 为 0-100 格式（akshare 返回 0-1 小数）
             pct_raw = online_data.get("percentile")
             if pct_raw is not None and pct_raw <= 1.0:
@@ -1314,7 +1330,7 @@ def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
             online_data["data_source"] = "online"
             online_data["source"] = "ttfund_online"
             online_data["is_expired"] = False
-            online_data["days_old"] = 0
+            _mark_online_source_age(online_data)
             # 天天基金 percentile 已在 _query_ttfund_valuation 转为 0-1，这里统一转 0-100
             pct_raw = online_data.get("percentile")
             if pct_raw is not None and pct_raw <= 1.0:

@@ -82,8 +82,11 @@ def get_llm_fallback_config() -> tuple[str, str, str] | None:
 
 
 def get_vision_config() -> tuple[str, str, str]:
-    """返回视觉模型配置 (api_key, base_url, model) — 统一 MIMO 多模态。"""
-    return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
+    """显式视觉配置优先，否则继承当前文本模型的整套凭据（含套餐）。"""
+    if os.getenv("VISION_API_KEY"):
+        return VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
+    api_key, base_url, model = get_llm_config()
+    return api_key, os.getenv("VISION_BASE_URL") or base_url, os.getenv("VISION_MODEL") or model
 
 
 def get_vision_config_db() -> tuple[str, str, str]:

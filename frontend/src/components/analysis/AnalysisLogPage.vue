@@ -1,6 +1,17 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { listAnalysisLogs, getAnalysisLogDetail, evaluateAnalysisLog, listAgentRuns, getAgentRunDetail } from '../../api'
+import { listAnalysisLogs, getAnalysisLogDetail, evaluateAnalysisLog, listAgentRuns, getAgentRunDetail, listAnalysisAgents } from '../../api'
+
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import { useAsyncTask } from '../../composables/useAsyncTask'
+const confirm = ref({visible:false,title:'',message:'',onConfirm:null})
+const analysisAgents = ref([])
+const { taskState: scoreTaskState, start: startScore, restoreFromServer: restoreScore } = useAsyncTask('analysis_log_eval')
+const scoreBusy = computed(() => ['running','submitting'].includes(scoreTaskState.value))
+function finishScore() { loadLogs(); if (detailData.value) viewDetail(detailData.value.id) }
+function confirmEval(log) {
+  confirm.value = {visible:true,title:'质量评分',message:`对「${log.agent_name || '该分析'}」执行质量评估？`,onConfirm:() => {confirm.value.visible=false;triggerEval(log.id)}}
+}
 
 // ── Tab 切换：独立分析 vs 对话协作 ──
 const activeTab = ref('independent')  // 'independent' | 'conversation'
@@ -80,13 +91,9 @@ async function viewDetail(logId) {
 
 // ── 手动评分 ──
 async function triggerEval(logId) {
-  try {
-    await evaluateAnalysisLog(logId)
-    alert('评估已提交，稍后刷新查看结果')
-    setTimeout(() => loadLogs(), 3000)
-  } catch (e) {
-    alert('评估失败: ' + (e.response?.data?.detail || e.message))
-  }
+  if (scoreBusy.value) return
+  await startScore(() => evaluateAnalysisLog(logId),{onComplete:finishScore,onError:finishScore})
+  await loadLogs()
 }
 
 // ── 辅助函数 ──
@@ -224,7 +231,11 @@ function switchTab(tab) {
   }
 }
 
-onMounted(() => loadLogs())
+onMounted(async () => {
+  await Promise.all([listAnalysisAgents().then(res => { analysisAgents.value=res.data.agents || [] }).catch(console.error),
+    restoreScore({onComplete:finishScore,onError:finishScore})])
+  loadLogs()
+})
 </script>
 
 <template>
@@ -272,17 +283,7 @@ onMounted(() => loadLogs())
       <div class="filter-bar">
         <select v-model="filterAgent" class="filter-select" @change="page = 1; loadLogs()">
           <option value="">全部 Agent</option>
-          <option value="1">市场日报分析师</option>
-          <option value="2">分散度分析师</option>
-          <option value="3">全景诊断分析师</option>
-          <option value="4">基金深度分析师</option>
-          <option value="5">交易复盘分析师</option>
-          <option value="6">情景推演分析师</option>
-          <option value="7">热点分析专家</option>
-          <option value="8">债券配置顾问</option>
-          <option value="9">指数深度分析师</option>
-          <option value="10">市场情报分析师</option>
-          <option value="11">增强策略分析师</option>
+          <option v-for="agent in analysisAgents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
         </select>
         <select v-model="filterType" class="filter-select" @change="page = 1; loadLogs()">
           <option value="">全部类型</option>
@@ -323,10 +324,10 @@ onMounted(() => loadLogs())
               <td class="col-duration">{{ formatDuration(log.duration_ms) }}</td>
               <td class="col-token">{{ log.token_usage || '-' }}</td>
               <td><span class="status-tag" :class="statusClass(log.status)">{{ statusLabel(log.status) }}</span></td>
-              <td><span class="score-tag" :class="scoreClass(log.eval_score)">{{ scoreLabel(log.eval_score) }}</span></td>
+              <td><span v-if="log.eval_status === 'error'" :title="log.eval_error">评分失败 </span><span class="score-tag" :class="scoreClass(log.eval_score)">{{ scoreLabel(log.eval_score) }}</span></td>
               <td class="col-actions" @click.stop>
                 <button class="op-btn" @click="viewDetail(log.id)">详情</button>
-                <button v-if="log.status === 'done' && !log.has_eval" class="op-btn op-eval" @click="triggerEval(log.id)">评分</button>
+                <button v-if="log.status === 'done' && !log.has_eval" class="op-btn op-eval" @click="confirmEval(log)" :disabled="scoreBusy">{{ log.eval_status === 'error' ? '重试评分' : log.eval_status === 'running' ? '评分中' : '评分' }}</button>
               </td>
             </tr>
           </tbody>
@@ -556,6 +557,7 @@ onMounted(() => loadLogs())
       </Transition>
     </Teleport>
   </div>
+  <ConfirmDialog :visible="confirm.visible" :title="confirm.title" :message="confirm.message" @confirm="confirm.onConfirm?.()" @cancel="confirm.visible=false" />
 </template>
 
 <style scoped>

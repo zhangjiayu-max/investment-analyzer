@@ -1,6 +1,10 @@
 """系统配置 CRUD — system_config 表操作"""
 
 import os
+import hashlib
+import json
+import math
+import re
 import time as _time
 from db._conn import _get_conn
 
@@ -8,6 +12,9 @@ from db._conn import _get_conn
 _CONFIG_CACHE: dict[str, tuple[str, float]] = {}
 _CONFIG_CACHE_DB = None
 _CONFIG_CACHE_TTL = 60.0  # 秒
+
+# 仅识别历史版本误写入的固定凭据，不影响用户自行设置的密钥。
+_LEGACY_VISION_KEY_SHA256 = "829feccf24cee732ebaf95bee1e6880551673fa3a81f14a83f04c0d4ec09069a"
 
 # 默认配置（首次启动时写入）
 DEFAULT_CONFIGS = [
@@ -62,7 +69,7 @@ DEFAULT_CONFIGS = [
     ('llm.temperature_fusion', '0.2', '估值融合温度', 'llm'),
     ('llm.temperature_tool', '0.2', '工具调用温度', 'llm'),
     ('llm.temperature_rewrite', '0.1', '查询改写温度', 'llm'),
-    ('llm.timeout_default', '120', 'LLM调用默认超时（秒）', 'llm'),
+    ('llm.timeout_default', '120', 'LLM调用默认超时（秒，上限180秒）', 'llm'),
     ('llm.timeout_vision', '120', '视觉模型调用超时（秒）', 'llm'),
     ('llm.timeout_short', '15', '短任务超时（秒，如新闻摘要）', 'llm'),
 
@@ -215,10 +222,10 @@ DEFAULT_CONFIGS = [
     ('validator.max_repair_attempts', '1', 'Validator 最大修复次数', 'validator'),
     ('validator.llm_check_enabled', 'false', '是否启用 LLM 质检（默认关闭以节约成本）', 'validator'),
 
-    # 视觉模型配置（2026-10-14 起统一 mimo-v2.6-pro，运行时可改 vision.mimo.* 切换端点/key）
-    ('vision.mimo.api_key', 'tp-cztoehx9kc6uqpwm53adzok8agg84zfokfje362cqmfjzprg', 'MiMo API Key', 'vision'),
-    ('vision.mimo.base_url', 'https://token-plan-cn.xiaomimimo.com/v1', 'MiMo Base URL', 'vision'),
-    ('vision.mimo.model', 'mimo-v2.6-pro', 'MiMo 视觉模型名', 'vision'),
+    # 留空时继承环境中的当前 MiMo 配置，避免预置凭据覆盖用户配置。
+    ('vision.mimo.api_key', '', '视觉 API Key（留空继承环境）', 'vision'),
+    ('vision.mimo.base_url', '', '视觉 Base URL（显式配置需完整填写）', 'vision'),
+    ('vision.mimo.model', '', '视觉模型名（显式配置需完整填写）', 'vision'),
 
     # 专家调度上限
     ('max_specialists.simple', '1', '简单任务最大专家数', 'orchestrator'),
@@ -683,11 +690,21 @@ def init_default_configs(conn=None):
     own_conn = conn is None
     if own_conn:
         conn = _get_conn()
+    legacy = conn.execute("SELECT value FROM system_config WHERE key='vision.mimo.api_key'").fetchone()
+    if legacy and hashlib.sha256((legacy[0] or '').encode()).hexdigest() == _LEGACY_VISION_KEY_SHA256:
+        conn.execute("UPDATE system_config SET value='', updated_at=datetime('now','localtime') WHERE key LIKE 'vision.mimo.%'")
+        _CONFIG_CACHE.clear()
     for key, value, description, category in DEFAULT_CONFIGS:
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO system_config (key, value, description, category) VALUES (?, ?, ?, ?)",
                 (key, value, description, category)
+            )
+            # 修复旧 INSERT OR REPLACE 丢掉的默认元数据，保留用户当前值。
+            conn.execute(
+                "UPDATE system_config SET description=?, category=? "
+                "WHERE key=? AND COALESCE(description, '')='' AND category='general'",
+                (description, category, key),
             )
         except Exception:
             pass
@@ -776,7 +793,8 @@ def list_configs(category: str = None) -> list[dict]:
                 "SELECT key, value, description, category, updated_at FROM system_config ORDER BY category, key"
             ).fetchall()
         return [
-            {"key": r[0], "value": r[1], "description": r[2], "category": r[3], "updated_at": r[4]}
+            {"key": r[0], "value": r[1], "description": r[2], "category": r[3], "updated_at": r[4],
+             **config_schema(r[0])}
             for r in rows
         ]
     finally:
@@ -786,14 +804,20 @@ def list_configs(category: str = None) -> list[dict]:
 def update_config(key: str, value: str) -> bool:
     """更新配置值。返回是否成功。
 
-    F-4+（2026-07-23）：改为 INSERT OR REPLACE，支持新增 key（如降权权重）。
+    支持扩展 key（如降权权重）；已有记录只更新值，保留分类和说明。
     """
     conn = _get_conn()
     try:
+        default = next((c for c in DEFAULT_CONFIGS if c[0] == key), (key, '', '', 'general'))
         cursor = conn.execute(
-            "INSERT OR REPLACE INTO system_config (key, value, updated_at) "
-            "VALUES (?, ?, datetime('now','localtime'))",
-            (key, value)
+            "INSERT INTO system_config (key, value, description, category, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now','localtime')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, "
+            "category=CASE WHEN COALESCE(system_config.description,'')='' AND system_config.category='general' "
+            "THEN excluded.category ELSE system_config.category END, "
+            "description=CASE WHEN COALESCE(system_config.description,'')='' "
+            "THEN excluded.description ELSE system_config.description END",
+            (key, value, default[2], default[3])
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -805,10 +829,103 @@ def update_config(key: str, value: str) -> bool:
 
 def reset_configs() -> int:
     """重置所有配置为默认值。返回重置数量。"""
-    count = 0
-    for key, value, _, _ in DEFAULT_CONFIGS:
-        if update_config(key, value):
-            count += 1
-    # 清除全部缓存
-    _CONFIG_CACHE.clear()
-    return count
+    conn = _get_conn()
+    try:
+        conn.executemany(
+            "INSERT INTO system_config(key,value,description,category,updated_at) "
+            "VALUES (?,?,?,?,datetime('now','localtime')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, description=excluded.description, "
+            "category=excluded.category, updated_at=excluded.updated_at", DEFAULT_CONFIGS,
+        )
+        conn.commit()
+        return len(DEFAULT_CONFIGS)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+        _CONFIG_CACHE.clear()
+
+
+# 以下参数由业务 get_config_float 消费；整数形式的默认值不代表只允许整数。
+_FLOAT_CONFIG_KEYS = frozenset({
+    'llm.timeout_default',
+    'opportunity.backtest.slippage_bps',
+    'opportunity.valchannel.percentile_threshold', 'opportunity.valchannel.min_score',
+    'opportunity.regime.bear_pct', 'opportunity.regime.bull_pct',
+    'smartadd.exitloop.tp_first_pct', 'smartadd.exitloop.tp_second_pct',
+    'smartadd.risk.kelly_cap_pct',
+    'alerts.loss_plus_undervalued_loss_threshold',
+    'alerts.loss_plus_undervalued_valuation_threshold',
+    'smart_add.base_dca_pct', 'smart_add.max_single_position_pct',
+    'daily_advice.base_dca_amount', 'daily_advice.dca_drop_step_pct',
+    'daily_advice.min_cash_pct', 'daily_advice.max_cash_use_pct_per_signal',
+    'daily_advice.default_single_position_pct',
+    'daily_advice.add_valuation_max_percentile', 'daily_advice.reduce_valuation_min_percentile',
+    'decision_ledger.hit_excess_pct', 'decision_ledger.hit_abs_pct',
+    'eval.low_score_threshold', 'eval.recovery_high_score',
+    'watchlist.default_target_profit_pct', 'watchlist.default_stop_loss_pct',
+})
+
+
+def config_schema(key: str) -> dict:
+    """默认值提供基础类型，浮点业务参数显式声明；扩展键保持字符串兼容。"""
+    default = next((c[1] for c in DEFAULT_CONFIGS if c[0] == key), '')
+    schema = {'value_type': 'string'}
+    if default in ('true', 'false'):
+        return {'value_type': 'boolean', 'choices': ['true', 'false']}
+    if default.startswith(('{', '[')):
+        return {'value_type': 'json'}
+    if re.fullmatch(r'\d{2}:\d{2}', default):
+        return {'value_type': 'time'}
+    choices = {'opportunity.backtest.fee_mode': ['realistic', 'relaxed']}.get(key)
+    if choices:
+        return {'value_type': 'enum', 'choices': choices}
+    if re.fullmatch(r'-?\d+(\.\d+)?', default):
+        schema = {'value_type': 'number', 'step': 'any' if key in _FLOAT_CONFIG_KEYS or '.' in default else 1}
+        if key.startswith('llm.temperature_'):
+            schema.update(min=0, max=2, step='any')
+        elif key.startswith(('llm.timeout_', 'llm.max_tokens_', 'truncation.')):
+            schema.update(min=1)
+            if key == 'llm.timeout_default':
+                schema.update(max=180)
+        elif key.startswith('valuation.') and ('percentile' in key or 'extreme_' in key):
+            schema.update(min=0, max=100)
+    return schema
+
+
+def validate_config_value(key: str, value: str) -> None:
+    """拒绝错误类型和确定的范围/关系错误，避免保存成功后静默回退。"""
+    schema = config_schema(key)
+    kind = schema['value_type']
+    if kind in ('boolean', 'enum') and value not in schema['choices']:
+        raise ValueError(f"{key} 必须为 {' / '.join(schema['choices'])}")
+    if kind == 'json':
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError(f'{key} 必须为有效 JSON') from None
+        default = next(c[1] for c in DEFAULT_CONFIGS if c[0] == key)
+        if not isinstance(parsed, type(json.loads(default))):
+            raise ValueError(f'{key} 的 JSON 结构类型与默认值不一致')
+    if kind == 'time' and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value):
+        raise ValueError(f'{key} 必须为 HH:MM 时间')
+    if kind == 'number':
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError(f'{key} 必须为数字') from None
+        if not math.isfinite(number) or (schema['step'] == 1 and not re.fullmatch(r'[+-]?\d+', value.strip())):
+            raise ValueError(f'{key} 必须为有限的' + ('整数' if schema['step'] == 1 else '数字'))
+        if ('min' in schema and number < schema['min']) or ('max' in schema and number > schema['max']):
+            raise ValueError(f"{key} 超出范围 {schema.get('min', '-∞')} 至 {schema.get('max', '∞')}")
+        groups = [
+            ['valuation.extreme_undervalued', 'valuation.undervalued_percentile',
+             'valuation.overvalued_percentile', 'valuation.extreme_overvalued'],
+            ['bond.temp_cold', 'bond.temp_cool', 'bond.temp_warm'],
+        ]
+        for group in groups:
+            if key in group:
+                values = [number if k == key else get_config_float(k) for k in group]
+                if any(a >= b for a, b in zip(values, values[1:])):
+                    raise ValueError('阈值必须依次递增：' + ' < '.join(group))

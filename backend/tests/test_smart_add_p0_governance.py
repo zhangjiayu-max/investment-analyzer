@@ -10,17 +10,13 @@ def test_percentile_contract_and_best_valuation_output(monkeypatch):
     assert valuations._normalize_percentile(1) == 1
     assert valuations._normalize_percentile("84.71%") == 84.71
 
-    monkeypatch.setattr(
-        valuations,
-        "get_latest_valuation",
-        lambda *args, **kwargs: {
-            "index_code": "TEST",
-            "index_name": "测试指数",
-            "current_value": 10,
-            "percentile": 0.4274,
-            "snapshot_date": "2026-08-04",
-        },
-    )
+    # 输入小数在保存边界转为百分制；用真实读取避免模拟不可能的二次归一化输入。
+    valuations.save_valuation({
+        "index_code": "TEST",
+        "index_name": "测试指数",
+        "current_value": 10,
+        "percentile": 0.4274,
+    })
     monkeypatch.setattr(valuations, "_log_valuation_query", lambda *args, **kwargs: None)
 
     result = valuations.get_best_valuation("TEST", enable_online=False)

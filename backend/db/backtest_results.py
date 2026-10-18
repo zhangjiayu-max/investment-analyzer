@@ -33,6 +33,9 @@ def init_backtest_tables(conn):
     # P3：新增 volatility + benchmark_nav_curve_json 列
     _add_column_if_not_exists(conn, "backtest_results", "volatility", "REAL DEFAULT 0")
     _add_column_if_not_exists(conn, "backtest_results", "benchmark_nav_curve_json", "TEXT DEFAULT '[]'")
+    _add_column_if_not_exists(conn, "backtest_results", "unit_nav_curve_json", "TEXT DEFAULT '[]'")
+    _add_column_if_not_exists(conn, "backtest_results", "investor_return", "REAL")
+    _add_column_if_not_exists(conn, "backtest_results", "return_method", "TEXT DEFAULT 'legacy_asset_curve'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_user ON backtest_results(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_strategy ON backtest_results(strategy)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bt_created ON backtest_results(created_at)")
@@ -63,12 +66,12 @@ def save_backtest(
                 (user_id, name, target_code, target_type, strategy, params_json,
                  initial_cash, final_value, total_return, annual_return,
                  max_drawdown, sharpe_ratio, volatility, nav_curve_json,
-                 benchmark_return, benchmark_nav_curve_json, months, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 benchmark_return, benchmark_nav_curve_json, months, notes, unit_nav_curve_json, investor_return, return_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, name, target_code, target_type, strategy,
             json.dumps(params, ensure_ascii=False),
-            result.get("total_invested", 0),
+            result.get("initial_cash", result.get("total_invested", 0)),
             result.get("final_value", 0),
             result.get("total_return", 0),
             result.get("annual_return", 0),
@@ -80,6 +83,9 @@ def save_backtest(
             json.dumps(benchmark.get("nav_curve", []) if benchmark else [], ensure_ascii=False),
             months,
             notes,
+            json.dumps(result.get("unit_nav_curve", []), ensure_ascii=False),
+            result.get("investor_return"),
+            result.get("return_method", "legacy_asset_curve"),
         ))
         conn.commit()
         return cursor.lastrowid
@@ -95,7 +101,7 @@ def list_backtests(limit: int = 20, user_id: str = "default") -> list[dict]:
             SELECT id, name, target_code, target_type, strategy,
                    initial_cash, final_value, total_return, annual_return,
                    max_drawdown, sharpe_ratio, volatility, benchmark_return, months,
-                   decision_id, notes, created_at
+                   decision_id, notes, created_at, investor_return, return_method
             FROM backtest_results
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -119,6 +125,7 @@ def get_backtest(backtest_id: int) -> dict | None:
         item["params_json"] = json.loads(item.get("params_json") or "{}")
         item["nav_curve_json"] = json.loads(item.get("nav_curve_json") or "[]")
         item["benchmark_nav_curve_json"] = json.loads(item.get("benchmark_nav_curve_json") or "[]")
+        item["unit_nav_curve"] = json.loads(item.get("unit_nav_curve_json") or "[]")
         return item
     finally:
         conn.close()

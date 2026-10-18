@@ -124,24 +124,69 @@ def get_data_health():
             "stale_days": _days_since(watchlist["latest"]),
         }
 
+        # 持仓覆盖以每个持仓为分母，避免一条新行情掩盖其余缺失。
+        holding_rows = conn.execute("SELECT id, fund_code, fund_name, price_updated_at FROM portfolio_holdings").fetchall()
+        health["holdings"]["coverage"] = _coverage([
+            {"key": str(r["id"]), "label": r["fund_name"] or r["fund_code"], "latest": r["price_updated_at"]}
+            for r in holding_rows
+        ])
     finally:
         conn.close()
 
     from db.valuations import list_index_freshness
-    health['valuations']['coverage'] = list_index_freshness()
+    index_rows = list_index_freshness()
+    # 本地配置的指数集合包含尚无估值的标的。
+    conn = _get_conn()
+    try:
+        expected = conn.execute("SELECT index_code, index_name FROM index_code_mapping").fetchall()
+    finally:
+        conn.close()
+    from db.valuations import normalize_index_code
+    indexed = {normalize_index_code(r['index_code']): r for r in index_rows}
+    for row in expected:
+        indexed.setdefault(normalize_index_code(row['index_code']), dict(row))
+    health['valuations']['coverage'] = _coverage([
+        {'key': r['index_code'], 'label': r['index_name'], 'latest': r.get('latest_date')}
+        for r in indexed.values()
+    ])
     health['knowledge']['freshness_kind'] = 'reference_content'
     health['bond_market']['scope'] = 'local_cache_only'
+    reference = {'articles', 'knowledge', 'conversations', 'decisions', 'author_articles', 'recommendations', 'watchlist'}
+    for key, item in health.items():
+        item['freshness_kind'] = 'reference_content' if key in reference else 'market_data'
+        if not item['count']:
+            item['status'] = 'empty'
+        elif 'coverage' in item:
+            cov = item['coverage']
+            item['status'] = 'fresh' if cov['fresh'] == cov['expected'] else 'partial' if cov['fresh'] else 'stale'
+        elif item['stale_days'] is None:
+            item['status'] = 'invalid_date'
+        elif key in reference:
+            item['status'] = 'available'
+        else:
+            item['status'] = 'fresh' if item['stale_days'] < 3 else 'aging' if item['stale_days'] < 7 else 'stale'
     return {"health": health}
 
 
 def _days_since(date_str):
-    """计算距今天数，返回整数；无法解析返回 999"""
+    """计算距今天数，返回整数；缺失或无法解析返回 None"""
     if not date_str:
-        return 999
+        return None
     from datetime import datetime
 
     try:
         d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
-        return (datetime.now() - d).days
+        return max(0, (datetime.now() - d).days)
     except Exception:
-        return 999
+        return None
+
+
+def _coverage(rows):
+    counts = {'expected': len(rows), 'fresh': 0, 'stale': 0, 'missing': 0, 'invalid': 0}
+    details = []
+    for row in rows:
+        days = _days_since(row['latest'])
+        status = 'missing' if not row['latest'] else 'invalid' if days is None else 'fresh' if days < 3 else 'stale'
+        counts[status] += 1
+        details.append({**row, 'stale_days': days, 'status': status})
+    return {**counts, 'ratio': counts['fresh'] / len(rows) if rows else None, 'items': details}

@@ -1,7 +1,7 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import {
-  getHealthV2Dashboard,
+  getHealthV2Dashboard, getExpenseCashflow,
   recalculateHealthV2,
   getHealthV2Profile,
   updateHealthV2Profile,
@@ -12,6 +12,8 @@ import {
 import { useToast } from '../../composables/useToast'
 import EmptyState from '../ui/EmptyState.vue'
 import Icon from '../ui/Icon.vue'
+import HouseholdCashflowCard from '../family/HouseholdCashflowCard.vue'
+import { shanghaiMonth } from '../../utils/expenseDates'
 
 const { showToast } = useToast()
 
@@ -26,6 +28,11 @@ async function getEcharts() {
 const loading = ref(false)
 const recalculating = ref(false)
 const dashboard = ref(null)
+const dashboardFailed = ref(false)
+const householdCashflow = ref(null)
+let cashflowSequence = 0
+let dashboardSequence = 0
+let activatedBefore = false
 const profile = ref(null)
 const history = ref([])
 const targetPotsDefaults = ref(null)
@@ -77,16 +84,32 @@ const netWorthData = computed(() => {
   ]
 })
 
+// 家庭收支独立读取实时数据，避免使用投资健康分缓存中的旧账单。
+async function loadHouseholdCashflow() {
+  const sequence = ++cashflowSequence
+  householdCashflow.value = null
+  try {
+    const { data } = await getExpenseCashflow(shanghaiMonth())
+    if (sequence === cashflowSequence) householdCashflow.value = data
+  } catch (_) { if (sequence === cashflowSequence) householdCashflow.value = null }
+}
 // ── 加载数据 ──
 async function loadDashboard(forceRefresh = false) {
+  const sequence = ++dashboardSequence
   loading.value = true
+  dashboard.value = null
+  dashboardFailed.value = false
   try {
     const { data } = await getHealthV2Dashboard(forceRefresh)
+    if (sequence !== dashboardSequence) return
     dashboard.value = data.result || data
+    nextTick(() => renderHistoryChart())
   } catch (e) {
+    if (sequence !== dashboardSequence) return
+    dashboardFailed.value = true
     showToast('加载诊断数据失败: ' + e.message, 'error')
   } finally {
-    loading.value = false
+    if (sequence === dashboardSequence) loading.value = false
   }
 }
 
@@ -118,7 +141,7 @@ async function loadDefaults() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadDashboard(), loadProfile(), loadHistory()])
+  await Promise.all([loadDashboard(), loadProfile(), loadHistory(), loadHouseholdCashflow()])
 }
 
 async function handleRecalculate() {
@@ -126,7 +149,7 @@ async function handleRecalculate() {
   try {
     const { data } = await recalculateHealthV2()
     dashboard.value = data.result || data
-    await loadHistory()
+    await Promise.all([loadHistory(), loadHouseholdCashflow()])
     showToast('健康度已重新计算', 'success')
   } catch (e) {
     showToast('重新计算失败: ' + e.message, 'error')
@@ -163,7 +186,7 @@ async function saveProfile() {
     profile.value = data.result || data
     showProfileDrawer.value = false
     showToast('用户画像已保存', 'success')
-    await loadDashboard(true)
+    await Promise.all([loadDashboard(true), loadHouseholdCashflow()])
   } catch (e) {
     showToast('保存失败: ' + e.message, 'error')
   }
@@ -233,9 +256,15 @@ onMounted(() => {
 // KeepAlive 切回时 resize 图表（容器尺寸可能已变化）
 onActivated(() => {
   historyChart?.resize()
+  if (activatedBefore) refreshAll()
+  activatedBefore = true
 })
 
+onDeactivated(() => { ++cashflowSequence; ++dashboardSequence })
+
 onUnmounted(() => {
+  ++dashboardSequence
+  ++cashflowSequence
   window.removeEventListener('resize', resizeCharts)
   if (historyChart) historyChart.dispose()
 })
@@ -249,8 +278,8 @@ watch(showProfileDrawer, (v) => {
   <div class="health-v2-page bg-mesh">
     <div class="page-header">
       <div>
-        <h2 class="editorial-title-lg">全账户资产健康度诊断</h2>
-        <p class="page-desc">资产全景 · 健康评分 · 四笔钱偏离 · 今日行动</p>
+        <h2 class="editorial-title-lg">家庭财务与投资健康诊断</h2>
+        <p class="page-desc">家庭收支 · 投资健康分 · 四笔钱偏离 · 今日行动</p>
       </div>
       <div class="flex items-center gap-3">
         <button class="btn-secondary" @click="openProfileDrawer">
@@ -262,6 +291,8 @@ watch(showProfileDrawer, (v) => {
       </div>
     </div>
 
+    <HouseholdCashflowCard title="家庭收支诊断" :cashflow="householdCashflow" class="mb-5" />
+
     <div v-if="loading && !dashboard" class="flex justify-center py-20">
       <div class="spinner spinner-lg"></div>
     </div>
@@ -270,9 +301,10 @@ watch(showProfileDrawer, (v) => {
       <!-- 资产全景 -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
         <div class="card metric-card">
-          <div class="metric-label">净资产</div>
-          <div class="metric-value font-jet-lg">¥{{ (assetOverview.net_worth || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 }) }}</div>
-          <div class="metric-delta" :class="assetOverview.profit_rate >= 0 ? 'text-profit' : 'text-loss'">
+          <div class="metric-label">{{ assetOverview.net_worth == null ? '已登记资产' : '净资产' }}</div>
+          <div class="metric-value font-jet-lg">¥{{ (assetOverview.net_worth ?? assetOverview.total_assets ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 }) }}</div>
+          <div v-if="assetOverview.net_worth == null" class="metric-delta text-secondary">负债余额未登记，净资产待确认</div>
+          <div v-else class="metric-delta" :class="assetOverview.profit_rate >= 0 ? 'text-profit' : 'text-loss'">
             盈亏 {{ (assetOverview.profit_rate || 0) >= 0 ? '+' : '' }}{{ ((assetOverview.profit_rate || 0) * 100).toFixed(2) }}%
           </div>
         </div>
@@ -297,7 +329,7 @@ watch(showProfileDrawer, (v) => {
         <!-- 健康分 -->
         <div class="card editorial-card lg:col-span-1">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title">健康分 2.0</h3>
+            <h3 class="section-title">投资健康分 2.0</h3>
             <span v-if="scoreChange !== 0" class="change-badge" :class="scoreChange >= 0 ? 'up' : 'down'">
               {{ scoreChange >= 0 ? '↑' : '↓' }} {{ Math.abs(scoreChange) }}
             </span>
@@ -396,14 +428,14 @@ watch(showProfileDrawer, (v) => {
       <!-- 历史趋势 -->
       <div class="card editorial-card">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="section-title">健康分历史趋势</h3>
+          <h3 class="section-title">投资健康分历史趋势</h3>
         </div>
         <div ref="historyChartRef" class="history-chart"></div>
         <EmptyState v-if="!history.length" icon="chart" title="暂无历史数据" desc="保存更多快照后将显示趋势图" />
       </div>
     </template>
 
-    <EmptyState v-else icon="heart-pulse" title="暂无诊断数据" desc="点击上方按钮开始全账户资产健康度诊断" />
+    <EmptyState v-else icon="heart-pulse" :title="dashboardFailed ? '诊断暂不可用' : '暂无诊断数据'" :desc="dashboardFailed ? '数据刷新失败，请稍后重新诊断；过期投资行动已隐藏。' : '点击上方按钮开始家庭财务与投资健康诊断'" />
 
     <!-- 投资画像抽屉 -->
     <Teleport to="body">

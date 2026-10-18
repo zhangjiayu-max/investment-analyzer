@@ -26,6 +26,17 @@ router = APIRouter(tags=["analysis-portfolio-ai"])
 
 _background_tasks: set = set()
 
+DEFAULT_AI_ANALYSIS_PROMPT = """你是一位专业的投资组合分析师。请根据以下持仓数据和专业分析工具的输出，给出全面的投资组合分析报告。
+
+分析要求：
+1. **资产配置分析** — 持仓的基金类型分布、行业分布是否合理
+2. **风险评价** — 组合的集中度风险、相关性风险、回撤风险
+3. **各基金表现** — 逐个评价每只基金的表现（收益、波动、性价比）
+4. **改进建议** — 具体的调仓建议、定投策略、风险控制措施
+5. **市场环境** — 结合当前市场行情和热点，给出背景判断
+
+输出格式：使用 Markdown 标题层级，结论先行，数据支撑，内容专业易懂。"""
+
 
 def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
     try:
@@ -42,23 +53,16 @@ async def portfolio_ai_analysis_api(req: PortfolioAiAnalysisRequest):
     if not holdings:
         raise HTTPException(400, "暂无持仓数据")
     user_question = req.question or "请全面分析我的持仓情况，包括资产配置合理性、风险分散度、各基金表现，以及改进建议。"
-    # 幂等保护:已有 running 任务时直接返回该 task_id,不重复触发
-    existing = get_running_async_task("portfolio_ai")
-    if existing:
-        return {"task_id": existing["id"], "status": "running", "reused": True}
-    record_id = create_portfolio_analysis_record(
-        analysis_type="ai",
-        summary=f"AI持仓分析 · {len(holdings)}只基金",
-        input_data=json.dumps({
-            "holdings": [{k: h.get(k) for k in ("fund_code", "fund_name", "shares", "cost_price", "current_price", "profit_loss")} for h in holdings],
-            "question": user_question,
-        }, ensure_ascii=False),
-        result_data="",
-        token_usage=0,
-        status="running",
-    )
-    # 创建 async_task 记录用于通用状态查询
-    task_id = create_async_task("portfolio_ai", caller="portfolio_ai")
+    from db.async_tasks import start_analysis_task
+    from services.quality.eval_execution import get_prompt_override
+    import hashlib
+    started = start_analysis_task('portfolio_ai','portfolio_ai',
+        {'question':user_question,'prompt_digest':hashlib.sha256((get_prompt_override('ai') or '').encode()).hexdigest()},
+        'portfolio_analysis_records', {'analysis_type':'ai','summary':f'AI持仓分析 · {len(holdings)}只基金',
+        'input_data':json.dumps({'holdings':holdings,'question':user_question},ensure_ascii=False)})
+    if started['reused']:
+        return started
+    task_id,record_id = started['task_id'],started['record_id']
     task = asyncio.create_task(_run_portfolio_ai_async(task_id, record_id, user_question))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -186,16 +190,11 @@ async def _run_portfolio_ai_analysis_async(record_id: int, user_question: str):
     except Exception as e:
         logger.warning(f"RAG 检索失败: {e}")
 
-    system_prompt = """你是一位专业的投资组合分析师。请根据以下持仓数据和专业分析工具的输出，给出全面的投资组合分析报告。
+    system_prompt = DEFAULT_AI_ANALYSIS_PROMPT
+    from services.quality.eval_execution import get_prompt_override
+    from db.config import get_config
+    system_prompt = get_prompt_override('ai') or get_config('agent.portfolio_ai_prompt', '') or system_prompt
 
-分析要求：
-1. **资产配置分析** — 持仓的基金类型分布、行业分布是否合理
-2. **风险评价** — 组合的集中度风险、相关性风险、回撤风险
-3. **各基金表现** — 逐个评价每只基金的表现（收益、波动、性价比）
-4. **改进建议** — 具体的调仓建议、定投策略、风险控制措施
-5. **市场环境** — 结合当前市场行情和热点，给出背景判断
-
-输出格式：使用 Markdown 标题层级，结论先行，数据支撑，内容专业易懂。"""
 
     user_content = f"""## 当前持仓（完整字段）
 {chr(10).join(holdings_summary)}
@@ -312,10 +311,23 @@ async def list_bad_cases_api(source: str = None, limit: int = 100):
 
 @router.post("/api/portfolio/analysis/root-cause/batch")
 async def batch_analyze_root_cause(limit: int = 50, force: bool = False):
-    """批量分析 Bad Case 根因。"""
+    if not 1 <= limit <= 200:
+        raise HTTPException(400,'limit需在1-200之间')
     from infra.root_cause_analyzer import batch_analyze
-    result = batch_analyze(limit=limit, force=force)
-    return result
+    from db.eval import claim_governance_task
+    submitted = claim_governance_task('bad_case_root_batch','bad_case',{'limit':limit,'force':force})
+    if not submitted['reused']:
+        async def run():
+            try:
+                result = await asyncio.to_thread(batch_analyze,limit,force,
+                    lambda progress: update_async_task(submitted['task_id'],progress=progress))
+                update_async_task(submitted['task_id'],status='done',result=result)
+            except Exception as exc:
+                update_async_task(submitted['task_id'],status='error',error_msg=str(exc))
+        task = asyncio.create_task(run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted
 
 
 @router.get("/api/portfolio/analysis/root-cause/stats")
@@ -327,23 +339,25 @@ async def get_root_cause_stats_api():
 
 @router.post("/api/portfolio/analysis/root-cause/{source}/{case_id}")
 async def analyze_single_root_cause(source: str, case_id: int):
-    """分析单个 Bad Case 的根因。"""
     from infra.root_cause_analyzer import analyze_root_cause, _save_root_cause
-    from db.portfolio import list_all_bad_cases
-
-    cases = list_all_bad_cases(limit=500)
-    target = None
-    for c in cases:
-        if c["source"] == source and c["id"] == case_id:
-            target = c
-            break
-
+    from db.eval import get_governance_bad_case, claim_governance_task
+    if source not in ('analysis','chat'):
+        raise HTTPException(400,'来源无效')
+    target = get_governance_bad_case(source,case_id)
     if not target:
-        raise HTTPException(status_code=404, detail="Bad Case 未找到")
-
-    result = analyze_root_cause(target)
-    if not result:
-        raise HTTPException(status_code=500, detail="根因分析失败")
-
-    _save_root_cause(source, case_id, result)
-    return {"ok": True, "result": result}
+        raise HTTPException(404,'Bad Case 未找到')
+    submitted = claim_governance_task('bad_case_root_single','bad_case',{'source':source,'case_id':case_id})
+    if not submitted['reused']:
+        async def run():
+            try:
+                result = await asyncio.to_thread(analyze_root_cause,target)
+                if not result:
+                    raise RuntimeError('根因分析失败')
+                await asyncio.to_thread(_save_root_cause,source,case_id,result)
+                update_async_task(submitted['task_id'],status='done',result={'ok':True,'result':result,'source':source,'case_id':case_id})
+            except Exception as exc:
+                update_async_task(submitted['task_id'],status='error',error_msg=str(exc))
+        task = asyncio.create_task(run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return submitted

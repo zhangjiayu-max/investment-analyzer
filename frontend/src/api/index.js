@@ -351,17 +351,17 @@ export function rollbackAgentPrompt(agentId, versionId) {
 
 /** 获取分析 Agent 提示词版本历史 */
 export function listAnalysisAgentVersions(agentId) {
-  return api.get(`/agent/${agentId}/versions`, { params: { agent_type: 'analysis' } })
+  return api.get(`/analysis-agents/${agentId}/versions`)
 }
 
 /** 回滚分析 Agent 提示词到指定版本 */
 export function rollbackAnalysisAgentPrompt(agentId, versionId) {
-  return api.post(`/agent/${agentId}/rollback/${versionId}`, {}, { params: { agent_type: 'analysis' } })
+  return api.post(`/analysis-agents/${agentId}/rollback/${versionId}`)
 }
 
 /** 获取 Agent 回归测试结果 */
 export function getAgentRegressionResult(agentId, agentType = 'conversation') {
-  return api.get(`/agent/${agentId}/regression`, { params: { agent_type: agentType } })
+  return api.get(`/agents/${agentId}/regression`, { params: { agent_type: agentType } })
 }
 
 // ── 对话图片上传 API ──────────────────────────────────────
@@ -849,9 +849,10 @@ export function deleteLinkedArticle(id) {
 // ── AI 市场分析 API ──────────────────────────────────────
 
 /** 触发 AI 分析 */
-export function runAnalysis(indexCode, indexName, agentId = null) {
+export function runAnalysis(indexCode, indexName, agentId = null, metricType = null) {
   const request = { index_code: indexCode, index_name: indexName }
   if (agentId != null) request.agent_id = agentId
+  if (metricType != null) request.metric_type = metricType
   return api.post('/analysis/run', request)
 }
 
@@ -1266,13 +1267,13 @@ export function getQualityTrend(days = 30) {
 }
 
 /** 获取低分产出列表 */
-export function getLowQualityItems(limit = 20) {
-  return api.get('/eval/low-quality', { params: { limit } })
+export function getLowQualityItems(limit = 20, days = 30) {
+  return api.get('/eval/low-quality', { params: { limit, days } })
 }
 
 /** 按 Agent 类型分组的评测统计 */
-export function getEvalStatsByAgent() {
-  return api.get('/eval/stats-by-agent')
+export function getEvalStatsByAgent(days = 30) {
+  return api.get('/eval/stats-by-agent', { params: { days } })
 }
 
 // ── 债市数据 API ──────────────────────────────────────
@@ -1536,6 +1537,16 @@ export function getExpenseTrend(months = 6) {
 export function getExpenseCategories() {
   return api.get('/expense/categories')
 }
+
+// 周期账单与统一家庭现金流
+export function listRecurringTemplates() { return api.get('/expense/templates') }
+export function createRecurringTemplate(payload) { return api.post('/expense/templates', payload) }
+export function updateRecurringTemplate(id, payload) { return api.put(`/expense/templates/${id}`, payload) }
+export function deleteRecurringTemplate(id) { return api.delete(`/expense/templates/${id}`) }
+export function getRecurringBills(month) { return api.get('/expense/bills', { params: { month } }) }
+export function payRecurringBill(id, month) { return api.post(`/expense/templates/${id}/pay`, { month }) }
+export function getExpenseCashflow(month) { return api.get('/expense/cashflow', { params: { month } }) }
+export function setExpenseMonthComplete(month, complete) { return api.put('/expense/month-status', { month, complete }) }
 
 export function copyFixedExpenses(fromMonth, toMonth) {
   return api.post('/expense/copy-fixed', { from_month: fromMonth, to_month: toMonth })
@@ -2015,6 +2026,11 @@ export function runEvalCase(caseId) {
   return api.post(`/eval/cases/${caseId}/run`)
 }
 
+/** 提交持久批次；完成状态通过 async task 查询 */
+export function runEvalBatch(caseIds) {
+  return api.post('/eval/run-batch', { case_ids: caseIds })
+}
+
 /** 列出评测运行记录 */
 export function listEvalRuns(caseId = 0, limit = 50) {
   const params = { limit }
@@ -2103,8 +2119,8 @@ export function submitConversationUserScore(conversationId, score, breakdown = {
 }
 
 /** 获取对话评估统计 */
-export function getConversationEvalStats() {
-  return api.get('/eval/conversation-stats')
+export function getConversationEvalStats(days = 30) {
+  return api.get('/eval/conversation-stats', { params: { days } })
 }
 
 /** 列出对话评估记录 */
@@ -2230,7 +2246,7 @@ export function activatePromptVersion(versionId, agentType) {
 export function comparePrompt(versionId, caseType = '') {
   const params = {}
   if (caseType) params.case_type = caseType
-  return api.get(`/eval-system/prompts/${versionId}/compare`, { params })
+  return api.post(`/eval-system/prompts/${versionId}/compare`, {}, { params })
 }
 
 /** 列出每日评测日报 */
@@ -2731,8 +2747,8 @@ export function getCapabilitiesStats(days = 7, toolName = '') {
 export function getCapabilitiesRecent(toolName = '', limit = 20, success = '') {
   return api.get('/capabilities/stats/recent', { params: { tool_name: toolName, limit, success } })
 }
-export function debugTool(toolName, args) {
-  return api.post('/capabilities/debug', { tool_name: toolName, arguments: args })
+export function debugTool(toolName, args, confirmWrite = false) {
+  return api.post('/capabilities/debug', { tool_name: toolName, arguments: args, confirm_write: confirmWrite })
 }
 
 // ── 智能补仓计划器 ──────────────────────────────────────
@@ -2975,3 +2991,11 @@ export function getConversationTaskStatus(convId) {
 export function getRunningConversationTasks() {
   return api.get('/conversations/tasks/running')
 }
+
+// Shadow 对照实验
+export const getShadowConfigs = () => api.get('/shadow/configs', { params: { active_only: false } })
+export const createShadowConfig = body => api.post('/shadow/configs', body)
+export const toggleShadowConfig = (id, isActive) => api.post(`/shadow/configs/${id}/toggle`, { is_active: isActive })
+export const deleteShadowConfig = id => api.delete(`/shadow/configs/${id}`)
+export const getShadowRuns = configId => api.get('/shadow/runs', { params: { config_id: configId || undefined, limit: 50 } })
+export const getShadowStats = configId => api.get('/shadow/stats', { params: { config_id: configId || undefined } })

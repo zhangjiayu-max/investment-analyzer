@@ -42,6 +42,10 @@ def init_table(conn=None):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_type ON agent_analysis_log(analysis_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_created ON agent_analysis_log(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_trace ON agent_analysis_log(trace_id)")
+        from db._utils import _add_column_if_not_exists
+        for name, definition in [('eval_status', "TEXT DEFAULT 'idle'"),('eval_error', "TEXT DEFAULT ''"),('eval_task_id','INTEGER')]:
+            _add_column_if_not_exists(conn,'agent_analysis_log',name,definition)
+        conn.execute("UPDATE agent_analysis_log SET eval_status='scored' WHERE has_eval=1 AND eval_score>0 AND eval_status='idle'")
         conn.commit()
     finally:
         if own_conn:
@@ -98,9 +102,21 @@ def update_analysis_log_source(trace_id: str, source_id: int) -> bool:
     return updated
 
 
+
+def _sync_eval_task_state(conn):
+    """恢复页查询时同步被重启清理或异常终结的持久任务。"""
+    from db.async_tasks import cleanup_stale_async_tasks
+    cleanup_stale_async_tasks(_conn=conn)
+    conn.execute("""UPDATE agent_analysis_log SET eval_status='error',
+        eval_error=COALESCE((SELECT error_msg FROM async_tasks WHERE id=eval_task_id),'评估任务中断')
+        WHERE eval_status='running' AND eval_task_id IN (SELECT id FROM async_tasks WHERE status='error')""")
+    conn.commit()
+
+
 def get_analysis_log(log_id: int) -> dict | None:
     """获取单条分析记录。"""
     conn = _get_conn()
+    _sync_eval_task_state(conn)
     row = conn.execute("SELECT * FROM agent_analysis_log WHERE id = ?", (log_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -138,6 +154,7 @@ def list_analysis_logs(agent_id: int = None, analysis_type: str = None,
     sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     conn = _get_conn()
+    _sync_eval_task_state(conn)
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -195,7 +212,7 @@ def update_eval_result(log_id: int, eval_score: float) -> bool:
     """回写质量评估结果。"""
     conn = _get_conn()
     cur = conn.execute("""
-        UPDATE agent_analysis_log SET has_eval = 1, eval_score = ? WHERE id = ?
+        UPDATE agent_analysis_log SET has_eval = 1, eval_score = ?, eval_status='scored',eval_error='' WHERE id = ?
     """, (eval_score, log_id))
     updated = cur.rowcount > 0
     conn.commit()
@@ -240,3 +257,13 @@ def fetch_source_result(source_table: str, source_id: int, trace_id: str = None)
         conn.close()
         logger.warning(f"查回原始记录失败 {source_table}:{source_id} trace={trace_id}: {e}")
         return ""
+
+
+def set_analysis_eval_state(log_id: int, state: str, error: str = '', task_id: int = None):
+    conn = _get_conn()
+    try:
+        conn.execute('UPDATE agent_analysis_log SET eval_status=?,eval_error=?,eval_task_id=? WHERE id=?',
+                     (state,error,task_id,log_id))
+        conn.commit()
+    finally:
+        conn.close()

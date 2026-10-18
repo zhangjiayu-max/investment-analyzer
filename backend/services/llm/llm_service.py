@@ -146,7 +146,7 @@ def _create_completion_with_fallback(request_kwargs: dict, trace_id: str):
     """每次请求复制参数并重算剩余时间，仅使用已配置的兼容兜底。"""
     def request_kwargs_for(model=None):
         current = dict(request_kwargs)
-        current['timeout'] = min(float(current.get('timeout') or _LLM_TOTAL_TIMEOUT), remaining_seconds())
+        current['timeout'] = min(float(current.get('timeout') or _configured_llm_timeout()), remaining_seconds())
         if model is not None:
             current['model'] = model
         return current
@@ -162,6 +162,13 @@ def _create_completion_with_fallback(request_kwargs: dict, trace_id: str):
         logger.warning('[trace:%s] 主用 LLM 失败 (%s)，使用已配置兜底: %s',
                        trace_id, exc.__class__.__name__, _fallback_model)
         return _fallback_client.chat.completions.create(**fallback_kwargs)
+
+
+def _configured_llm_timeout() -> float:
+    """每次调用读取超时配置，非法遗留值回退默认期限。"""
+    timeout = get_config_float('llm.timeout_default', _LLM_TOTAL_TIMEOUT)
+    # 业务配置可缩短期限，保留全局硬截止（也供执行预算测试注入）。
+    return min(timeout, _LLM_TOTAL_TIMEOUT) if 0 < timeout < float('inf') else _LLM_TOTAL_TIMEOUT
 
 
 def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
@@ -183,7 +190,7 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
             _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id,
                                 requested_model=requested_model)
         return resp
-    with execution_budget(_LLM_TOTAL_TIMEOUT):
+    with execution_budget(_configured_llm_timeout()):
         return _do_call()
 
 
@@ -211,7 +218,7 @@ def _call_llm_stream(caller: str = "", trace_id: str = "", **kwargs):
     _enforce_token_budget(caller, trace_id)
     request_kwargs = dict(kwargs, stream=True)
     requested_model = kwargs.get("model", MODEL)
-    with execution_budget(_LLM_TOTAL_TIMEOUT):
+    with execution_budget(_configured_llm_timeout()):
         stream = _create_completion_with_fallback(request_kwargs, trace_id)
         try:
             last_usage = None
@@ -570,6 +577,11 @@ def chat_with_agent(
         if result is None:
             logger.warning("[chat_with_agent] LLM returned None content")
             return ""
+        try:
+            from infra.shadow_mode import schedule_shadow
+            schedule_shadow('chat', {'messages': llm_messages, 'base_prompt': agent_prompt}, result)
+        except Exception:
+            logger.debug('Shadow 调度失败，不影响对话结果', exc_info=True)
         return result
     except Exception as e:
         logger.error(f"[chat_with_agent] LLM call failed: {e}")

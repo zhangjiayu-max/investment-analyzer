@@ -51,6 +51,10 @@ def start_analysis_task(task_type: str, caller: str, request_data: dict,
     }
     if source_table not in allowed or not source_fields or set(source_fields) - allowed[source_table]:
         raise ValueError('无效的分析记录字段')
+    from services.quality.eval_execution import evaluation_request_signature
+    evaluation_signature = evaluation_request_signature()
+    if evaluation_signature:
+        request_data = {**request_data, '_evaluation_signature': evaluation_signature}
     request_key = hashlib.sha256(json.dumps(request_data, sort_keys=True, ensure_ascii=False,
                                            separators=(',', ':')).encode()).hexdigest()
     conn = _get_conn()

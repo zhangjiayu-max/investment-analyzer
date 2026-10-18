@@ -20,6 +20,7 @@ from db import (
 logger = logging.getLogger(__name__)
 from services.allocation_dashboard import build_allocation_dashboard
 from services.stress_test import run_portfolio_stress_test
+from services.finance.household_finance import build_household_diagnosis
 
 router = APIRouter(tags=["finance-dashboard"])
 
@@ -63,24 +64,20 @@ async def get_finance_dashboard(user_id: str = "default"):
     monthly_expense = cash_flow["monthly_expense"]
     monthly_surplus = cash_flow["monthly_surplus"]
     surplus_rate = cash_flow["surplus_rate"] or 0
-    emergency_fund_months = profile.get("emergency_fund_months") or 0
+    emergency_fund_months = cash_flow["emergency_months"]
 
     cash_flow.update({
         "monthly_income": round(monthly_income, 2),
         "monthly_expense": round(monthly_expense, 2),
         "monthly_surplus": round(monthly_surplus, 2),
         "surplus_rate": surplus_rate,
-        "emergency_fund_months": round(emergency_fund_months, 1),
+        "emergency_fund_months": emergency_fund_months,
     })
 
     # ── 3. 负债 ──
-    debt_summary = profile.get("debt_summary") or ""
-    monthly_debt_payment = (
-        cash_flow["debt_payment"]
-        if cash_flow["expense_source"] == "records"
-        else profile.get("monthly_debt_payment") or 0
-    )
-    debt_to_income = round(monthly_debt_payment / monthly_income, 4) if monthly_income > 0 else 0
+    debt_summary = profile.get("liabilities_summary") or ""
+    monthly_debt_payment = cash_flow["debt_payment"]
+    debt_to_income = round(monthly_debt_payment / monthly_income, 4) if monthly_income > 0 else None
 
     debt = {
         "debt_summary": debt_summary,
@@ -177,6 +174,7 @@ async def get_finance_dashboard(user_id: str = "default"):
         "allocation": allocation,
         "risk": risk,
         "health_warnings": health_warnings,
+        "household_diagnosis": build_household_diagnosis(user_id, cash_flow),
         "errors": _errors,
     }
 

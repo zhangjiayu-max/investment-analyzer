@@ -5,7 +5,8 @@
 import logging
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 from db.config import get_config
 from db.feature_usage import (
@@ -19,16 +20,18 @@ router = APIRouter(prefix="/api/feature-usage", tags=["feature-usage"])
 
 class TrackEvent(BaseModel):
     """单条埋点事件。"""
-    page_key: str
+    session_id: str | None = Field(default=None, max_length=100)
+    page_key: str = Field(min_length=1, max_length=100)
     feature_key: str = None
-    action_type: str
-    duration_ms: int = None
+    action_type: Literal['page_enter', 'page_leave', 'feature_click', 'feature_complete']
+    duration_ms: int | None = Field(default=None, ge=0, le=86400000)
     referrer_page: str = None
 
 
 class BatchTrack(BaseModel):
     """批量埋点事件。"""
-    events: list[TrackEvent]
+    session_id: str | None = Field(default=None, max_length=100)
+    events: list[TrackEvent] = Field(max_length=500)
 
 
 def _is_enabled() -> bool:
@@ -42,7 +45,7 @@ async def track(req: Request, event: TrackEvent):
     if not _is_enabled():
         return {"ok": False, "message": "埋点已关闭"}
     # 从 header 获取 session_id，缺失则标记为匿名
-    session_id = req.headers.get("X-Session-Id") or "anonymous"
+    session_id = event.session_id or req.headers.get("X-Session-Id") or "anonymous"
     try:
         track_feature_usage(
             session_id, event.page_key, event.action_type,
@@ -59,8 +62,8 @@ async def track_batch(req: Request, body: BatchTrack):
     """批量上报。"""
     if not _is_enabled():
         return {"ok": False, "message": "埋点已关闭"}
-    session_id = req.headers.get("X-Session-Id") or "anonymous"
-    events = [{**e.model_dump(), "session_id": session_id} for e in body.events]
+    session_id = body.session_id or req.headers.get("X-Session-Id") or "anonymous"
+    events = [{**e.model_dump(), "session_id": e.session_id or session_id} for e in body.events]
     try:
         count = batch_track_feature_usage(events)
     except Exception as e:
