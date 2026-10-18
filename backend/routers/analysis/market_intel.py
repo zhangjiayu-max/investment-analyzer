@@ -268,16 +268,18 @@ async def _fetch_hot_topics() -> list[dict]:
             items = []
             for c in raw.get("content", []):
                 if c.get("type") == "text":
-                    parsed = json.loads(c["text"])
-                    if isinstance(parsed, dict) and parsed.get("data", {}).get("items"):
-                        for item in parsed["data"]["items"]:
-                            items.append({
-                                "title": item.get("title", ""),
-                                "summary": item.get("summary", ""),
-                                "heat": item.get("heat", ""),
-                            })
-                    elif isinstance(parsed, list):
-                        for item in parsed:
+                    try:
+                        parsed = json.loads(c.get("text", ""))
+                    except (ValueError, TypeError):
+                        logger.warning("跳过无法解析的热门话题数据块")
+                        continue
+                    data = parsed.get("data", {}) if isinstance(parsed, dict) else parsed
+                    if isinstance(data, dict):
+                        data = data.get("items", [])
+                    if isinstance(data, list):
+                        for item in data:
+                            if not isinstance(item, dict):
+                                continue
                             items.append({
                                 "title": item.get("title", ""),
                                 "summary": item.get("summary", ""),

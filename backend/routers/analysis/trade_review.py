@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-trade-review"])
 
 _background_tasks: set = set()
+
+
+def _snapshot_percentile(snapshot: dict, key: str) -> float | None:
+    """历史快照允许缺字段；不将缺失分位伪装成中位数。"""
+    value = snapshot.get(key)
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(str(value).strip().removesuffix("%"))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0 <= value <= 100 else None
 
 
 def _extract_candidates_safely(record_id: int, analysis_type: str, result_text: str):
@@ -52,6 +65,7 @@ async def trade_review_api(req: TradeReviewRequest):
     # 交易记录 + 标签 + 估值快照
     tx_lines = []
     total_fee = 0
+    pe_values = {"buy": [], "sell": []}
     for t in sorted(txs, key=lambda x: x.get("transaction_date", "")):
         tags = get_transaction_tags(t["id"])
         tag_str = f" [{','.join(tags)}]" if tags else ""
@@ -59,18 +73,25 @@ async def trade_review_api(req: TradeReviewRequest):
         # 解析估值快照
         snapshot_str = t.get("valuation_snapshot")
         valuation_str = ""
+        snap = {}
         if snapshot_str:
             try:
-                snap = json.loads(snapshot_str)
-                pe_pct = snap.get("pe_percentile")
-                pb_pct = snap.get("pb_percentile")
-                if pe_pct is not None:
-                    valuation_str = f" [PE分位:{pe_pct:.1f}%"
-                    if pb_pct is not None:
-                        valuation_str += f", PB分位:{pb_pct:.1f}%"
-                    valuation_str += "]"
-            except Exception:
+                parsed = json.loads(snapshot_str)
+                if isinstance(parsed, dict):
+                    snap = parsed
+            except (ValueError, TypeError):
                 pass
+        pe_pct = _snapshot_percentile(snap, "pe_percentile")
+        pb_pct = _snapshot_percentile(snap, "pb_percentile")
+        if pe_pct is not None and t["transaction_type"] in pe_values:
+            pe_values[t["transaction_type"]].append(pe_pct)
+        valuation_parts = []
+        if pe_pct is not None:
+            valuation_parts.append(f"PE分位:{pe_pct:.1f}%")
+        if pb_pct is not None:
+            valuation_parts.append(f"PB分位:{pb_pct:.1f}%")
+        if valuation_parts:
+            valuation_str = " [" + ", ".join(valuation_parts) + "]"
 
         # 手续费
         fee = t.get("fee") or 0
@@ -91,24 +112,17 @@ async def trade_review_api(req: TradeReviewRequest):
     buy_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "buy")
     sell_total = sum(t.get("amount", 0) or 0 for t in txs if t["transaction_type"] == "sell")
 
-    # 有估值快照的交易统计
-    txs_with_valuation = [t for t in txs if t.get("valuation_snapshot")]
+    # 仅用有效 PE 样本计算统计，并向模型说明覆盖率，避免缺失值污染判断。
     valuation_summary = ""
-    if txs_with_valuation:
-        buy_with_val = [t for t in txs_with_valuation if t["transaction_type"] == "buy"]
-        sell_with_val = [t for t in txs_with_valuation if t["transaction_type"] == "sell"]
-        if buy_with_val:
-            avg_buy_pe = sum(json.loads(t["valuation_snapshot"]).get("pe_percentile", 50)
-                           for t in buy_with_val) / len(buy_with_val)
-            low_buy = len([t for t in buy_with_val
-                          if json.loads(t["valuation_snapshot"]).get("pe_percentile", 50) < 30])
-            valuation_summary += f"\n买入时估值分析: 平均PE分位 {avg_buy_pe:.1f}%, 低估买入(PE<30%) {low_buy}/{len(buy_with_val)} 笔"
-        if sell_with_val:
-            avg_sell_pe = sum(json.loads(t["valuation_snapshot"]).get("pe_percentile", 50)
-                            for t in sell_with_val) / len(sell_with_val)
-            high_sell = len([t for t in sell_with_val
-                           if json.loads(t["valuation_snapshot"]).get("pe_percentile", 50) > 70])
-            valuation_summary += f"\n卖出时估值分析: 平均PE分位 {avg_sell_pe:.1f}%, 高估卖出(PE>70%) {high_sell}/{len(sell_with_val)} 笔"
+    for kind, count, label in (("buy", buy_count, "买入"), ("sell", sell_count, "卖出")):
+        if not count:
+            continue
+        values = pe_values[kind]
+        valuation_summary += f"\n{label}估值数据覆盖: 有效PE快照 {len(values)}/{count} 笔，PE分位缺失或无效 {count - len(values)} 笔"
+        if values:
+            condition = "低估买入(PE<30%)" if kind == "buy" else "高估卖出(PE>70%)"
+            matched = sum(v < 30 if kind == "buy" else v > 70 for v in values)
+            valuation_summary += f"\n{label}时估值分析: 平均PE分位 {sum(values) / len(values):.1f}%, {condition} {matched}/{len(values)} 笔"
 
     # 组合约束注入
     facts_block = build_portfolio_facts_with_check()
