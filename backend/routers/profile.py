@@ -247,10 +247,10 @@ def api_delete_goal_bucket(bucket_id: int):
 @router.post("/api/profile/buckets/sync")
 def api_sync_buckets():
     """根据实际持仓自动同步资金桶 current_amount。"""
-    from db.portfolio import get_portfolio_summary, get_cash_balance
+    from db.portfolio import get_portfolio_summary
     summary = get_portfolio_summary()
     total_assets = summary.get("total_assets", 0)
-    cash = get_cash_balance()
+    cash = summary.get("cash_balance", 0)
     result = sync_bucket_from_portfolio("default", total_assets, cash)
     return result
 

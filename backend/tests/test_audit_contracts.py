@@ -43,14 +43,14 @@ def test_ledger_endpoint_reads_investment_ledger():
 def test_family_dashboard_uses_portfolio_totals(monkeypatch):
     from routers.dashboard import finance_dashboard as m
     monkeypatch.setattr(m, "get_portfolio_summary", lambda **kw: {
-        "total_assets": 1300, "total_cost": 1000, "total_value": 1200,
+        "total_assets": 1300, "cash_balance": 100, "total_cost": 1000, "total_value": 1200,
         "total_profit": 200, "profit_rate": 0.2,
     })
-    monkeypatch.setattr(m, "get_cash_balance", lambda *a: {"balance": 100})
     monkeypatch.setattr(m, "build_allocation_dashboard", lambda *a: {})
     monkeypatch.setattr(m, "run_portfolio_stress_test", lambda *a: {})
     nw = asyncio.run(m.get_finance_dashboard())["net_worth"]
     assert nw["holding_value"] == 1200
+    assert nw["cash_balance"] == 100
     assert nw["float_pnl"] == 200
     assert nw["total_return_pct"] == 0.2  # 前端按比率乘100展示
 
@@ -65,11 +65,10 @@ def test_finance_routes_use_api_prefix():
 
 def _planner_data(monkeypatch, module):
     monkeypatch.setattr(module, "get_portfolio_summary", lambda: {
-        "total_value": 10000, "holdings": [
+        "total_value": 10000, "cash_balance": 6000, "holdings": [
             {"id": 1, "fund_category": "equity", "current_value": 10000},
         ],
     })
-    monkeypatch.setattr(module, "get_cash_balance", lambda: {"balance": 6000})
     monkeypatch.setattr(module, "list_goal_buckets", lambda: [
         {"id": 1, "name": "长期", "bucket_type": "long_term", "target_amount": 36000,
          "current_amount": 0, "linked_holdings": "[1]"},
@@ -251,7 +250,8 @@ def test_nav_refresh_does_not_store_a_window_subset(monkeypatch):
 def test_cash_forecast_deficit_does_not_fund_investments(monkeypatch):
     from services.finance import finance_planner as m
     _planner_data(monkeypatch, m)
-    monkeypatch.setattr(m, "get_cash_balance", lambda: {"balance": 100})
+    summary = m.get_portfolio_summary()
+    monkeypatch.setattr(m, "get_portfolio_summary", lambda: {**summary, "cash_balance": 100})
     monkeypatch.setattr(m, "get_cashflow", lambda: {"monthly_income": 500, "monthly_expense": 1000})
     row = m.forecast_cash_flow(1)[0]
     assert row["cash_balance"] == -400

@@ -1499,8 +1499,8 @@ export function importPortfolioCsv(file) {
 }
 
 /** 获取家庭财务统一仪表盘 */
-export function getFinanceDashboard() {
-  return api.get('/finance-dashboard')
+export function getFinanceDashboard(month) {
+  return month ? api.get('/finance-dashboard', { params: { month } }) : api.get('/finance-dashboard')
 }
 
 /** 获取投资趋势 */
@@ -1765,17 +1765,17 @@ export function listBondRecommendRecords(limit = 5) {
 
 /** 获取预警列表 */
 export function listAlerts(unreadOnly = false, limit = 50) {
-  return api.get('/portfolio/alerts', { params: { unread_only: unreadOnly, limit } })
+  return api.get('/portfolio/alerts', { params: { unread_only: unreadOnly, limit }, timeout: 15000 })
 }
 
 /** 获取未读预警数量 */
 export function getUnreadAlertCount() {
-  return api.get('/portfolio/alerts/unread-count')
+  return api.get('/portfolio/alerts/unread-count', { timeout: 15000 })
 }
 
 /** 标记预警为已读 */
 export function markAlertRead(alertId) {
-  return api.put(`/portfolio/alerts/${alertId}/read`)
+  return api.put(`/portfolio/alerts/${alertId}/read`, null, { timeout: 15000 })
 }
 
 /** 删除预警 */
@@ -1785,7 +1785,7 @@ export function deleteAlert(alertId) {
 
 /** 更新预警业务确认状态（已采纳/已忽略） */
 export function acknowledgeAlert(alertId, status) {
-  return api.post(`/portfolio/alerts/${alertId}/acknowledge`, { status })
+  return api.post(`/portfolio/alerts/${alertId}/acknowledge`, { status }, { timeout: 15000 })
 }
 
 // ── 前瞻性事件雷达 ─────────────────────────────────────
@@ -2282,12 +2282,12 @@ export function analyzeSingleRootCause(source, caseId) {
 }
 
 export function getFinanceQuoteBar() {
-  return api.get('/finance/quote-bar')
+  return api.get('/finance/quote-bar', { timeout: 15000 })
 }
 
 /** 机构动向摘要（融资余额变化，TickerBar 用） */
 export function getInstitutionalFlowSummary() {
-  return api.get('/institutional-flow/summary')
+  return api.get('/institutional-flow/summary', { timeout: 15000 })
 }
 
 export function getRunningAgents() {

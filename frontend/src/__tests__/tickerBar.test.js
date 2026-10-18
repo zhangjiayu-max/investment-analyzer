@@ -1,0 +1,91 @@
+import { mount, flushPromises } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+const api = vi.hoisted(() => ({ getDashboard: vi.fn(), getFinanceQuoteBar: vi.fn(), getInstitutionalFlowSummary: vi.fn() }))
+vi.mock('../api', () => api)
+vi.mock('../composables/useTheme', () => ({ isDark: false, toggleDark: vi.fn() }))
+import TickerBar from '../components/finance/TickerBar.vue'
+const wrappers = []
+function render() {
+  const w = mount(TickerBar, { global: { stubs: { AlertBell: true, Icon: true, Sparkline: true } } })
+  wrappers.push(w)
+  return w
+}
+beforeEach(() => {
+  vi.useFakeTimers(); vi.resetAllMocks()
+  api.getDashboard.mockResolvedValue({ data: { indices: [{ name: '上证指数', price: 3000, change_pct: 1 }] } })
+  api.getFinanceQuoteBar.mockResolvedValue({ data: { quote: '甲', quotes: ['甲', '乙', '丙'] } })
+  api.getInstitutionalFlowSummary.mockResolvedValue({ data: { recent_5d_change_yi: -331.87, trend: 'outflow', strength: 'moderate', latest_date: '2026-10-16', data_status: 'ok' } })
+})
+afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.useRealTimers() })
+describe('desktop investment top bar', () => {
+  it('always shows quotes, rotates locally without repeats, and stops on unmount', async () => {
+    const w = render(); await flushPromises()
+    const seen = new Set([w.get('.ticker-quote-text').text()])
+    for (let i = 0; i < 2; i++) {
+      await vi.advanceTimersByTimeAsync(10000)
+      seen.add(w.get('.ticker-quote-text').text())
+    }
+    expect(seen.size).toBe(3)
+    expect(api.getFinanceQuoteBar).toHaveBeenCalledTimes(1)
+    w.unmount(); wrappers.pop()
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(api.getInstitutionalFlowSummary).toHaveBeenCalledTimes(1)
+  })
+  it('keeps rotating offline rather than repeating a single fallback', async () => {
+    api.getFinanceQuoteBar.mockRejectedValue(new Error('offline'))
+    const w = render(); await flushPromises()
+    const first = w.get('.ticker-quote-text').text()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(w.get('.ticker-quote-text').text()).not.toBe(first)
+  })
+  it('loads daily financing independently and labels its date, then marks refresh failure', async () => {
+    api.getDashboard.mockReturnValue(new Promise(() => {}))
+    const w = render(); await flushPromises()
+    expect(w.text()).not.toContain('沪市融资5日')
+    expect(w.text()).not.toContain('-331.87亿')
+    const help = w.get('button[aria-label="融资数据说明"]')
+    await help.trigger('click'); await flushPromises()
+    const tip = document.body.querySelector('[role="tooltip"]')
+    expect(tip).not.toBeNull()
+    expect(tip.textContent).toContain('-331.87亿元')
+    expect(tip.textContent).toContain('2026-10-16')
+    expect(tip.textContent).toContain('不作为买卖依据')
+    api.getInstitutionalFlowSummary.mockRejectedValue(new Error('offline'))
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(tip.textContent).toContain('更新失败')
+    expect(tip.textContent).toContain('上次成功')
+  })
+  it('does not present missing financing data as zero', async () => {
+    api.getInstitutionalFlowSummary.mockResolvedValue({ data: { data_status: 'unavailable', recent_5d_change_yi: null, latest_date: null } })
+    const w = render(); await flushPromises()
+    await w.get('button[aria-label="融资数据说明"]').trigger('focus'); await flushPromises()
+    const tip = document.body.querySelector('[role="tooltip"]')
+    expect(tip.textContent).toContain('暂无数据')
+    expect(tip.textContent).not.toContain('0.00亿')
+  })
+  it('opens financing details on hover or click and dismisses with Escape or outside click', async () => {
+    const w = render(); await flushPromises()
+    const help = w.get('button[aria-label="融资数据说明"]')
+    await w.get('.flow-help').trigger('pointerenter'); await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')).not.toBeNull()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+    await help.trigger('click'); await flushPromises()
+    expect(help.attributes('aria-expanded')).toBe('true')
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })); await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+  })
+  it('submits trimmed search by Enter or the visible button and ignores composition Enter', async () => {
+    const w = render(); await flushPromises()
+    const input = w.get('input')
+    await input.setValue('  沪深300  ')
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    expect(w.emitted('search')).toBeUndefined()
+    await input.trigger('keydown', { key: 'Enter' })
+    await w.get('button[aria-label="搜索"]').trigger('click')
+    expect(w.emitted('search')).toEqual([['沪深300'], ['沪深300']])
+    await input.setValue('   ')
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(w.emitted('search')).toHaveLength(2)
+  })
+})

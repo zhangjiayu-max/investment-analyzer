@@ -873,8 +873,22 @@ def _build_risk_content(fund_code: str, fund_name: str, weight: float,
         # 股票重仓（top 3）
         stocks = fund_data.get("top_stocks", [])
         if stocks:
-            stock_strs = [f"{s['stock_name']}({s.get('pct_nav', '?')}%)" for s in stocks[:3]]
-            parts.append(f"重仓股：{', '.join(stock_strs)}")
+            import math
+            stock_strs = []
+            for stock in stocks:
+                name = str(stock.get("stock_name") or "").strip()
+                if not name:
+                    continue
+                try:
+                    pct = float(stock.get("pct_nav"))
+                except (TypeError, ValueError):
+                    pct = None
+                suffix = f"({pct:g}%)" if pct is not None and math.isfinite(pct) and 0 <= pct <= 100 else ""
+                stock_strs.append(f"{name}{suffix}")
+                if len(stock_strs) == 3:
+                    break
+            if stock_strs:
+                parts.append(f"重仓股：{', '.join(stock_strs)}")
 
         # 可转债占比（>3% 提示风险）
         bond_summary = fund_data.get("bond_type_summary", {})
@@ -883,7 +897,7 @@ def _build_risk_content(fund_code: str, fund_name: str, weight: float,
             if cb_pct and cb_pct > 3:
                 parts.append(f"可转债占比 {cb_pct:.1f}%，股市波动时风险较高")
 
-        # 资产配置（股票仓位 > 20% 提示是混合型基金）
+        # 资产配置只说明权益敞口，不能仅凭股票仓位推断基金类型。
         alloc = fund_data.get("asset_allocation", [])
         if alloc:
             stock_pct = None
@@ -896,7 +910,7 @@ def _build_risk_content(fund_code: str, fund_name: str, weight: float,
                         pass
                     break
             if stock_pct and stock_pct > 20:
-                parts.append(f"股票仓位 {stock_pct:.0f}%，混合型基金波动大于纯债")
+                parts.append(f"股票仓位 {stock_pct:.0f}%，权益资产价格波动会影响净值")
 
     # 结论
     if concentration_threshold is not None:

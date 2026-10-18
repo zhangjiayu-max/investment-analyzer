@@ -126,7 +126,7 @@ async function confirmAction() {
         <button type="submit" class="btn-primary" :disabled="saving || busy">{{ saving ? '保存中...' : editingId ? '保存模板' : '新增周期账单' }}</button>
         <button v-if="editingId" type="button" class="btn-secondary" @click="reset">取消编辑</button>
       </form>
-      <p class="muted">季度、年度以起始月份为周期锚点；不足指定到期日的月份按月末处理。修改模板不改变已支付记录。</p>
+      <p class="muted">季度、年度以起始月份为周期锚点；不足指定到期日的月份按月末处理。编辑模板只影响未支付账单和后续生效月份，不改变已支付记录。</p>
     </details>
   </section>
   <ConfirmDialog :visible="Boolean(action)" :title="action?.type === 'pay' ? '登记账单支付' : action?.type === 'stop' ? '停用周期账单' : '恢复周期账单'" :message="action?.type === 'pay' ? `确认 ${action.month} 的「${action.item.name}」¥${money(action.item.amount)} 已实际支付？仅记录您已完成的支付，不会发起转账或扣款；实际支出仅记一次。` : action?.type === 'stop' ? `停用「${action.item.name}」后将不再生成待支付账单，已支付记录保留。` : `恢复「${action?.item.name}」并按原周期继续生成账单。`" :confirm-text="action?.type === 'pay' ? '确认已支付并记账' : action?.type === 'stop' ? '确认停用' : '确认恢复'" :danger="action?.type === 'stop'" :loading="busy" @confirm="confirmAction" @cancel="action = null" />

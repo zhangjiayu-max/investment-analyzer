@@ -446,6 +446,42 @@ def delete_holding(holding_id: int) -> bool:
     return deleted
 
 
+HOUSEHOLD_CASH_ACCOUNTS = ("小鱼儿", "花无缺")
+
+
+def get_portfolio_cash_snapshot(user_id: str = "default", account: str | None = None, *, conn=None) -> dict:
+    """只读现金快照；旧库将家庭分账户名称存放于 portfolio_cash.user_id。
+
+    default 是家庭持仓的归属用户，不是两个分账户现金的合计。分账户记录
+    存在时忽略旧 default 余额；其他用户仍只读取自己的现金，不能全表求和。
+    可复用现金流读事务，读取过程不结息、不创建账户。
+    """
+    owned = conn is None
+    conn = conn if conn is not None else _get_conn()
+    try:
+        if user_id == "default":
+            if account is not None:
+                # 持仓 account 是可编辑标签，不能将其当作现金账户归属证明。
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?",
+                                    (account,)).fetchall() if account in HOUSEHOLD_CASH_ACCOUNTS else []
+            else:
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id IN (?,?) ORDER BY user_id",
+                                    HOUSEHOLD_CASH_ACCOUNTS).fetchall()
+            scope = "household_accounts"
+            if account is None and not rows:
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
+                scope = "legacy_default_cash"
+        else:
+            rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
+            scope = "user_cash"
+        accounts = [{"account": r["user_id"], "balance": round(float(r["balance"] or 0), 2)} for r in rows]
+        return {"cash_balance": round(sum(r["balance"] for r in accounts), 2),
+                "cash_accounts": accounts, "cash_scope": scope}
+    finally:
+        if owned:
+            conn.close()
+
+
 def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict:
     """获取持仓汇总：总市值、总成本、总盈亏、收益率、现金余额、总资产。排除已清仓记录。可选按账号筛选。"""
     holdings = list_holdings(user_id, account=account)
@@ -456,8 +492,12 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
     profit_rate = total_profit / total_cost if total_cost > 0 else 0
 
     # 现金余额
-    cash_info = get_cash_balance(user_id)
-    cash_balance = cash_info.get("balance", 0) if cash_info else 0
+    cash_snapshot = get_portfolio_cash_snapshot(user_id, account)
+    # 保留现有每日结息行为，但必须结算实际选择的账户。
+    for item in cash_snapshot["cash_accounts"]:
+        get_cash_balance(item["account"])
+    cash_snapshot = get_portfolio_cash_snapshot(user_id, account)
+    cash_balance = cash_snapshot["cash_balance"]
     total_assets = total_value + cash_balance
 
     # 按基金类型分类统计
@@ -477,6 +517,8 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
         "total_profit": round(total_profit, 2),
         "profit_rate": round(profit_rate, 4),
         "cash_balance": round(cash_balance, 2),
+        "cash_accounts": cash_snapshot["cash_accounts"],
+        "cash_scope": cash_snapshot["cash_scope"],
         "total_assets": round(total_assets, 2),
         "fund_type_breakdown": fund_type_breakdown,
         "holdings": holdings,
@@ -2932,6 +2974,8 @@ def list_alerts(user_id: str = "default", limit: int = 50,
         rows = conn.execute(f"""
             SELECT alert_type, related_fund_code, severity,
                    COUNT(*) as cnt,
+                   SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread_count,
+                   MIN(is_read) as is_read,
                    MAX(created_at) as latest_at,
                    MAX(id) as latest_id,
                    MIN(created_at) as first_at
@@ -2958,6 +3002,7 @@ def list_alerts(user_id: str = "default", limit: int = 50,
         result = []
         for r in rows:
             r = dict(r)
+            r["id"] = r["latest_id"]
             d = detail_map.get(r["latest_id"], {})
             r["title"] = d.get("title", "")
             r["content"] = d.get("content", "")
@@ -3135,44 +3180,47 @@ def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
 
 
 def mark_alert_read(alert_id: int) -> bool:
-    """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
+    """按列表相同分组标记已读；重复读取已有记录也视为成功。"""
     conn = _get_conn()
-    # 先获取该 alert 的 title+severity
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT alert_type, related_fund_code, severity, user_id "
+            "FROM portfolio_alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE portfolio_alerts SET is_read = 1 "
+            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
+            "AND severity = ? AND user_id = ? AND is_read = 0",
+            (row["alert_type"], row["related_fund_code"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        return True
+    finally:
         conn.close()
-        return False
-    cur = conn.execute(
-        "UPDATE portfolio_alerts SET is_read = 1 WHERE title = ? AND severity = ? AND user_id = ? AND is_read = 0",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
 
 
 def delete_alert(alert_id: int) -> bool:
-    """删除预警（同时删除同标题+severity的所有预警）。"""
+    """按列表相同分组删除预警，避免同名基金提示被误删。"""
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT alert_type, related_fund_code, severity, user_id "
+            "FROM portfolio_alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if not row:
+            return False
+        cur = conn.execute(
+            "DELETE FROM portfolio_alerts "
+            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
+            "AND severity = ? AND user_id = ?",
+            (row["alert_type"], row["related_fund_code"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
         conn.close()
-        return False
-    cur = conn.execute(
-        "DELETE FROM portfolio_alerts WHERE title = ? AND severity = ? AND user_id = ?",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
 
 
 def update_alert_acknowledgment(alert_id: int, status: str) -> bool:

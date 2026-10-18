@@ -40,6 +40,14 @@ def test_quarterly_anchor_crosses_year_and_end_is_inclusive():
     assert bills("2026-08") == []
 
 
+def test_non_due_month_keeps_active_template_count_for_overview():
+    template(frequency="yearly", start_month="2026-01")
+    summary = api("get_recurring_summary")("2026-02")
+    assert summary["recurring_count"] == 1
+    assert summary["recurring_due_total"] == 0
+    assert summary["monthly_provision"] == 100.0
+
+
 def test_summary_reserves_annual_non_due_month_without_double_count():
     template(amount=1200)
     template(name="房贷", category="房贷", amount=3000, frequency="monthly")
@@ -76,7 +84,8 @@ def test_paid_snapshot_survives_template_edit_and_deactivation():
     bill = api("list_recurring_bills")("2026-01")[0]
     assert bill == dict(template_id=identifier, month="2026-01", name="家庭保险",
                         category="保险", amount=1200, due_date="2026-01-31",
-                        status="paid", expense_id=expense_id)
+                        status="paid", expense_id=expense_id,
+                        current_template_amount=2400, current_template_frequency="yearly")
     assert api("pay_recurring_bill")(identifier, "2026-01") == expense_id
     assert api("list_recurring_bills")("2027-02") == []
     assert api("get_recurring_template")(identifier)["active"] is False

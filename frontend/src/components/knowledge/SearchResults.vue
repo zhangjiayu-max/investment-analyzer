@@ -1,11 +1,12 @@
 <!-- 全局搜索结果页 -->
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { globalSearch } from '../../api'
 import EmptyState from '../ui/EmptyState.vue'
 
 const props = defineProps({
   query: { type: String, default: '' },
+  refreshKey: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['navigate'])
@@ -13,6 +14,8 @@ const emit = defineEmits(['navigate'])
 const loading = ref(false)
 const results = ref({ knowledge: [], funds: [], valuations: [] })
 const error = ref('')
+let searchVersion = 0
+onBeforeUnmount(() => { searchVersion++ })
 
 const totalCount = computed(() =>
   results.value.knowledge.length + results.value.funds.length + results.value.valuations.length
@@ -31,6 +34,7 @@ const knowledgeTypeMap = {
 
 // 估值百分位等级
 function percentileLevel(p) {
+  if (p == null || !Number.isFinite(Number(p))) return { text: '暂无数据', color: 'var(--color-text-muted)' }
   if (p <= 20) return { text: '低估', color: 'var(--color-success)' }
   if (p <= 40) return { text: '偏低', color: 'var(--color-info)' }
   if (p <= 60) return { text: '适中', color: 'var(--color-text-secondary)' }
@@ -47,14 +51,18 @@ function knowledgePage(item) {
 
 // 高亮搜索词
 function highlightText(text, query) {
-  if (!text || !query) return text
+  const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+  if (!text || !query) return escapeHtml(text || '')
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark>$1</mark>')
+  return String(text).split(new RegExp(`(${escaped})`, 'gi'))
+    .map((part, index) => index % 2 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)).join('')
 }
 
 async function doSearch(q) {
+  const version = ++searchVersion
+  results.value = { knowledge: [], funds: [], valuations: [] }
   if (!q || !q.trim()) {
-    results.value = { knowledge: [], funds: [], valuations: [] }
+    loading.value = false
     error.value = ''
     return
   }
@@ -62,6 +70,7 @@ async function doSearch(q) {
   error.value = ''
   try {
     const { data } = await globalSearch(q.trim())
+    if (version !== searchVersion) return
     if (data?.ok !== false) {
       results.value = {
         knowledge: data.data?.knowledge || [],
@@ -72,14 +81,19 @@ async function doSearch(q) {
       error.value = data?.error || '搜索失败'
     }
   } catch (e) {
+    if (version !== searchVersion) return
     error.value = e.message || '搜索请求失败'
     results.value = { knowledge: [], funds: [], valuations: [] }
   } finally {
-    loading.value = false
+    if (version === searchVersion) loading.value = false
   }
 }
 
-watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
+watch(() => [props.query, props.refreshKey], ([q]) => { doSearch(q) }, { immediate: true })
+
+function formatNumber(value, digits = 2) {
+  return value == null || !Number.isFinite(Number(value)) ? '--' : Number(value).toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
 </script>
 
 <template>
@@ -138,7 +152,7 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
         <div class="result-cards">
           <div
             v-for="item in results.knowledge"
-            :key="item.reference_id"
+            :key="`${item.content_type}:${item.reference_id}`"
             class="result-card editorial-card reveal-stagger"
             @click="emit('navigate', knowledgePage(item))"
           >
@@ -190,16 +204,16 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
               <div class="fund-values">
                 <div class="fund-value-item">
                   <span class="value-label terminal-label">持有份额</span>
-                  <span class="value-num">{{ Number(item.shares).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+                  <span class="value-num">{{ formatNumber(item.shares) }}</span>
                 </div>
                 <div class="fund-value-item">
                   <span class="value-label terminal-label">最新净值</span>
-                  <span class="value-num">{{ Number(item.current_nav).toFixed(4) }}</span>
+                  <span class="value-num">{{ formatNumber(item.current_nav, 4) }}</span>
                 </div>
                 <div class="fund-value-item">
                   <span class="value-label terminal-label">市值</span>
                   <span class="value-num value-highlight">
-                    {{ Number(item.current_value).toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' }) }}
+                    {{ item.current_value == null ? '--' : `¥${formatNumber(item.current_value)}` }}
                   </span>
                 </div>
               </div>
@@ -223,7 +237,7 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
         <div class="result-cards">
           <div
             v-for="item in results.valuations"
-            :key="item.index_code"
+            :key="`${item.index_code}:${item.metric_type}`"
             class="result-card valuation-card editorial-card reveal-stagger"
             @click="emit('navigate', 'valuation')"
           >
@@ -237,19 +251,19 @@ watch(() => props.query, (q) => { doSearch(q) }, { immediate: true })
               </div>
               <div class="valuation-values">
                 <div class="valuation-item">
-                  <span class="value-label terminal-label">估值</span>
-                  <span class="value-num">{{ Number(item.current_value).toFixed(2) }}</span>
+                  <span class="value-label terminal-label">{{ item.metric_type || '估值' }}</span>
+                  <span class="value-num">{{ formatNumber(item.current_value) }}</span>
                 </div>
                 <div class="valuation-item">
                   <span class="value-label terminal-label">百分位</span>
                   <div class="percentile-wrap">
                     <span
                       class="percentile-badge"
-                      :style="{ color: percentileLevel(item.percentile).color, backgroundColor: percentileLevel(item.percentile).color + '14' }"
+                      :style="{ color: percentileLevel(item.percentile).color }"
                     >
                       {{ percentileLevel(item.percentile).text }}
                     </span>
-                    <span class="value-num">{{ Number(item.percentile).toFixed(1) }}%</span>
+                    <span v-if="item.percentile != null" class="value-num">{{ formatNumber(item.percentile, 1) }}%</span>
                   </div>
                 </div>
                 <div v-if="item.snapshot_date" class="valuation-item">

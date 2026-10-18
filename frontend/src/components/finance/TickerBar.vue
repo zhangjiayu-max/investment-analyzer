@@ -1,156 +1,131 @@
 <script setup>
-/**
- * TickerBar — 行情速览顶栏
- *
- * 40px 高 glass 顶栏：左侧滚动行情 ticker + 中间搜索框 + 右侧画像入口/主题切换。
- * 数据源：getDashboard() 的 indices（市场指数），降级到理财语录轮播。
- *
- * 用于 App.vue 桌面布局主区顶部。
- */
-import { ref, onMounted, onUnmounted } from 'vue'
+/** 顶部唯一语录栏：本地轮换 + 日频沪市融资摘要 + 全局搜索。 */
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import Icon from '../ui/Icon.vue'
-import Sparkline from './Sparkline.vue'
+import TermTooltip from '../ui/TermTooltip.vue'
 import AlertBell from '../task/AlertBell.vue'
-import { getDashboard, getFinanceQuoteBar, getInstitutionalFlowSummary } from '../../api'
+import { getFinanceQuoteBar, getInstitutionalFlowSummary } from '../../api'
 import { isDark, toggleDark } from '../../composables/useTheme'
+import { investmentQuoteFallbacks } from './investmentQuoteFallbacks'
 
 const emit = defineEmits(['open-kyc', 'search', 'navigate'])
-
 const searchQuery = ref('')
-
-function handleSearch() {
+function handleSearch(event) {
+  if (event?.isComposing || event?.keyCode === 229) return
   const q = searchQuery.value.trim()
   if (q) emit('search', q)
 }
 
-const indices = ref([])
-const quoteText = ref('')
-const loading = ref(true)
-// 机构动向（融资余额近5日净变化）
-const flow = ref(null)
-let timer = null
+const quoteText = ref(investmentQuoteFallbacks[0])
+let quotePool = [...investmentQuoteFallbacks]
+let quoteQueue = []
+let quoteTimer = null
+let flowTimer = null
+let disposed = false
 
-async function loadMarketData() {
-  try {
-    const { data } = await getDashboard()
-    const idx = data?.market_overview?.indices || data?.indices || []
-    if (idx.length) {
-      // 取前 6 个主要指数
-      indices.value = idx.slice(0, 6).map(i => ({
-        name: i.name,
-        price: i.price,
-        changePct: i.change_pct,
-        // 简单模拟 sparkline 数据（真实历史需后端补，这里用 change_pct 生成趋势）
-        spark: [0, i.change_pct * 0.3, i.change_pct * 0.6, i.change_pct * 0.5, i.change_pct],
-      }))
-      loading.value = false
-    } else {
-      // 降级：语录轮播
-      await loadQuote()
-    }
-  } catch { /* 降级 */ await loadQuote() }
-  // 并行加载机构动向（独立于指数降级路径，失败不影响主流程）
-  loadFlow()
+function shuffledQuotes() {
+  const items = [...quotePool]
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[items[i], items[j]] = [items[j], items[i]]
+  }
+  return items
 }
-
-async function loadQuote() {
+function nextQuote() {
+  if (!quoteQueue.length) {
+    quoteQueue = shuffledQuotes()
+    // 跨轮也不连续重复同一句。
+    const last = quoteQueue.length - 1
+    if (last > 0 && quoteQueue[last] === quoteText.value) {
+      ;[quoteQueue[0], quoteQueue[last]] = [quoteQueue[last], quoteQueue[0]]
+    }
+  }
+  quoteText.value = quoteQueue.pop()
+}
+async function loadQuotes() {
   try {
     const { data } = await getFinanceQuoteBar()
-    quoteText.value = data.quote || '市场永远在波动，情绪稳定才是最大的优势。'
-  } catch {
-    quoteText.value = '市场永远在波动，情绪稳定才是最大的优势。'
-  }
-  loading.value = false
+    if (disposed) return
+    const items = Array.isArray(data?.quotes) ? data.quotes : []
+    const valid = [...new Set(items.filter(q => typeof q === 'string' && q.trim()))]
+    if (valid.length > 1) quotePool = valid
+    else if (data?.quote) quotePool = [...new Set([data.quote, ...investmentQuoteFallbacks])]
+    if (typeof data?.quote === 'string' && quotePool.includes(data.quote)) quoteText.value = data.quote
+  } catch { /* 离线也使用备用文案继续轮换。 */ }
+  if (!disposed) quoteQueue = shuffledQuotes().filter(q => q !== quoteText.value)
 }
 
+const flow = ref(null)
+const flowLoading = ref(true)
+const flowFailed = ref(false)
+let flowPending = false
 async function loadFlow() {
+  if (flowPending || disposed) return
+  flowPending = true
   try {
     const { data } = await getInstitutionalFlowSummary()
-    if (data && typeof data.recent_5d_change_yi === 'number') {
-      flow.value = {
-        change: data.recent_5d_change_yi,
-        trend: data.trend || 'neutral',
-        strength: data.strength || 'weak',
-      }
-    }
-  } catch { /* 静默降级，不显示条目 */ }
+    if (disposed) return
+    flowFailed.value = false
+    flow.value = data?.data_status === 'ok' && Number.isFinite(data.recent_5d_change_yi) && data.latest_date
+      ? { change: data.recent_5d_change_yi, date: data.latest_date, trend: data.trend, strength: data.strength }
+      : null
+  } catch {
+    if (!disposed) flowFailed.value = true
+  } finally {
+    flowPending = false
+    if (!disposed) flowLoading.value = false
+  }
 }
-
-// 机构动向条目显示文本
-function flowLabel(s) {
-  if (!s) return ''
-  const sign = s.change > 0 ? '+' : ''
-  return `${sign}${s.change.toFixed(2)}亿`
+const flowStatus = computed(() => flowFailed.value ? '更新失败' : flowLoading.value ? '加载中' : '暂无数据')
+const flowDescription = computed(() => [
+  '融资数据 · 辅助参考',
+  flow.value ? `沪市近5个交易日融资余额变化：${flowLabel(flow.value.change)}元。\n截至 ${flow.value.date}，来源：上交所。` : `${flowStatus.value}，不代表融资余额变化为零。`,
+  '融资余额是投资者向券商借钱买股票后，尚未偿还的借款余额。',
+  '正值表示借款余额增加，负值表示减少，不等于市场资金净流入或净流出。',
+  '只覆盖沪市，按交易日发布；周末、节假日通常不变，每分钟检查更新。',
+  '仅辅助观察杠杆资金情绪，不作为买卖依据。',
+  flowFailed.value ? flow.value ? '本次更新失败，显示的数值为上次成功获取的数据。' : '本次更新失败，暂时无法获取融资数据。' : '',
+].filter(Boolean).join('\n'))
+function flowLabel(value) {
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}亿`
 }
 
 onMounted(() => {
-  loadMarketData()
-  timer = setInterval(loadMarketData, 60000) // 每分钟刷新
+  loadQuotes()
+  loadFlow()
+  quoteTimer = setInterval(nextQuote, 10000)
+  flowTimer = setInterval(loadFlow, 60000)
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  disposed = true
+  clearInterval(quoteTimer)
+  clearInterval(flowTimer)
+})
 </script>
 
 <template>
   <div class="ticker-bar">
-    <!-- 左侧：行情 ticker + 融资5日（融资条目固定不截断） -->
     <div class="ticker-left">
-      <!-- 可滚动的行情指数区 -->
-      <div class="ticker-scroll">
-        <template v-if="indices.length">
-          <div v-for="idx in indices" :key="idx.name" class="ticker-item"
-            :class="idx.changePct > 0 ? 'up' : idx.changePct < 0 ? 'down' : ''">
-            <span class="ticker-name font-jet">{{ idx.name }}</span>
-            <span class="ticker-price font-jet">{{ idx.price?.toFixed(2) ?? '--' }}</span>
-            <span class="ticker-change font-jet">
-              {{ idx.changePct > 0 ? '+' : '' }}{{ idx.changePct?.toFixed(2) }}%
-            </span>
-            <Sparkline v-if="idx.spark" :data="idx.spark" :width="40" :height="16" :fill="false" class="ticker-spark" />
-          </div>
-        </template>
-        <div v-else-if="!loading" class="ticker-quote">
-          <Icon name="lightbulb" size="13" class="ticker-quote-icon" />
-          <span class="ticker-quote-text">{{ quoteText }}</span>
-        </div>
-        <div v-else class="ticker-loading">
-          <Icon name="spinner" size="13" class="spinning" />
-        </div>
-      </div>
-      <!-- 机构动向：融资余额近5日净变化（固定在左侧区最右，不随行情滚动截断） -->
-      <div v-if="flow" class="ticker-item flow-item"
-        :class="flow.trend === 'inflow' ? 'up' : flow.trend === 'outflow' ? 'down' : ''">
-        <Icon name="landmark" size="12" class="flow-icon" />
-        <span class="term-with-tip flow-term">
-          <span class="ticker-name font-jet">融资5日</span>
-          <Icon name="info" size="11" class="flow-info-icon" />
-          <span class="term-tip flow-tip">
-            <b>融资余额近5日净变化</b><br/>
-            <span class="flow-tip-source">数据来源：上交所融资融券余额（akshare）</span><br/>
-            近5个交易日融资余额净变化，正值=杠杆资金加仓，负值=减仓。<br/>
-            <span class="flow-tip-strength">强度判定：|z-score|≥1.5 强信号，0.5-1.5 中等，&lt;0.5 弱。</span><br/>
-            <span class="flow-tip-note">辅助信号，不作为独立决策依据，与估值/持仓信号共振时增强置信度。</span>
-          </span>
-        </span>
-        <span class="ticker-change font-jet" :class="flow.strength === 'strong' ? 'strong' : ''">
-          {{ flowLabel(flow) }}
-        </span>
-      </div>
+      <button type="button" class="ticker-quote" :title="`${quoteText}（每10秒自动更换，点击换一条）`" aria-label="换一条投资语录" @click="nextQuote">
+        <Icon name="lightbulb" size="13" class="ticker-quote-icon" />
+        <Transition name="quote" mode="out-in">
+          <span :key="quoteText" class="ticker-quote-text">{{ quoteText }}</span>
+        </Transition>
+      </button>
+      <TermTooltip label="融资数据" :content="flowDescription" icon-only class="flow-help">
+        <template #trigger><Icon name="info" size="16" /></template>
+      </TermTooltip>
     </div>
 
-    <!-- 中间：搜索框 -->
     <div class="ticker-center">
-      <div class="ticker-search">
-        <Icon name="search" size="14" class="search-icon" />
-        <input
-          v-model="searchQuery"
-          type="text"
-          placeholder="搜索指数 / 基金 / 文章…"
-          class="search-input"
-          @keydown.enter="handleSearch"
-        />
+      <div class="ticker-search" role="search">
+        <input v-model="searchQuery" type="search" placeholder="搜索指数 / 持仓基金 / 文章…" aria-label="搜索指数、持仓基金或文章" class="search-input" @keydown.enter="handleSearch" />
+        <button type="button" class="search-submit" aria-label="搜索" title="搜索（Enter）" :disabled="!searchQuery.trim()" @click="handleSearch">
+          <Icon name="search" size="14" />
+        </button>
       </div>
     </div>
 
-    <!-- 右侧：画像入口 + 主动提醒 + 主题切换 -->
     <div class="ticker-right">
       <AlertBell @navigate="emit('navigate', $event)" />
       <button class="ticker-action" @click="emit('open-kyc')" title="我的投资画像">
@@ -166,118 +141,47 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 .ticker-bar {
-  display: flex;
-  align-items: center;
-  height: 40px;
-  padding: 0 0.75rem;
-  gap: 1rem;
-  background: var(--glass-bg);
-  border-bottom: 1px solid var(--color-border-light);
+  display: flex; align-items: center; min-height: 40px; padding: 0 .75rem; gap: .75rem;
+  background: var(--glass-bg); border-bottom: 1px solid var(--color-border-light);
   backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
-  flex-shrink: 0;
-  z-index: 30;
+  flex-shrink: 0; z-index: 30;
 }
-
-/* 左侧行情 */
-.ticker-left {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex: 1;
-  min-width: 0;
-}
-.ticker-scroll {
-  display: flex;
-  align-items: center;
-  gap: 1.2rem;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-.ticker-item {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  white-space: nowrap;
-  font-size: 0.72rem;
-  flex-shrink: 0;
-}
-.ticker-item.up { color: var(--color-profit); }
-.ticker-item.down { color: var(--color-loss); }
-.ticker-name { color: var(--color-text-secondary); font-weight: 500; }
-.ticker-price { font-weight: 600; }
-.ticker-change { font-weight: 600; min-width: 48px; }
-.ticker-spark { opacity: 0.7; }
-/* 机构动向条目（融资余额）— 与左侧指数 ticker 视觉分隔 */
-.flow-item {
-  padding-left: 0.8rem;
-  margin-left: 0.2rem;
-  border-left: 1px solid var(--color-border-light);
-}
-.flow-icon { opacity: 0.65; flex-shrink: 0; }
-.ticker-change.strong { font-weight: 700; }
-/* 融资5日 term-tip 覆写：TickerBar 在顶部，tooltip 向下弹出 */
-.flow-term { display: inline-flex; align-items: center; gap: 0.2rem; }
-.flow-info-icon { opacity: 0.5; }
-.flow-tip {
-  bottom: auto;
-  top: calc(100% + 8px);
-  width: 280px;
-  text-align: left;
-  font-weight: 400;
-}
-.flow-tip::after {
-  top: auto;
-  bottom: 100%;
-  border-top-color: transparent;
-  border-bottom-color: var(--color-bg-card);
-}
-.flow-tip b { color: var(--color-text-primary); font-weight: 600; }
-.flow-tip-source { color: var(--color-text-muted); font-size: 0.7rem; }
-.flow-tip-strength { color: var(--color-text-secondary); }
-.flow-tip-note { color: var(--color-warning); }
+.ticker-left { display: flex; align-items: center; gap: .75rem; flex: 1; min-width: 0; }
 .ticker-quote {
-  display: flex; align-items: center; gap: 0.4rem;
-  color: var(--color-text-muted); font-size: 0.72rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex; align-items: center; gap: .4rem; flex: 1; min-width: 0; padding: .35rem 0;
+  color: var(--color-text-secondary); font-size: .72rem; text-align: left;
+  overflow: hidden; white-space: nowrap; cursor: pointer;
 }
+.ticker-quote:hover { color: var(--color-text-primary); }
+.ticker-quote:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .ticker-quote-icon { color: var(--color-warning); flex-shrink: 0; }
 .ticker-quote-text { overflow: hidden; text-overflow: ellipsis; }
-.ticker-loading { color: var(--color-text-muted); }
-
-/* 中间搜索 */
-.ticker-center { flex-shrink: 0; }
+.quote-enter-active, .quote-leave-active { transition: opacity .15s ease; }
+.quote-enter-from, .quote-leave-to { opacity: 0; }
+.flow-help { flex-shrink: 0; }
+.flow-help :deep(.term-help-button) { width: 28px; height: 28px; border: none; cursor: pointer; }
+.flow-help :deep(.term-help-button:hover) { background: var(--color-bg-hover); }
+.ticker-center { flex: 0 1 235px; min-width: 160px; }
 .ticker-search {
-  display: flex; align-items: center; gap: 0.4rem;
-  width: 220px; padding: 0.3rem 0.6rem;
-  background: var(--color-bg-input);
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
-  transition: border-color var(--transition-fast);
+  display: flex; align-items: center; gap: .4rem; padding: .2rem .4rem .2rem .6rem;
+  background: var(--color-bg-input); border: 1px solid var(--color-border-light); border-radius: var(--radius-md);
 }
 .ticker-search:focus-within { border-color: var(--color-primary-border); }
-.search-icon { color: var(--color-text-muted); flex-shrink: 0; }
-.search-input {
-  border: none; background: none; outline: none;
-  font-size: 0.75rem; color: var(--color-text-primary);
-  width: 100%; font-family: inherit;
-}
+.search-input { min-width: 0; width: 100%; border: none; background: none; outline: none; font-size: .75rem; color: var(--color-text-primary); font-family: inherit; }
 .search-input::placeholder { color: var(--color-text-muted); }
-
-/* 右侧操作 */
-.ticker-right { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
-.ticker-action {
-  display: flex; align-items: center; gap: 0.25rem;
-  padding: 0.3rem 0.5rem; border-radius: var(--radius-sm);
-  color: var(--color-text-secondary); transition: all var(--transition-fast);
-}
+.search-submit { display: flex; align-items: center; padding: .15rem; color: var(--color-text-secondary); flex-shrink: 0; }
+.search-submit:disabled { opacity: .4; cursor: default; }
+.ticker-right { display: flex; align-items: center; gap: .3rem; flex-shrink: 0; }
+.ticker-action { display: flex; align-items: center; gap: .25rem; padding: .3rem .5rem; border-radius: var(--radius-sm); color: var(--color-text-secondary); }
 .ticker-action:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-.action-label { font-size: 0.72rem; font-weight: 500; }
-
-@media (max-width: 1024px) {
-  .ticker-center { display: none; }
-  .ticker-left { gap: 0.8rem; }
-  .ticker-item { gap: 0.2rem; }
+.action-label { font-size: .72rem; font-weight: 500; }
+@media (max-width: 1100px) {
+  .ticker-bar { flex-wrap: wrap; gap: .4rem .6rem; padding: .35rem .6rem; }
+  .ticker-left { flex-basis: 100%; }
+  .ticker-center { flex: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quote-enter-active, .quote-leave-active { transition: none; }
 }
 </style>

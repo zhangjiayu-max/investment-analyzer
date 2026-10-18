@@ -624,6 +624,7 @@ def calc_cash_constraint(
     try:
         from db.expense import get_cashflow
         household = get_cashflow(user_id)
+        cash = household["cash_balance"]
         # 家庭必要开销和应急金是所有配置模式共同的上限，零/负结余不能回退正额度。
         cash_data_available = cash_data_available and household["data_available"]
         usable_cash = max(0.0, cash - household["protected_cash"]) if cash_data_available else 0.0

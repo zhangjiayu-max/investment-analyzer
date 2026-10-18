@@ -326,6 +326,8 @@ const summary = ref({ holding_count: 0, total_cost: 0, total_value: 0, total_pro
 const cashBalances = ref({ '小鱼儿': 0, '花无缺': 0 })
 const cashInterests = ref({ '小鱼儿': 0, '花无缺': 0 })
 const totalCash = computed(() => {
+  const canonical = summary.value.cash_balance
+  if (canonical != null && Number.isFinite(Number(canonical))) return Number(canonical)
   if (accountFilter.value) {
     return cashBalances.value[accountFilter.value] || 0
   }
@@ -1517,13 +1519,15 @@ const txForm = ref({
 
 // Load data
 let portfolioGeneration = 0
+let cashGeneration = 0
 let displayedAccount = null
 let portfolioRead = null
 let autoConfirmRead = null
-async function loadData({ skipAutoConfirm = false } = {}) {
+async function loadData({ skipAutoConfirm = false, force = false } = {}) {
   const account = accountFilter.value
-  if (portfolioRead?.account === account) return portfolioRead.promise
+  if (!force && portfolioRead?.account === account) return portfolioRead.promise
   const version = ++portfolioGeneration
+  const cashVersion = ++cashGeneration
   const current = () => version === portfolioGeneration && accountFilter.value === account
   loading.value = true
   if (displayedAccount !== account) {
@@ -1538,6 +1542,17 @@ async function loadData({ skipAutoConfirm = false } = {}) {
       if (!current()) return
       summary.value = data
       holdings.value = data.holdings || []
+      // 余额接口会创建不存在的账户；先依统一快照限定已登记的分账户。
+      const namedAccounts = ['小鱼儿', '花无缺']
+      const cashAccounts = data.cash_scope
+        ? (data.cash_scope === 'legacy_default_cash' ? [] : (data.cash_accounts || []).map(item => item.account).filter(uid => namedAccounts.includes(uid)))
+        : namedAccounts
+      Promise.allSettled(cashAccounts.filter(uid => !account || uid === account).map(async uid => {
+        const { data: cash } = await getCashBalance(uid)
+        if (!current() || cashVersion !== cashGeneration) return
+        cashBalances.value[uid] = cash.balance || 0
+        cashInterests.value[uid] = cash.today_interest || 0
+      }))
       // 无账户筛选时复用总览，避免为走势图再读一次相同总览。
       if (!account) setChartFunds(data)
       else loadAllChartFunds()
@@ -1558,11 +1573,6 @@ async function loadData({ skipAutoConfirm = false } = {}) {
       }
     }).catch(e => console.warn('自动确认待确认交易失败:', e)).finally(() => { autoConfirmRead = null })
   }
-  Promise.allSettled(['小鱼儿', '花无缺'].map(async uid => {
-    const { data } = await getCashBalance(uid)
-    cashBalances.value[uid] = data.balance || 0
-    cashInterests.value[uid] = data.today_interest || 0
-  }))
   Promise.allSettled([loadPendingTxs(), loadWatchlist(), loadActionCenterData()])
   return request
 }
@@ -1602,11 +1612,15 @@ async function submitCashAdjust() {
   }
   try {
     const uid = cashForm.value.user_id
+    ++cashGeneration
     const { data } = await adjustCashBalance(cashForm.value.amount, cashMode.value, uid)
     cashBalances.value[uid] = data.balance
+    // 现金写入后弃用旧汇总，并绕过正在读取的旧请求重新核对统一口径。
+    summary.value = { ...summary.value, cash_balance: undefined }
     showCashModal.value = false
     cashForm.value.amount = 0
     showToast('零钱已更新', 'success')
+    await loadData({ skipAutoConfirm: true, force: true })
   } catch (e) {
     showToast('操作失败: ' + e.message, 'error')
   }

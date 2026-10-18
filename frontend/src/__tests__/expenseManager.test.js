@@ -26,6 +26,13 @@ const button = (w, text) => w.findAll('button').find(b => b.text().includes(text
 beforeEach(() => vi.clearAllMocks())
 afterEach(() => { wrappers.forEach(w => w.unmount()); wrappers.length = 0; vi.useRealTimers() })
 describe('ExpenseManager', () => {
+  it('opens on the overview selected month through initialMonth', async () => {
+    const w = mount(ExpenseManager, { props: { open: true, initialMonth: '2026-03' }, global: { stubs: { Teleport: true, Transition: true, RecurringBills: true, HouseholdCashflowCard: true } } })
+    wrappers.push(w)
+    await flushPromises()
+    expect(w.get('input[type="month"]').element.value).toBe('2026-03')
+    expect(api.getExpenses).toHaveBeenCalledWith('2026-03')
+  })
   it('uses Shanghai current month at the UTC month boundary', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-31T17:00:00Z'))
     const w = render(); await flushPromises()

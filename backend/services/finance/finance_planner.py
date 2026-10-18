@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 
 from db import (
-    get_portfolio_summary, get_cash_balance, list_goal_buckets,
+    get_portfolio_summary, list_goal_buckets,
     get_cashflow,
 )
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def forecast_cash_flow(months=12):
     """预测未来现金流。"""
     portfolio = get_portfolio_summary()
-    cash = (get_cash_balance() or {}).get('balance', 0) or 0
+    cash = portfolio.get('cash_balance', 0) or 0
     cashflow = get_cashflow()
     buckets = list_goal_buckets()
 

@@ -223,7 +223,15 @@ def list_recurring_bills(month, user_id="default", *, conn=None) -> list[dict]:
         paid = [dict(row) for row in conn.execute(
             "SELECT template_id, month, name, category, amount, due_date, expense_id "
             "FROM recurring_expense_payments WHERE user_id=? AND month=?", (user_id, month)).fetchall()]
-    by_id = {row["template_id"]: dict(row, status="paid") for row in paid}
+    template_by_id = {item["id"]: item for item in templates}
+    by_id = {}
+    for row in paid:
+        bill = dict(row, status="paid")
+        current = template_by_id.get(row["template_id"])
+        if current:
+            bill["current_template_amount"] = current["amount"]
+            bill["current_template_frequency"] = current["frequency"]
+        by_id[row["template_id"]] = bill
     for item in templates:
         if item["id"] not in by_id and _is_due(item, month):
             by_id[item["id"]] = _pending_bill(item, month)
@@ -280,11 +288,25 @@ def get_recurring_summary(month, user_id="default", *, conn=None) -> dict:
         templates = [item for item in list_recurring_templates(user_id, conn=conn) if _in_range(item, month)]
     paid_template_ids = {item["template_id"] for item in bills if item["status"] == "paid"}
     pending = [bill for bill in bills if bill["status"] == "pending"]
+    paid = [bill for bill in bills if bill["status"] == "paid"]
+    by_category = {}
+    for bill in bills:
+        bucket = by_category.setdefault(bill["category"], {"category": bill["category"], "paid": 0.0, "pending": 0.0, "total": 0.0})
+        bucket[bill["status"]] += bill["amount"]
+        bucket["total"] += bill["amount"]
     today = _today().isoformat()
     return {
         "month": month,
         "pending_total": round(sum(item["amount"] for item in pending), 2),
         "paid_total": round(sum(item["amount"] for item in bills if item["status"] == "paid"), 2),
+        "recurring_paid": round(sum(item["amount"] for item in paid), 2),
+        "recurring_pending": round(sum(item["amount"] for item in pending), 2),
+        "recurring_due_total": round(sum(item["amount"] for item in bills), 2),
+        # 生效中的模板数与本月到期账单数不同：季度/年度账单在非到期月
+        # 仍属于家庭固定负担，但不会生成本月应付项。
+        "recurring_count": len(templates),
+        "recurring_bills": bills,
+        "recurring_by_category": [{key: round(value, 2) if key != "category" else value for key, value in item.items()} for item in by_category.values()],
         "monthly_provision": round(sum(item["amount"] / INTERVALS[item["frequency"]]
                                        for item in templates), 2),
         "future_provision": round(sum(item["amount"] / INTERVALS[item["frequency"]]
