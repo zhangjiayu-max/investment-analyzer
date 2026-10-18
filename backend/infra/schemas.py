@@ -135,6 +135,9 @@ class AiSuggestionToDecisionRequest(BaseModel):
     """AI建议转决策请求"""
     suggestion: Optional[str] = Field(None, max_length=5000, description="AI建议文本")
     analysis: Optional[str] = Field(None, max_length=5000, description="分析文本（备用字段）")
+    conversation_id: Optional[int] = Field(None, gt=0, description="来源对话 ID")
+    scenario_type: Optional[str] = Field(None, max_length=50, description="来源场景")
+    agent_id: Optional[int] = Field(None, gt=0, description="来源 Agent ID")
 
     @field_validator("suggestion")
     @classmethod

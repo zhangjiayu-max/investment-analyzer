@@ -308,6 +308,32 @@ def update_opportunity_status(opportunity_id: int, status: str) -> bool:
     return ok
 
 
+def refresh_opportunity_review_status(opportunity_id: int) -> str | None:
+    """根据机会卡关联回测记录刷新 review_status，并返回新状态。
+
+    只有至少有一条回测且全部已完成时才标记 completed；没有可用价格的历史
+    记录继续保持 pending，避免把“未验证”误报成“已验证”。
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, SUM(CASE WHEN hit IS NOT NULL THEN 1 ELSE 0 END) AS reviewed "
+            "FROM theme_opportunity_backtests WHERE opportunity_id = ?",
+            (opportunity_id,),
+        ).fetchone()
+        total = int(row["total"] or 0) if row else 0
+        reviewed = int(row["reviewed"] or 0) if row else 0
+        status = "completed" if total > 0 and reviewed == total else "pending"
+        conn.execute(
+            "UPDATE theme_opportunities SET review_status = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+            (status, opportunity_id),
+        )
+        conn.commit()
+        return status
+    finally:
+        conn.close()
+
+
 def create_decision_from_opportunity(opportunity_id: int, user_id: str = "default") -> int:
     """把机会卡保存为理财决策草案。"""
     item = get_opportunity(opportunity_id)
@@ -402,6 +428,21 @@ def mark_opportunity_bought(opportunity_id: int, fund_code: str, amount: float =
     else:
         current_price = None
     conn = _get_conn()
+    # 幂等：重复点击“标记买入”不应制造多条同一机会跟踪记录。
+    existing = conn.execute(
+        "SELECT id FROM theme_opportunity_tracks WHERE opportunity_id = ? AND fund_code = ? "
+        "AND (transaction_id = ? OR (? IS NULL AND transaction_id IS NULL)) LIMIT 1",
+        (opportunity_id, fund_code, transaction_id, transaction_id),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE theme_opportunities SET status = 'bought', updated_at = datetime('now','localtime') WHERE id = ?",
+            (opportunity_id,),
+        )
+        conn.commit()
+        track_id = int(existing["id"])
+        conn.close()
+        return track_id
     cur = conn.execute("""
         INSERT INTO theme_opportunity_tracks
             (opportunity_id, fund_code, transaction_id, entry_date, entry_amount, entry_price, entry_shares,
@@ -423,6 +464,76 @@ def mark_opportunity_bought(opportunity_id: int, fund_code: str, amount: float =
     conn.close()
     update_opportunity_status(opportunity_id, "bought")
     return track_id
+
+
+def mark_matching_opportunities_bought(
+    fund_code: str,
+    amount: float = 0,
+    entry_price: float | None = None,
+    entry_date: str | None = None,
+    transaction_id: int | None = None,
+    user_id: str = "default",
+) -> list[int]:
+    """把实际买入同步到匹配的主题机会，建立「上车→跟踪」记录。
+
+    机会卡和关注列表是两个入口，之前从关注列表/持仓录入买入时只更新了
+    watchlist 状态，机会卡始终停留在 watching，导致闭环统计缺少 track。
+    该函数按 matched_funds 中的 fund_code 做幂等关联，不会重复创建跟踪记录。
+    """
+    if not fund_code:
+        return []
+    entry_date = entry_date or datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM theme_opportunities WHERE user_id = ? "
+            "AND (status IN ('active', 'watching') OR (status = 'bought' AND ? IS NOT NULL)) "
+            "ORDER BY id DESC",
+            (user_id, transaction_id),
+        ).fetchall()
+        matched_ids: list[int] = []
+        for row in rows:
+            item = _row_to_opportunity(row)
+            funds = item.get("matched_funds") or []
+            if not any(str(f.get("fund_code")) == str(fund_code) for f in funds if isinstance(f, dict)):
+                continue
+            existing = conn.execute(
+                "SELECT id, transaction_id FROM theme_opportunity_tracks "
+                "WHERE opportunity_id = ? AND fund_code = ? AND "
+                "(transaction_id = ? OR transaction_id IS NULL) "
+                "ORDER BY CASE WHEN transaction_id = ? THEN 0 ELSE 1 END, id LIMIT 1",
+                (item["id"], fund_code, transaction_id, transaction_id),
+            ).fetchone()
+            if existing:
+                if transaction_id is not None and existing["transaction_id"] is None:
+                    conn.execute(
+                        "UPDATE theme_opportunity_tracks SET transaction_id = ?, entry_price = COALESCE(?, entry_price), "
+                        "entry_amount = COALESCE(?, entry_amount), entry_date = COALESCE(?, entry_date) WHERE id = ?",
+                        (transaction_id, entry_price, amount, entry_date, existing["id"]),
+                    )
+                conn.execute(
+                    "UPDATE theme_opportunities SET status = 'bought', updated_at = datetime('now','localtime') WHERE id = ?",
+                    (item["id"],),
+                )
+                matched_ids.append(int(existing["id"]))
+                continue
+            review_date = (item.get("exit_plan") or {}).get("review_date")
+            conn.execute(
+                "INSERT INTO theme_opportunity_tracks "
+                "(opportunity_id, fund_code, transaction_id, entry_date, entry_price, entry_amount, review_due_date, last_checked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                (item["id"], fund_code, transaction_id, entry_date, entry_price, amount, review_date),
+            )
+            track_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            conn.execute(
+                "UPDATE theme_opportunities SET status = 'bought', updated_at = datetime('now','localtime') WHERE id = ?",
+                (item["id"],),
+            )
+            matched_ids.append(int(track_id))
+        conn.commit()
+        return matched_ids
+    finally:
+        conn.close()
 
 
 def _refresh_track_metrics(track: dict) -> dict:

@@ -3822,22 +3822,22 @@ def get_analysis_cache(cache_key: str) -> dict | None:
     return None
 
 
-def get_cached_fund_holdings(fund_code: str) -> dict:
+def get_cached_fund_holdings(fund_code: str, force_refresh: bool = False) -> dict:
     """获取基金持仓（24h 缓存）。"""
     cache_key = f"fund_holdings_{fund_code}"
     cached = get_analysis_cache(cache_key)
-    if cached:
+    if cached and not force_refresh:
         return cached
     data = get_fund_holdings(fund_code)
     save_analysis_cache(cache_key, data)
     return data
 
 
-def get_portfolio_penetration(user_id: str = "default") -> dict:
+def get_portfolio_penetration(user_id: str = "default", force_refresh: bool = False) -> dict:
     """跨基金加权聚合底层股票持仓，计算持仓穿透。"""
     cache_key = f"portfolio_penetration_{user_id}"
     cached = get_analysis_cache(cache_key)
-    if cached:
+    if cached and not force_refresh:
         return cached
 
     holdings = list_holdings(user_id)
@@ -3854,7 +3854,7 @@ def get_portfolio_penetration(user_id: str = "default") -> dict:
         fund_name = h["fund_name"]
         fund_value = h["current_value"]
         try:
-            fh = get_cached_fund_holdings(fund_code)
+            fh = get_cached_fund_holdings(fund_code, force_refresh=force_refresh)
             stocks = fh.get("top_stocks", [])
             fund_stock_map[fund_code] = {"name": fund_name, "value": fund_value, "stocks": stocks}
         except Exception as e:

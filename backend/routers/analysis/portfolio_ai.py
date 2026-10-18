@@ -72,7 +72,12 @@ async def _run_portfolio_ai_async(task_id: int, record_id: int, user_question: s
         # 读取 record 结果
         record = get_portfolio_analysis_record(record_id)
         if record and record.get("status") == "done":
-            update_async_task(task_id, status="done", result={"record_id": record_id, "status": "done"})
+            update_async_task(task_id, status="done", result={
+                "record_id": record_id,
+                "status": "done",
+                "result": record.get("result_data") or "",
+                "token_usage": record.get("token_usage") or 0,
+            })
         else:
             error_msg = record.get("error_msg", "未知错误") if record else "记录不存在"
             update_async_task(task_id, status="error", error_msg=error_msg)

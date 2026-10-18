@@ -315,6 +315,7 @@ import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../../
 import { useAsyncTask } from '../../composables/useAsyncTask'
 import Icon from '../ui/Icon.vue'
 import SharedSignalsCard from '../shared/SharedSignalsCard.vue'
+import { isFreshMarketIntelligence } from './marketIntelligenceHelpers'
 
 const { taskState, taskResult, taskError, start, restore, restoreFromServer, reset } = useAsyncTask('market_intelligence')
 const loading = ref(false)
@@ -335,6 +336,18 @@ const activeSector = computed(() => {
 
 onMounted(async () => {
   const restored = await restoreFromServer({
+    onRestore: (result) => {
+      // 新版结果带 fetched_at 时严格限制为当天；旧任务结果没有该字段时仍允许恢复，
+      // 否则升级后历史终态任务会被误判为空并再次触发分析。
+      if (isFreshMarketIntelligence(result) || !result?.fetched_at) {
+        data.value = result
+        selectedSector.value = 0
+        loading.value = false
+      } else {
+        reset()
+        loadData()
+      }
+    },
     onComplete: (result) => {
       data.value = result
       selectedSector.value = 0
@@ -342,6 +355,7 @@ onMounted(async () => {
     },
     onError: (err) => {
       console.error('市场情报加载失败:', err)
+      data.value = null
       loading.value = false
     }
   })
@@ -371,6 +385,7 @@ async function loadData(force = false) {
       },
       onError: (err) => {
         console.error('市场情报加载失败:', err)
+        data.value = null
         loading.value = false
       }
     })

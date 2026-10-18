@@ -1424,8 +1424,8 @@ export function listTransactionsWithFilter(holdingId, params = {}) {
 }
 
 /** 获取持仓分散度分析 */
-export function getPortfolioDiversification() {
-  return api.get('/portfolio/analysis/diversification')
+export function getPortfolioDiversification(forceRefresh = false) {
+  return api.get('/portfolio/analysis/diversification', { params: { force_refresh: forceRefresh } })
 }
 
 /** 配置分布分析（按账户/类别聚合市值占比） */
@@ -1614,8 +1614,8 @@ export function getAiSummaryTodayStatus() {
 }
 
 /** 跨基金持仓穿透分析 */
-export function getPortfolioPenetration() {
-  return api.get('/portfolio/analysis/penetration')
+export function getPortfolioPenetration(forceRefresh = false) {
+  return api.get('/portfolio/analysis/penetration', { params: { force_refresh: forceRefresh } })
 }
 
 // ── AI 持仓分析 API ──────────────────────────────────────

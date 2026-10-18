@@ -24,7 +24,7 @@ from ._shared import (
     inject_rag_context, build_portfolio_facts_with_check,
 )
 
-from ._agent_contract import require_analysis_agent
+from ._agent_contract import require_analysis_agent, complete_text_analysis
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-panorama"])
@@ -82,7 +82,12 @@ async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt:
             )
 
         type_dist = diversification.get('type_distribution', {})
-        type_lines = [f"  - {k}: {v:.1f}%" for k, v in type_dist.items()]
+        # diversification 返回的是金额；提示词这里必须转换为占比，避免把 ¥ 金额当成百分比。
+        type_lines = [
+            f"  - {k}: {(float(v) / total_value * 100):.1f}%"
+            for k, v in type_dist.items()
+            if total_value > 0
+        ]
 
         mcp_context = _get_mcp_context(holdings)
         valuation_context = _get_holdings_valuation_context(holdings)
@@ -125,7 +130,8 @@ async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt:
             input_summary="全景诊断",
         )
         from services.llm_service import _call_llm, MODEL_AUX
-        response = await asyncio.to_thread(lambda: _call_llm(
+        result_text, tokens = await complete_text_analysis(
+            _call_llm,
             caller="portfolio_panorama",
             trace_id=trace_id,
             model=MODEL_AUX,
@@ -135,11 +141,7 @@ async def _run_panorama_async(async_task_id: int, record_id: int, system_prompt:
             ],
             temperature=get_config_float('llm.temperature_analysis', 0.3),
             max_tokens=get_config_int('llm.max_tokens_analysis', 8192),
-        ))
-        result_text = response.choices[0].message.content or ""
-        if not result_text.strip():
-            raise ValueError("模型未返回有效分析，请重试")
-        tokens = response.usage.total_tokens if response.usage else 0
+        )
 
         update_analysis_record(record_id, result_data=result_text, token_usage=tokens, status="done")
         update_async_task(async_task_id, status="done")

@@ -2750,6 +2750,14 @@ def review_opportunity_backtests() -> dict:
                     update_fields["miss_reason"] = miss_reason_text
 
                 update_opportunity_backtest(track["id"], update_fields)
+                # 回测完成后同步机会卡状态，前端可明确区分 pending / completed。
+                try:
+                    if track.get("opportunity_id") is None:
+                        raise ValueError("missing opportunity_id")
+                    from db.opportunities import refresh_opportunity_review_status
+                    refresh_opportunity_review_status(track.get("opportunity_id"))
+                except Exception as e:
+                    logger.debug(f"[opportunity] review_status 更新失败 {track.get('opportunity_id')}: {e}")
 
                 # LI-6（2026-07-22）：miss 时记录原因
                 if hit == 0:

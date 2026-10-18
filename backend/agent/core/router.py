@@ -55,6 +55,9 @@ def _load_router_config() -> dict:
 # 关键词 → 专家 key 列表（按优先级排序）
 # 注意：专家 key 来自 db.agents.load_specialist_agents() 的返回值
 _KEYWORD_ROUTES = [
+    # 择时专家必须能被规则路由命中；否则配置虽存在却永远只能依赖 LLM 兜底。
+    (["择时", "买点", "入场时机", "买入时机", "卖出时机", "交易时机", "什么时候买", "什么时候卖"],
+     ["market_timer"]),
     # P0 修复 conv_147：估值类关键词补全（"分位"/"便宜"/"贵"/"能买吗" 原缺失导致未路由 valuation_expert）
     (["估值", "PE", "PB", "百分位", "分位", "低估", "高估", "便宜", "贵", "能买吗", "贵不贵", "值不值得买"],
      ["valuation_expert"]),
