@@ -74,6 +74,9 @@ class AgentOutput:
 
     # 时间
     duration_ms: int = 0
+    # 组合立场与逐标的动作分开，动作内的来源、金额和拒绝条件原样传递。
+    asset_actions: list[dict] = field(default_factory=list)
+    portfolio_stance: str = "unknown"
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +87,8 @@ class AgentOutput:
             "conclusion": self.conclusion,
             "verdict": self.verdict,
             "action_signals": self.action_signals,
+            "asset_actions": self.asset_actions,
+            "portfolio_stance": self.portfolio_stance,
             "data_references": self.data_references,
             "confidence": self.confidence,
             "confidence_breakdown": self.confidence_breakdown,
@@ -101,7 +106,10 @@ class AgentOutput:
             "trace_id": self.trace_id,
             "payload": {
                 "conclusion": self.conclusion,
+                "verdict": self.verdict,
                 "action_signals": self.action_signals,
+                "asset_actions": self.asset_actions,
+                "portfolio_stance": self.portfolio_stance,
                 "data_references": self.data_references,
                 "confidence": self.confidence,
                 "confidence_breakdown": self.confidence_breakdown,
@@ -178,6 +186,10 @@ class A2AMessageBus:
         lines = ["## 其他专家的分析结论（A2A）"]
         for m in relevant[-5:]:  # 最近 5 条
             lines.append(f"- [{m.from_agent}] {m.payload.get('conclusion', '')}")
+            if m.payload.get("portfolio_stance"):
+                lines.append(f"  组合立场: {m.payload['portfolio_stance']}")
+            if m.payload.get("asset_actions"):
+                lines.append("  逐标的动作（含来源及限制）: " + json.dumps(m.payload["asset_actions"], ensure_ascii=False))
             if m.payload.get("action_signals"):
                 signals = ", ".join(
                     f"{s.get('type', '?')} {s.get('target', '')}({s.get('confidence', '?')})"
@@ -205,6 +217,8 @@ def parse_agent_output(raw_text: str, agent_key: str, agent_name: str,
             structured = json.loads(json_match.group(1))
         except json.JSONDecodeError:
             logger.warning(f"[{agent_key}] JSON 解析失败，使用纯文本模式")
+    if not isinstance(structured, dict):
+        structured = {}
 
     # 提取自然语言分析体（去掉 JSON 块）
     analysis_md = raw_text
@@ -220,6 +234,8 @@ def parse_agent_output(raw_text: str, agent_key: str, agent_name: str,
         conclusion=structured.get("conclusion", ""),
         verdict=_normalize_verdict(structured.get("verdict"), structured.get("action_signals", [])),
         action_signals=structured.get("action_signals", []),
+        asset_actions=structured.get("asset_actions", structured.get("action_signals", [])),
+        portfolio_stance=_normalize_verdict(structured.get("portfolio_stance") or structured.get("verdict"), []),
         data_references=structured.get("data_references", []),
         confidence=float(structured.get("confidence", 0.0)),
         confidence_breakdown=structured.get("confidence_breakdown", {}),
@@ -279,11 +295,7 @@ def agent_outputs_to_a2a_context(outputs: list[AgentOutput],
             to_agent=target_agent_key,
             msg_type="analysis",
             trace_id=ao.trace_id,
-            payload={
-                "conclusion": ao.conclusion,
-                "action_signals": ao.action_signals,
-                "confidence": ao.confidence,
-            },
+            payload=ao.to_a2a_message()["payload"],
             body=ao.analysis_markdown,
         )
         bus.send(msg)
@@ -307,7 +319,9 @@ _A2A_OUTPUT_INSTRUCTION = """
     {"type": "BUY|SELL|HOLD|ADD|REDUCE|WATCH", "target": "标的名称", "confidence": 0.0-1.0, "urgency": "high|medium|low"}
   ],
   "asset_actions": [
-    {"target": "标的名称或代码", "action": "BUY|SELL|HOLD", "reason": "针对该标的的理由", "status": "current|conditional"}
+    {"target": "标的名称", "target_code": "有原始证据支持的六位代码，未知则为空字符串", "action": "BUY|SELL|HOLD|ADD|REDUCE",
+     "confidence": 0.0-1.0, "evidence_refs": ["可追溯的工具或证据ID"], "reason": "针对该标的的理由",
+     "status": "current|conditional|historical|negated|rejected", "amount": null, "conditions": []}
   ],
   "portfolio_stance": "buy|hold|sell|watch",
   "data_references": [
@@ -334,7 +348,9 @@ _A2A_OUTPUT_INSTRUCTION = """
   - watch：建议观察等待（数据不足或信号不明确）
   - avoid：建议回避（高风险或估值过高）
 - verdict 必须与 action_signals 和详细分析的操作建议一致，不得矛盾
-- asset_actions 只填写当前明确建议；条件、历史或否定动作请标记 status=conditional 或省略。
+- asset_actions 中每个动作独立保留 confidence、evidence_refs、reason、status、target_code、amount 和 conditions。
+- amount 是已核验的人民币金额，未知用 null；target_code、evidence_refs 必须能回查已有证据，不能猜测或补造。
+- 条件、历史或否定动作分别标记 status=conditional、historical、negated；拒绝动作用 rejected，条件写入 conditions。这些状态不表示当前可执行建议。
 - portfolio_stance 表示组合层面立场，可以与单个标的的 asset_actions 同时存在。
 - 如果某个字段不适用，用空数组 [] 或 0.0
 - 置信度 confidence 不要盲目给高分，有不确定因素时如实降低
@@ -368,7 +384,13 @@ def normalize_specialist_result(raw: dict) -> dict:
     if confidence is None:
         confidence = inner.get("confidence", 0.0)
     action_signals = raw.get("action_signals") or inner.get("action_signals") or []
-    asset_actions = raw.get("asset_actions") or inner.get("asset_actions") or []
+    if "asset_actions" in raw:
+        asset_actions = raw["asset_actions"]
+    elif "asset_actions" in inner:
+        asset_actions = inner["asset_actions"]
+    else:
+        # 老协议没有逐标的字段时仍保留显式信号；不能覆盖新版的空数组。
+        asset_actions = action_signals
 
     # 归一化 verdict
     verdict = _normalize_verdict(verdict, action_signals) if verdict != "unknown" else "unknown"

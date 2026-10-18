@@ -5,6 +5,8 @@ from datetime import datetime
 
 from db._conn import _get_conn, _row_to_dict
 
+STALE_PARSE_TASK_MINUTES = 10
+
 
 def create_dd_parse_task(image_path: str, image_name: str = "", parse_type: str = "dd") -> int:
     """创建解析任务，返回 task_id。"""
@@ -53,15 +55,35 @@ def get_dd_parse_task(task_id: int) -> dict | None:
 
 
 def find_running_task(image_path: str, parse_type: str | None = None) -> dict | None:
-    """查找同一图片正在执行或最近完成的任务（去重用）。"""
+    """查找同一图片正在执行的任务（去重用）。
+
+    解析任务由进程内后台协程执行；服务重载或进程崩溃后，数据库里的
+    ``pending/parsing`` 状态可能没有机会收尾。超过视觉模型最大重试时长
+    的任务视为陈旧并标记失败，允许用户重新提交。
+    """
     conn = _get_conn()
+    stale_cutoff = f"-{STALE_PARSE_TASK_MINUTES} minutes"
+    conn.execute(
+        """
+        UPDATE dd_parse_tasks
+        SET status = 'error',
+            error_msg = CASE WHEN error_msg IS NULL OR error_msg = ''
+                             THEN '解析任务超时或服务已重启，请重新提交'
+                             ELSE error_msg END,
+            updated_at = datetime('now', 'localtime')
+        WHERE status IN ('pending', 'parsing')
+          AND updated_at < datetime('now', 'localtime', ?)
+        """,
+        (stale_cutoff,),
+    )
+    conn.commit()
     type_filter = " AND parse_type = ?" if parse_type else ""
-    params = (image_path, parse_type) if parse_type else (image_path,)
     row = conn.execute(f"""
         SELECT * FROM dd_parse_tasks
-        WHERE image_path = ? AND status IN ('pending', 'parsing'){type_filter}
+        WHERE image_path = ? AND status IN ('pending', 'parsing')
+          AND updated_at >= datetime('now', 'localtime', ?){type_filter}
         ORDER BY id DESC LIMIT 1
-    """, params).fetchone()
+    """, (image_path, stale_cutoff, parse_type) if parse_type else (image_path, stale_cutoff)).fetchone()
     conn.close()
     if not row:
         return None

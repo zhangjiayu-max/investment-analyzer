@@ -2190,63 +2190,51 @@ def _search_knowledge(args: dict) -> str:
 
     result = build_rag_context_with_details(query, content_types=content_types, limit=limit)
 
+    # 唯一 ID 连接原始证据；出版来源与检索通道分别保留。
+    from db._conn import _get_conn as _get_evidence_conn
+    from services.rag.evidence_quality import hydrate_evidence
+    evidence_results = result.get("results", [])
+    try:
+        hydrate_evidence(evidence_results, _get_evidence_conn)
+    except Exception as exc:
+        logger.warning("知识检索原文回查失败: %s", exc)
+        result["rag_low_quality"] = True
+        result.setdefault("quality_reasons", []).append("original_source_unavailable")
+
     log_rag_search(
         conversation_id=conversation_id or 0,
         message_id=message_id or 0,
         query=query,
         keywords=result.get("keywords", []),
-        results=result.get("results", []),
+        results=evidence_results,
         content_types=content_types or [],
         fts_count=result.get("fts_count", 0),
         chroma_count=result.get("chroma_count", 0),
         freshness_filtered=result.get("freshness_filtered", 0),
         trace_id=trace_id,
-        rag_low_quality=result.get("rag_low_quality", False),
+        rag_low_quality=result.get("rag_low_quality", True),
     )
-
     slim_results = []
-    # P0 修复（2026-08-02）：body_preview 回查原表 content，避免显示 FTS 分词空格串
-    # 原逻辑：body_preview = r.get("body", "")[:300]
-    # 问题：FTS5 表存的是 jieba 分词后的空格串（如 "8 月 走势 ..."），非原始正文
-    #       且原 body 为空时 body_preview 也为空，LLM 无法利用正文内容
-    # 修复：按 content_type+reference_id 回查 knowledge_base 原表 content 字段
-    _kb_content_map = {}
-    try:
-        from db._conn import _get_conn as _get_kb_conn
-        _kb_conn = _get_kb_conn()
-        for r in result.get("results", []):
-            ref_id = r.get("reference_id", "")
-            ct = r.get("content_type", "")
-            if not ref_id or not ct:
-                continue
-            # knowledge_base 表用 title 关联回原始 content（reference_id 不直接对应 id）
-            title = r.get("title", "")
-            if title and title not in _kb_content_map:
-                row = _kb_conn.execute(
-                    "SELECT content FROM knowledge_base WHERE title = ? LIMIT 1", (title,)
-                ).fetchone()
-                if row and row[0]:
-                    _kb_content_map[title] = row[0][:300]
-        _kb_conn.close()
-    except Exception:
-        pass
-
-    for r in result.get("results", []):
-        body_raw = r.get("body", "") or ""
-        title = r.get("title", "")
-        # 优先用原表 content，其次用 FTS body（分词串），兜底空串
-        body_preview = _kb_content_map.get(title, "") or body_raw[:300]
-        slim_results.append({
-            "content_type": r.get("content_type"),
-            "title": title,
-            "body_preview": body_preview,
-            "score": round(r.get("_score", 0), 3),
-        })
+    for r in evidence_results:
+        item = {key: r.get(key) for key in (
+            "content_type", "reference_id", "evidence_id", "title", "source", "source_url",
+            "retrieval_source", "time", "limitations", "counterpoints", "evidence_level",
+            "as_of_date", "valid_until", "quality_status", "quality_reason", "validation_status",
+            "validation_issues", "content_origin", "rerank_score",
+        )}
+        body = r.get("body", "") or ""
+        item.update({"content": body, "body_preview": body[:600],
+                     "preview_truncated": len(body) > 600, "score": round(r.get("_score", 0), 3)})
+        slim_results.append(item)
 
     return json.dumps({
         "results": slim_results,
         "total": len(slim_results),
         "keywords": result.get("keywords", []),
+        "rag_low_quality": result.get("rag_low_quality", True),
+        "quality_reasons": result.get("quality_reasons", []),
+        "quality_filtered": result.get("quality_filtered", 0),
+        "validation_scope": "仅相关性、适用场景和部分明确加权收益示例；未全面核验事实",
     }, ensure_ascii=False)
 
 

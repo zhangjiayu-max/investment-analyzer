@@ -4641,7 +4641,12 @@ def _inject_analysis_context(query: str) -> tuple:
     """
     try:
         from db.analysis_conclusions import get_latest_analysis_conclusions
-        conclusions = get_latest_analysis_conclusions(hours=24, limit=5)
+        from db import get_portfolio_snapshot
+        from services.portfolio.analysis_contract import filter_portfolio_conclusions
+        snapshot = get_portfolio_snapshot()
+        conclusions = filter_portfolio_conclusions(
+            get_latest_analysis_conclusions(hours=24, limit=30), snapshot,
+        )[:5]
         if not conclusions:
             return query, ""
 
@@ -4709,17 +4714,22 @@ def _load_recent_conclusions(
         conn = _get_conn()
         # LIKE 匹配 target_subject（双向：历史结论可能是 "161725" 或 "白酒"）
         rows = conn.execute(
-            """SELECT id, source_type, target_subject, action, summary, reasoning,
+            """SELECT id, source_type, target_subject, action, summary, reasoning, data_basis,
                       confidence, urgent, created_at
                FROM analysis_conclusions
                WHERE source_system = 'ai_dialogue'
                  AND (target_subject = ? OR target_subject LIKE ? OR ? LIKE '%' || target_subject || '%')
                  AND created_at >= datetime('now', 'localtime', ?)
+                 AND (expires_at IS NULL OR expires_at >= datetime('now', 'localtime'))
                ORDER BY urgent DESC, confidence DESC, created_at DESC
                LIMIT ?""",
-            (target_subject, f"%{target_subject}%", target_subject, f"-{hours} hours", limit),
+            (target_subject, f"%{target_subject}%", target_subject, f"-{hours} hours", max(limit * 10, 30)),
         ).fetchall()
         conn.close()
+
+        from db import get_portfolio_snapshot
+        from services.portfolio.analysis_contract import filter_portfolio_conclusions
+        rows = filter_portfolio_conclusions([dict(r) for r in rows], get_portfolio_snapshot())[:limit]
 
         if not rows:
             return ""
@@ -4729,7 +4739,7 @@ def _load_recent_conclusions(
             "decrease": "减仓", "hold": "持有", "": "-",
         }
         lines = [
-            f"\n## 历史分析结论（{hours}h 内同标的，强参考）",
+            f"\n## 历史分析结论（{hours}h 内同标的，已验证且匹配当前组合快照）",
             f"目标标的: **{target_subject}**",
             "",
         ]
@@ -5853,7 +5863,7 @@ def _pipeline_phase_message(phase: str) -> str:
     return messages.get(phase, f"阶段: {phase}")
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None, resume_from_checkpoint: dict | None = None):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None, resume_from_checkpoint: dict | None = None, prepared_rag_result: dict | None = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
 
@@ -5901,6 +5911,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     trace_id=trace_id,
                     cancel_event=cancel_event,
                     prepared_rag_context=rag_context,
+                    prepared_rag_result=prepared_rag_result,
                 ):
                     evt_type = evt.get("type", "")
                     # 事件映射：pipeline → orchestrator 兼容格式

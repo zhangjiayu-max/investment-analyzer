@@ -542,7 +542,7 @@ def get_portfolio_snapshot(user_id: str = "default", account: str | None = None,
         funds.sort(key=lambda x: x["current_value"], reverse=True)
 
         profile = c.execute(
-            "SELECT max_single_position_pct, target_equity_ratio FROM user_profiles WHERE user_id = ?",
+            "SELECT max_single_position_pct, target_equity_ratio, monthly_expense, fund_usage, liquidity_needs FROM user_profiles WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         max_single = profile["max_single_position_pct"] if profile and profile["max_single_position_pct"] is not None else None
@@ -561,6 +561,8 @@ def get_portfolio_snapshot(user_id: str = "default", account: str | None = None,
             "total_assets": round(total_assets, 2),
             "bond_value": round(sum(f["current_value"] for f in funds if str(f.get("fund_category", "")).lower() in {"bond", "bond_index", "bond_pure", "bond_short", "bond_hybrid", "bond_convertible", "convertible_bond"}), 2),
             "concentration_policy": policy,
+            "target_equity_ratio": profile["target_equity_ratio"] if profile else None,
+            "kyc_context": {key: profile[key] for key in ("monthly_expense", "fund_usage", "liquidity_needs")} if profile else {},
         }
     finally:
         if owned:

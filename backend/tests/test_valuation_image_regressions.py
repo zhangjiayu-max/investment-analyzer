@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import types
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -82,6 +83,23 @@ def test_async_table_parse_accepts_database_paths(kind, image_dirs, monkeypatch,
     from db.dd_tasks import get_dd_parse_task
     task = get_dd_parse_task(response.json()["task_id"])
     assert task["image_path"] == str(image)
+
+
+def test_stale_image_parse_task_is_not_returned_as_running(image_dirs):
+    """服务重载后遗留的 parsing 任务必须允许下一次点击重新提交。"""
+    from db.dd_tasks import create_dd_parse_task, find_running_task, get_dd_parse_task
+
+    image = image_dirs / "data/dd_images/stale.jpg"
+    image.write_bytes(b"image")
+    task_id = create_dd_parse_task(str(image), parse_type="dd")
+    stale_at = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_conn()
+    conn.execute("UPDATE dd_parse_tasks SET status='parsing', updated_at=? WHERE id=?", (stale_at, task_id))
+    conn.commit()
+    conn.close()
+
+    assert find_running_task(str(image), parse_type="dd") is None
+    assert get_dd_parse_task(task_id)["status"] == "error"
 
 
 @pytest.mark.parametrize("kind", ["dd", "liuyi"])

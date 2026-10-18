@@ -14,10 +14,13 @@ vi.mock('../composables/useAsyncTask', () => ({ useAsyncTask: () => ({
 
 const wrappers = []
 let failedPaths = new Set()
+let requestUrls = []
 beforeEach(() => {
   failedPaths = new Set()
+  requestUrls = []
   showToast.mockClear()
   http.defaults.adapter = async config => {
+    requestUrls.push(config.url)
     let data = { records: [], indexes: [], dates: [], images: [], history: [], latest: null, total: 0 }
     let code = 0
     let message = 'ok'
@@ -35,6 +38,9 @@ beforeEach(() => {
         data = { id: 1, type: 'valuation', index_code: '000300' }
       }
     }
+    if (config.url.includes('/valuation/parse-dd-async')) data = { task_id: 7, status: 'pending' }
+    if (config.url.includes('/valuation/parse-dd-task/7')) data = { id: 7, status: 'done', result_json: { count: 1, data: [] } }
+    if (config.url.includes('/dd-images/upload')) data = { ok: true, path: '2026-10-18/uploaded.png' }
     if (config.url.includes('/valuation/online-query/')) data = { data: { source: 'akshare', percentile: 25 } }
     return { data: { code, message, data }, status: 200, statusText: 'OK', headers: {}, config }
   }
@@ -79,4 +85,16 @@ it('recognizes successful online valuation results without a payload ok flag', a
   state.selectedCode = '000300'
   await state.handleOnlineQuery()
   expect(showToast).toHaveBeenCalledWith('在线查询成功（来源：akshare）')
+})
+
+it('starts asynchronous parsing after uploading a screw valuation image', async () => {
+  const state = render(ImageGallery)
+  await flushPromises()
+  const file = new File(['image'], '螺丝钉估值.png', { type: 'image/png' })
+
+  await state.handleUpload({ target: { files: [file] } })
+  await flushPromises()
+
+  expect(requestUrls).toContain('/dd-images/upload')
+  expect(requestUrls).toContain('/valuation/parse-dd-async')
 })

@@ -187,6 +187,7 @@ def run_pipeline(
     cancel_event=None,
     resumed_state: Optional[dict] = None,
     prepared_rag_context: str | None = None,
+    prepared_rag_result: dict | None = None,
 ) -> Generator[dict, None, None]:
     """Pipeline 主入口 — 6 阶段确定性流水线。
 
@@ -276,7 +277,7 @@ def run_pipeline(
         # ── Phase 1: 信息收集 ──────────────────
         state.transition_to(PipelinePhase.INFO_GATHER)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.INFO_GATHER.value}
-        phase1_result = _phase_info_gather(state, query_info, history, trace_id, prepared_rag_context=prepared_rag_context,
+        phase1_result = _phase_info_gather(state, query_info, history, trace_id, prepared_rag_context=prepared_rag_context, prepared_rag_result=prepared_rag_result,
                                           cancel_event=cancel_event)
         state.set_phase_result(PipelinePhase.INFO_GATHER.value, phase1_result)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.INFO_GATHER.value,
@@ -344,6 +345,7 @@ def run_pipeline(
                     phase3_result["specialists"] = _replace_specialist_analysis(
                         phase3_result["specialists"], rerun_result
                     )
+                    phase3_result["tool_calls"] = [tc for sr in phase3_result["specialists"] for tc in sr.get("tool_calls", [])]
                     state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
                     # 修复 conv 192：重跑事件必须补全 agent_key/icon/analysis 等字段，
                     # 否则 conversations.py:1879 的 event["agent_key"] 直接索引会抛 KeyError
@@ -352,13 +354,15 @@ def run_pipeline(
                            "agent": rerun_result.get("agent", ""),
                            "icon": rerun_result.get("icon", "🤖"),
                            "analysis": rerun_result.get("analysis", ""),
+                           **{k: rerun_result[k] for k in ("verdict", "confidence", "status", "completion_status", "output_quality", "asset_actions") if k in rerun_result},
                            "duration_ms": rerun_result.get("duration_ms", 0),
                            "rerun": True}
             except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
                 raise
             except Exception as refl_err:
                 logger.warning(f"[pipeline] Reflection 失败，跳过: {refl_err}")
-                reflection_result = None
+                reflection_result = {"status": "failed", "confidence_adjustment": -.3, "error": str(refl_err)}
+                state.set_phase_result("reflection", reflection_result)
             yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.REFLECTION.value}
 
         # ── Phase 3.7: 对抗式辩论（P1，冲突时触发）──────────────
@@ -428,6 +432,10 @@ def run_pipeline(
             logger.warning(f"[pipeline] 交叉审阅决策失败，回退专家数判断: {_cr_check_err}")
             _should_cross_review = cross_review_enabled_cfg and len(_phase3_originals) >= 2
 
+        if _should_cross_review and _followup_budget_exhausted(state):
+            state.set_phase_result("cross_review_status", {"status": "budget_exhausted"})
+            _should_cross_review = False
+
         if _should_cross_review:
             logger.info(
                 f"[pipeline] 触发交叉审阅（{len(_phase3_originals)} 个专家）"
@@ -480,6 +488,7 @@ def run_pipeline(
                         "agent": sr.get("agent", sr.get("agent_key", "")),
                         "icon": sr.get("icon", "🤖"),
                         "analysis": f"交叉审阅失败: {e}",
+                        "status": "failed",
                         "tool_calls": [],
                         "duration_ms": 0,
                         "is_cross_review": True,
@@ -504,6 +513,8 @@ def run_pipeline(
                             "agent": sr.get("agent", sr.get("agent_key", "")),
                             "icon": sr.get("icon", "🤖"),
                             "analysis": cr_result.get("analysis", ""),
+                            "status": cr_result.get("status", "success"),
+                            "is_cross_review": True,
                             "duration_ms": cr_result.get("duration_ms", 0),
                         }
                     except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
@@ -525,6 +536,10 @@ def run_pipeline(
             except Exception as cr_phase_err:
                 logger.warning(f"[pipeline] 交叉审阅阶段失败，继续综合: {cr_phase_err}")
 
+            if len(_cr_results) != len(_original_specialists):
+                state.set_phase_result("cross_review_status", {"status": "failed"})
+            elif _cr_results:
+                state.set_phase_result("cross_review_status", {"status": "completed"})
             if _cr_results:
                 logger.info(
                     f"[pipeline] 交叉审阅完成，{len(_cr_results)} 个专家已互相验证"
@@ -578,6 +593,9 @@ def run_pipeline(
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
+               "quality_status": phase4_result.get("quality_status", "degraded"),
+               "quality_issues": phase4_result.get("quality_issues", []),
+               "phase_timings": _phase_timings_ms(state),
                "arbitration": phase4_result.get("arbitration"),
                "cross_review_results": phase4_result.get("cross_review_results", []),
                "completion_status": phase4_result.get("completion_status", "completed"),
@@ -730,7 +748,9 @@ def run_pipeline_from_checkpoint(
                         phase3_result["specialists"], rerun_result
                     )
                     state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+                    phase3_result["tool_calls"] = [tc for sr in phase3_result["specialists"] for tc in sr.get("tool_calls", [])]
                     yield {"type": EVENT_SPECIALIST_DONE,
+                           **{k: rerun_result[k] for k in ("agent_key", "icon", "analysis", "verdict", "confidence", "status", "completion_status", "output_quality", "asset_actions") if k in rerun_result},
                            "agent": rerun_result.get("agent", ""),
                            "result": rerun_result,
                            "rerun": True}
@@ -738,7 +758,8 @@ def run_pipeline_from_checkpoint(
                 raise
             except Exception as refl_err:
                 logger.warning(f"[pipeline:{trace_id}] 续答 Reflection 失败，跳过: {refl_err}")
-                reflection_result = None
+                reflection_result = {"status": "failed", "confidence_adjustment": -.3, "error": str(refl_err)}
+                state.set_phase_result("reflection", reflection_result)
             yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.REFLECTION.value}
 
         # ── Phase 3.7: 对抗式辩论（冲突时触发）──────────────
@@ -801,6 +822,9 @@ def run_pipeline_from_checkpoint(
                "specialist_results": phase3_specialists,
                "tool_calls": phase3_result.get("tool_calls", []),
                "confidence": phase4_result.get("confidence", 0.0),
+               "quality_status": phase4_result.get("quality_status", "degraded"),
+               "quality_issues": phase4_result.get("quality_issues", []),
+               "phase_timings": _phase_timings_ms(state),
                "arbitration": phase4_result.get("arbitration"),
                "cross_review_results": phase4_result.get("cross_review_results", []),
                "completion_status": phase4_result.get("completion_status", "completed"),
@@ -944,6 +968,7 @@ def _phase_info_gather(
     history: list,
     trace_id: str,
     prepared_rag_context: str | None = None,
+    prepared_rag_result: dict | None = None,
     cancel_event=None,
 ) -> dict:
     """Phase 1: RAG 检索 + 持仓预取 + 估值预取 + 记忆加载。"""
@@ -962,7 +987,9 @@ def _phase_info_gather(
     def _rag_task():
         """RAG 检索（子查询展开 + intent 驱动 content_types + rag_logs 日志）"""
         if prepared_rag_context is not None:
-            return {'rag':[], 'rag_context':prepared_rag_context}
+            details = prepared_rag_result or {}
+            return {'rag': details.get('results', []), 'rag_context': prepared_rag_context,
+                    'rag_low_quality': details.get('rag_low_quality', True)}
         try:
             from services.rag import build_rag_context_with_details, log_rag_search
             enhanced_query = _enhance_rag_query(state.refined_query, query_info)
@@ -989,9 +1016,11 @@ def _phase_info_gather(
             rag_keywords = []
             total_fts = 0
             total_chroma = 0
+            retrieval_degraded = False
             for sq in sub_queries:
                 rag_data = build_rag_context_with_details(sq, limit=5, content_types=content_types)
                 if isinstance(rag_data, dict):
+                    retrieval_degraded = retrieval_degraded or rag_data.get("rag_low_quality", True)
                     all_rag_results.extend(rag_data.get("results", []))
                     rag_keywords = rag_keywords or rag_data.get("keywords", [])
                     total_fts += rag_data.get("fts_count", 0)
@@ -1022,7 +1051,7 @@ def _phase_info_gather(
 
             # RAG 命中质量检测
             max_score = max((float(r.get("_score", 0)) for r in deduped), default=0.0)
-            rag_low_quality = False
+            rag_low_quality = retrieval_degraded or any(r.get("quality_status") != "usable" for r in deduped)
             if deduped and max_score < 0.05:
                 rag_low_quality = True
                 logger.warning(
@@ -1061,16 +1090,18 @@ def _phase_info_gather(
             return {"rag": deduped, "rag_context": rag_context, "rag_low_quality": rag_low_quality}
         except Exception as e:
             logger.warning(f"[pipeline] RAG 检索失败: {e}")
-            return {"rag": [], "rag_context": "", "rag_low_quality": False}
+            return {"rag": [], "rag_context": "", "rag_low_quality": True}
 
     def _portfolio_task():
         """持仓摘要（含完整盈亏+交易记录+集中度）"""
         try:
             from services.portfolio_context import build_portfolio_context
-            return build_portfolio_context("default")
+            from db.portfolio import get_portfolio_snapshot
+            snapshot = get_portfolio_snapshot("default")
+            return {"portfolio": build_portfolio_context("default", snapshot=snapshot), "portfolio_snapshot": snapshot}
         except Exception as e:
             logger.debug(f"[pipeline] 持仓加载失败: {e}")
-            return ""
+            return {"portfolio": "", "portfolio_snapshot": {}}
 
     def _valuation_task():
         """估值预取（基于 targets + 持仓行业指数遍历）"""
@@ -1128,7 +1159,7 @@ def _phase_info_gather(
     for key, future in _phase_futures(tasks, DATA_EXECUTOR,
                                       get_config_int('pipeline.info_gather_timeout', 60), cancel_event):
         value = future.result()
-        if key == 'rag':
+        if key in {'rag', 'portfolio'}:
             results.update(value)
         else:
             results[key] = value
@@ -1196,18 +1227,15 @@ def _build_rag_context_from_results(results: list, max_chars: int = 3000) -> str
         title = r.get("title", "")
         body = (r.get("body", "") or "")[:600]
         source = r.get("source", "")
-        # 相关度标签（基于 _score 字段）
-        score = float(r.get("_score", 0))
-        if score >= 0.08:
-            relevance_tag = "相关度:高"
-        elif score >= 0.03:
-            relevance_tag = "相关度:中"
-        else:
-            relevance_tag = "相关度:低"
-        part = f"[{label}] [{relevance_tag}] {title}"
+        score = r.get("rerank_score")
+        part = f"[{label}] [evidence_id:{r.get('evidence_id', '')}] {title}"
+        part += f" [quality:{r.get('quality_status', 'unknown')}; semantic_score:{score}]"
         if source:
             part += f" [来源: {source}]"
         part += f"\n{body}"
+        for key in ("limitations", "counterpoints", "quality_issues"):
+            if r.get(key):
+                part += f"\n{key}: {r[key]}"
         parts.append(part)
         total += len(part)
         if total >= max_chars:
@@ -1507,7 +1535,7 @@ def _phase_execution(
                     evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,
-                    status="success",
+                    status=result.get("status", "success"),
                 )
             except Exception as log_err:
                 logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1520,6 +1548,11 @@ def _phase_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": result.get("analysis", ""),
+                "verdict": result.get("verdict", "unknown"),
+                "confidence": result.get("confidence", 0.0),
+                "asset_actions": result.get("asset_actions", []),
+                "completion_status": result.get("completion_status"),
+                "output_quality": result.get("output_quality"),
                 "status": result.get("status", "success"),
                 "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
@@ -1620,6 +1653,10 @@ def _run_pipeline_specialist(func, cancel_event, **kwargs):
 
 def _run_followup_phase(func, args, cancel_event, config_key):
     """反思/辩论共用一次阶段预算，传播到连续模型调用。"""
+    state = args[0] if args else None
+    if isinstance(state, PipelineState) and _followup_budget_exhausted(state):
+        return {"status": "budget_exhausted", "confidence_adjustment": -.2,
+                "quality_issues": ["预算已用尽，未执行追加审查"], "missing_perspectives": []}
     from infra.execution_budget import SPECIALIST_EXECUTOR
     for _, future in _phase_futures({0: lambda: func(*args)}, SPECIALIST_EXECUTOR,
                                     get_config_int(config_key, 180), cancel_event):
@@ -1773,7 +1810,7 @@ def _execute_steps_parallel(
                     evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms,
                     trace_id=trace_id,
-                    status="success",
+                    status=result.get("status", "success"),
                 )
             except Exception as log_err:
                 logger.warning(f"[pipeline-parallel] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1784,6 +1821,11 @@ def _execute_steps_parallel(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": result.get("analysis", ""),
+                "verdict": result.get("verdict", "unknown"),
+                "confidence": result.get("confidence", 0.0),
+                "asset_actions": result.get("asset_actions", []),
+                "completion_status": result.get("completion_status"),
+                "output_quality": result.get("output_quality"),
                 "status": result.get("status", "success"),
                 "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
@@ -1921,7 +1963,7 @@ def _fallback_execution(
                     evidence={k: result[k] for k in ("verdict", "confidence", "action_signals", "asset_actions", "portfolio_stance", "structured") if k in result},
                     duration_ms=duration_ms_for_log,
                     trace_id=trace_id,
-                    status="success",
+                    status=result.get("status", "success"),
                 )
             except Exception as log_err:
                 logger.warning(f"[pipeline] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1933,6 +1975,11 @@ def _fallback_execution(
                 "agent": agent_name,
                 "icon": agent_icon,
                 "analysis": result.get("analysis", ""),
+                "verdict": result.get("verdict", "unknown"),
+                "confidence": result.get("confidence", 0.0),
+                "asset_actions": result.get("asset_actions", []),
+                "completion_status": result.get("completion_status"),
+                "output_quality": result.get("output_quality"),
                 "status": result.get("status", "success"),
                 "error": result.get("status") == "failed",
                 "duration_ms": duration_ms,
@@ -1981,6 +2028,56 @@ def _find_agent_config(agent_key: str, specialists: list) -> Optional[dict]:
 
 # ── Phase 4: 综合 ──────────────────────────
 
+def _followup_budget_exhausted(state: PipelineState) -> bool:
+    total = state.token_budget.get("max_total")
+    execution = state.token_budget.get("execution")
+    return bool((total and state.tokens_used >= total) or
+                (execution and state.tokens_used_by_phase.get("execution", 0) >= execution))
+
+
+def _validate_final_facts(state, answer, completion_status, confidence, tool_calls, actions=None):
+    from services.conversation.factual_checks import check_final_facts
+    from services.conversation.quality_contract import calibrate_confidence_text, action_constraint_issues
+    snapshot = (state.get_phase_result("info_gather") or {}).get("portfolio_snapshot")
+    issues = check_final_facts(answer, snapshot, tool_calls) + action_constraint_issues(actions, tool_calls)
+    review_status = (state.get_phase_result("cross_review_status") or {}).get("status")
+    if review_status in {"failed", "budget_exhausted", "degraded"}:
+        issues.append("cross_review_" + review_status)
+    if issues:
+        completion_status = "degraded"
+        confidence = min(confidence, .45)
+        labels = {"bond_temperature_falsely_missing": "债市温度与原始工具记录不一致",
+                  "kyc_single_limit_value_mismatch": "单基金上限与用户画像不一致",
+                  "kyc_single_limit_denominator_mismatch": "单基金上限的资产口径不一致",
+                  "recent_30d_trade_count_mismatch": "近30天交易笔数与原始记录不一致",
+                  "asset_action_limit_violation": "操作金额超出用户配置上限、可用现金或持有金额"}
+        answer += "\n\n质量校验未通过，以上分析仅供复核，暂不生成操作候选。待复核：" + "、".join(labels.get(i, "追加审查未完成") for i in issues)
+        answer = calibrate_confidence_text(answer, confidence)
+    return answer, completion_status, confidence, issues
+
+def _phase_timings_ms(state: PipelineState) -> dict:
+    """从状态机真实阶段时间生成毫秒耗时，尚未结束的阶段计算至当前时刻。"""
+    now = time.time()
+    return {f"{phase}_ms": max(0, int((state.phase_finished_at.get(phase, now) - started) * 1000))
+            for phase, started in state.phase_started_at.items()}
+
+
+def _validate_synthesis(answer, completion_status, specialists, reflection_result, confidence):
+    """结构验收与统一置信度；失败专家或失败审查不得进入可执行链。"""
+    from agent.infra.output_quality import is_valid_analysis, validate_specialist_output
+    from services.conversation.quality_contract import calibrate_confidence_text
+    invalid = not specialists or any(not validate_specialist_output(s)["valid"] for s in specialists)
+    review_failed = bool(reflection_result and reflection_result.get("status") not in {"completed", "success"})
+    if not is_valid_analysis(answer, completion_status=completion_status):
+        completion_status = "degraded" if answer.strip() else "failed"
+    if invalid or review_failed:
+        completion_status = "degraded" if answer.strip() else "failed"
+    if completion_status != "completed":
+        confidence = min(confidence, .45)
+    quality_status = "validated" if completion_status == "completed" else "degraded"
+    return calibrate_confidence_text(answer, confidence), completion_status, quality_status, confidence
+
+
 def _phase_synthesis(
     state: PipelineState,
     query: str,
@@ -1998,8 +2095,22 @@ def _phase_synthesis(
         debate_result: P1 辩论节点的产出（可选），包含 bull/bear/arbitration 等
         plan: Phase 2 生成的执行计划（可选），供仲裁阶段引用任务清单
     """
+    from services.conversation.quality_contract import selected_asset_actions
     specialists = execution_result.get("specialists", [])
     tool_calls = execution_result.get("tool_calls", [])
+    expected_steps = ((plan or {}).get("plan") or {}).get("steps", [])
+    present = {s.get("agent_key") for s in specialists if not s.get("is_cross_review")}
+    for step in expected_steps:
+        key = step.get("agent_key")
+        if key and key not in present:
+            specialists.append({"agent_key": key, "agent": step.get("agent_name", key),
+                                "analysis": "计划中的专家未产出可验收分析。", "status": "failed",
+                                "verdict": "unknown", "confidence": 0.0, "asset_actions": []})
+            present.add(key)
+    snapshot = (state.get_phase_result("info_gather") or {}).get("portfolio_snapshot")
+    if snapshot and not any(t.get("evidence_id") == "portfolio_snapshot" for t in tool_calls if isinstance(t, dict)):
+        tool_calls = [*tool_calls, {"name": "get_portfolio_snapshot", "evidence_id": "portfolio_snapshot", "result": snapshot}]
+        execution_result["tool_calls"] = tool_calls
 
     # P2 置信度校准：检测数据缺失信号
     data_gaps = _detect_data_gaps(state, tool_calls, specialists, trace_id)
@@ -2010,14 +2121,21 @@ def _phase_synthesis(
         confidence = _compute_confidence(
             reflection_result, 1, conflict_count=0, data_gaps=data_gaps,
         )
+        answer, completion_status, quality_status, confidence = _validate_synthesis(
+            answer, "completed" if answer.strip() else "failed", specialists, reflection_result, confidence)
+        answer, completion_status, confidence, fact_issues = _validate_final_facts(
+            state, answer, completion_status, confidence, tool_calls, selected_asset_actions(None, specialists))
+        quality_status = "validated" if completion_status == "completed" else "degraded"
         return {
             "answer": answer,
+            "quality_status": quality_status,
+            "quality_issues": fact_issues,
             "cross_review": None,
             "arbitration": None,
             "specialist_count": len(specialists),
             "confidence": confidence,
             "data_gaps": data_gaps,
-            "completion_status": "completed" if answer.strip() else "failed",
+            "completion_status": completion_status,
         }
 
     # 多专家：调用 LLM 综合
@@ -2029,6 +2147,8 @@ def _phase_synthesis(
             debate_result=debate_result,
             data_gaps=data_gaps,
             plan=plan,
+            portfolio_context=(state.get_phase_result("info_gather") or {}).get("portfolio", ""),
+            tool_calls=tool_calls,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -2053,12 +2173,23 @@ def _phase_synthesis(
         reflection_result, len(specialists), len(conflicts), data_gaps=data_gaps,
     )
 
+    answer, completion_status, quality_status, confidence = _validate_synthesis(
+        answer, completion_status, specialists, reflection_result, confidence)
+    answer, completion_status, confidence, fact_issues = _validate_final_facts(
+        state, answer, completion_status, confidence, tool_calls, selected_asset_actions(arbitration_summary, specialists))
+    quality_status = "validated" if completion_status == "completed" else "degraded"
+    if arbitration_summary:
+        arbitration_summary = dict(arbitration_summary)
+        arbitration_summary["confidence_score"] = confidence
+        arbitration_summary["confidence"] = "high" if confidence >= .75 else "medium" if confidence >= .5 else "low"
     return {
         "answer": answer,
+        "quality_status": quality_status,
+        "quality_issues": fact_issues,
         "cross_review": {"conflicts": conflicts},
         "cross_review_results": cross_review_results,
         "arbitration": arbitration_summary,
-        "specialist_count": len(specialists),
+        "specialist_count": len({s.get("agent_key") for s in specialists if not s.get("is_cross_review") and not s.get("is_arbitration")}),
         "reflection": reflection_result,
         "risk_vetoes": vetoes,
         "portfolio_impacts": impacts,
@@ -2231,13 +2362,18 @@ def _maybe_rerun_specialist(
     except Exception:
         pass
 
+    from agent.infra.output_quality import validate_specialist_output
+    invalid = [s for s in execution_result.get("specialists", [])
+               if not s.get("is_cross_review") and not validate_specialist_output(s)["valid"]]
     conf_adj = reflection_result.get("confidence_adjustment", 0.0)
-    if conf_adj >= threshold:
+    if conf_adj >= threshold and not invalid:
+        return None
+    if _followup_budget_exhausted(state):
         return None
 
     # 从 missing_perspectives 找到命中的已调用专家
     missing = reflection_result.get("missing_perspectives", [])
-    if not missing:
+    if not missing and not invalid:
         return None
 
     specialists = execution_result.get("specialists", [])
@@ -2245,8 +2381,8 @@ def _maybe_rerun_specialist(
         return None
 
     # 匹配：missing_perspective 文本含专家名/关键词 → 该专家需要重跑
-    rerun_target = None
-    for s in specialists:
+    rerun_target = invalid[0] if invalid else None
+    for s in ([] if rerun_target else specialists):
         agent_name = s.get("agent", "")
         agent_key = s.get("agent_key", "")
         for m in missing:
@@ -2289,16 +2425,25 @@ def _maybe_rerun_specialist(
             feedback += f"- 缺失视角：{m}\n"
         enhanced_query = f"{query}{feedback}"
 
+        info = state.get_phase_result("info_gather") or {}
+        agent_cfg = _find_agent_config(agent_key, (state.get_phase_result("planning") or {}).get("specialists", [])) or {}
+        if not agent_cfg.get("system_prompt"):
+            from agent.core.multi_agent import load_specialist_agents
+            agent_cfg = load_specialist_agents().get(agent_key, agent_cfg)
+        rerun_context = "\n\n".join(str(part) for part in (agent_cfg.get("system_prompt", ""), info.get("portfolio", ""), info.get("rag_context", ""),
+            json.dumps({"portfolio_snapshot": info.get("portfolio_snapshot"), "valuations": info.get("valuations", {})}, ensure_ascii=False)) if part)
         _rerun_model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
         result = _run_pipeline_specialist(run_specialist, cancel_event,
             agent_key=agent_key,
             query=enhanced_query,
             trace_id=f"{trace_id}#rerun",
+            prebuilt_context=rerun_context,
+            conversation_id=state.conversation_id, message_id=state.message_id,
             from_pipeline=True,
             model=_rerun_model,
             blackboard=blackboard,
         )
-        if result and result.get("analysis"):
+        if result and validate_specialist_output(result)["valid"]:
             # 更新 blackboard 中的 entry
             if blackboard:
                 try:
@@ -2331,9 +2476,8 @@ def _replace_specialist_analysis(specialists: list, rerun_result: dict) -> list:
         ):
             # 保留原 agent_key/name，替换 analysis
             new_s = dict(s)
-            new_s["analysis"] = rerun_result.get("analysis", s.get("analysis", ""))
+            new_s.update(rerun_result)
             new_s["rerun"] = True
-            new_s["action_signals"] = rerun_result.get("action_signals", s.get("action_signals", []))
             updated.append(new_s)
             replaced = True
         else:
@@ -2353,6 +2497,8 @@ def _synthesize_multiple_specialists(
     debate_result: dict = None,
     data_gaps: list = None,
     plan: dict = None,
+    portfolio_context: str = "",
+    tool_calls: list = None,
 ) -> tuple:
     """调用 LLM 综合多个专家的分析。
 
@@ -2371,6 +2517,10 @@ def _synthesize_multiple_specialists(
         agent_name = s.get("agent", f"专家{i}")
         analysis = s.get("analysis", "")
         parts.append(f"\n### {agent_name}\n{analysis}")
+
+    from services.conversation.quality_contract import compact_tool_evidence
+    raw_tools = tool_calls if tool_calls is not None else [call for specialist in specialists for call in specialist.get("tool_calls", [])]
+    parts.append("\n## 原始工具证据\n" + json.dumps(compact_tool_evidence(raw_tools), ensure_ascii=False))
 
     # 黑板关键数据
     if blackboard and blackboard.entry_count > 0:
@@ -2419,20 +2569,8 @@ def _synthesize_multiple_specialists(
 
     # P1替代: 注入持仓约束提醒（零 LLM 成本，复用 Phase 1 预取的持仓）
     # 单专家场景已在 Phase 3 通过 build_specialist_context 注入完整持仓，此处仅多专家综合时提醒
-    portfolio_line = ""
-    try:
-        from services.portfolio_context import build_portfolio_summary_line
-        portfolio_line = build_portfolio_summary_line("default")
-    except Exception as e:
-        logger.debug(f"[pipeline] 综合阶段持仓摘要加载失败: {e}")
-    if portfolio_line:
-        parts.append(
-            f"\n## 用户当前持仓（综合建议必须兼容此约束）\n{portfolio_line}\n"
-            "提醒：\n"
-            "- 任何加仓/减仓建议需结合现有持仓结构，不要脱离实际持仓空谈\n"
-            "- 若某标的已重仓（占比>25%），继续加仓建议需额外谨慎\n"
-            "- 若已盈利>15%或亏损>15%，需提示止盈/止损考量\n"
-        )
+    if portfolio_context:
+        parts.append(f"\n## 本轮持仓快照及确定性计算\n{portfolio_context}\n")
 
     # P0-A: 风险否决约束（强制降级被否决的动作）
     vetoes = blackboard.get_vetoes() if blackboard else []
@@ -2497,7 +2635,7 @@ def _synthesize_multiple_specialists(
             if arbitration_summary:
                 parts.append("\n## 仲裁 Agent 的结构化裁决（综合回答必须遵守）")
                 parts.append(
-                    f"```json\n{json.dumps(arbitration_summary, ensure_ascii=False, indent=2)[:1500]}\n```"
+                    f"```json\n{json.dumps(arbitration_summary, ensure_ascii=False, indent=2)}\n```"
                 )
                 parts.append(
                     "强制要求：综合回答必须与仲裁裁决方向一致，"
@@ -2638,6 +2776,7 @@ def _synthesize_multiple_specialists(
             answer, trace_id=trace_id, arbitration_summary=arbitration_summary
         )
         if _timing_warnings:
+            completion_status = "degraded"
             logger.info(
                 f"[trace:{trace_id}] [pipeline] 卖出时机守卫触发: {_timing_warnings}"
             )
@@ -2734,13 +2873,8 @@ def _phase_debate(
             elif agent_name in c.get("sell_agents", []):
                 bear_analyses.append(f"[{agent_name} 关于 {target}]\n{analysis[:800]}")
 
-    # 持仓约束
-    portfolio_line = ""
-    try:
-        from services.portfolio_context import build_portfolio_summary_line
-        portfolio_line = build_portfolio_summary_line("default")
-    except Exception:
-        pass
+    # 使用本轮相同持仓快照，辩论不能重新读取并改变事实基准。
+    portfolio_line = (state.get_phase_result("info_gather") or {}).get("portfolio", "")
 
     # 风险否决
     vetoes = blackboard.get_vetoes() if blackboard else []
@@ -2925,6 +3059,10 @@ def _phase_reflection(
         for c in conflicts:
             parts.append(f"- {c['target']}: 买入方={c['buy_agents']}, 卖出方={c['sell_agents']}")
 
+    from services.conversation.quality_contract import compact_tool_evidence
+    parts.append("\n## 原始工具证据\n" + json.dumps(
+        compact_tool_evidence(execution_result.get("tool_calls", [])), ensure_ascii=False))
+
     # 各专家分析预览（每个截断到 500 字）
     parts.append("\n## 各专家分析预览")
     for s in specialists[:5]:
@@ -2969,7 +3107,8 @@ def _phase_reflection(
                 continue
             result = _parse_reflection_json(choice.message.content or "")
             if result.get("status") == "completed":
-                return result
+                from services.conversation.quality_contract import reconcile_reflection_evidence
+                return reconcile_reflection_evidence(result, execution_result.get("tool_calls", []))
             last_error = "invalid_json"
         except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
             raise
@@ -3137,7 +3276,7 @@ def _extract_and_save_recommendations(
     """P0-A 决策闭环：从 AI 最终回答中提取结构化建议并落库到 recommendations 表。
 
     流程：
-    1. LLM 提取方向性建议（加仓/减仓/买入/卖出/持有），模糊建议（关注/留意）不提取
+    1. 复用有来源且通过最终校验的逐标的动作，禁止再次从正文推断方向
     2. 为每条建议关联标的获取 baseline（当前估值/净值）
     3. 调用 save_recommendations 落库，verify_days 默认 5 交易日
     4. 返回保存的 recommendation_ids + 详情，供前端展示卡片
@@ -3158,57 +3297,21 @@ def _extract_and_save_recommendations(
     if not state.answer or len(state.answer) < 30:
         return result
 
-    # 1. LLM 提取结构化建议
-    recs = []
-    try:
-        from services.llm_service import _call_llm, MODEL
-        prompt = (
-            "你是投资建议提取器。从下面的投资分析中，提取【明确的方向性建议】。\n\n"
-            "提取规则：\n"
-            "- 只提取明确的方向性建议：加仓/减仓/买入/卖出/持有/清仓\n"
-            "- 模糊建议（如「关注」「留意」「观察」）不要提取\n"
-            "- 每条建议必须关联具体标的（指数名/指数代码/基金名/基金代码）\n"
-            "- 没有明确标的或没有方向性建议时返回空数组 []\n"
-            "- 最多 5 条\n\n"
-            "signal_type 判定规则（必须输出）：\n"
-            "- momentum_breakout：建议基于「趋势止跌回升/资金流入/行业景气/短期波段/试探性建仓」，"
-            "且原文明确提到严格止损（如-5%）或仓位上限（如5%）\n"
-            "- value_dip：默认值，建议基于估值低估、长期定投、分批建仓等\n\n"
-            "输出严格 JSON 数组（不要 markdown 代码块），每项格式：\n"
-            '{"index_name":"标的名称","index_code":"代码(可为空)","direction":"up|down|hold",'
-            '"reason":"简短理由(≤50字)","confidence":"high|medium|low",'
-            '"signal_type":"value_dip|momentum_breakout"}\n\n'
-            "direction 取值：up=加仓/买入，down=减仓/卖出，hold=持有/观望\n\n"
-            f"分析内容：\n{state.answer[:3000]}"
-        )
-        response = _call_llm(
-            caller="extract_recommendations",
-            trace_id=trace_id,
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": "你是严格的结构化数据提取器，只输出 JSON 数组。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=600,
-        )
-        content = (response.choices[0].message.content or "").strip()
-        # 容错：剥离 markdown 代码块
-        if content.startswith("```"):
-            content = content.split("\n", 1)[-1] if "\n" in content else content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-        # 提取首个 [ 到 ] 之间的 JSON
-        lb = content.find("[")
-        rb = content.rfind("]")
-        if lb >= 0 and rb > lb:
-            recs = json.loads(content[lb:rb + 1])
-        if not isinstance(recs, list):
-            recs = []
-    except Exception as e:
-        logger.warning(f"[pipeline:{trace_id}] 建议提取失败: {e}")
-        return result
+    # 与决策候选共用相同门禁，避免二次模型提取改变标的或买卖方向。
+    from services.conversation.quality_contract import build_chat_candidates, selected_asset_actions
+    synthesis = state.get_phase_result("synthesis") or {}
+    execution = state.get_phase_result("execution") or {}
+    arbitration = synthesis.get("arbitration") or {}
+    actions = selected_asset_actions(arbitration, execution.get("specialists", []))
+    payloads = build_chat_candidates(state.answer, actions, execution.get("tool_calls", []),
+        conversation_id=state.conversation_id, message_id=state.message_id,
+        completion_status=synthesis.get("completion_status", "unverified"),
+        quality_status=synthesis.get("quality_status", "unverified"))
+    recs = [{"index_name": p["target_name"] or p["target_code"], "index_code": p["target_code"],
+             "target_fund_code": p["target_code"], "target_fund_name": p["target_name"], "suggested_amount": p["suggested_amount"],
+             "direction": "up" if p["action_type"] == "buy" else "down",
+             "reason": p["rationale"], "confidence": p["confidence"], "signal_type": "value_dip"}
+            for p in payloads]
 
     if not recs:
         return result
@@ -3235,6 +3338,9 @@ def _extract_and_save_recommendations(
         valid_recs.append({
             "index_name": name,
             "index_code": code,
+            "target_fund_code": r.get("target_fund_code"),
+            "target_fund_name": r.get("target_fund_name"),
+            "suggested_amount": r.get("suggested_amount"),
             "direction": direction,
             "reason": (r.get("reason") or "")[:200],
             "confidence": (r.get("confidence") or "medium").lower(),
@@ -3482,6 +3588,11 @@ def _phase_memory(
         target_subject = "、".join(targets) if targets else state.original_query[:30]
         # Phase D: data_basis 改为真实值，区分 RAG 是否含 book、是否低质
         data_basis = ["portfolio", "tools"]
+        snapshot = (info_gather_result or {}).get("portfolio_snapshot")
+        if snapshot:
+            from services.portfolio.analysis_contract import portfolio_analysis_basis
+            data_basis.append(portfolio_analysis_basis(snapshot,
+                validation_status=synthesis_result.get("quality_status", "unverified")))
         rag_results = info_gather_result.get("rag", []) if info_gather_result else []
         book_hits = [r for r in rag_results if r.get("content_type") == "book"]
         if book_hits:

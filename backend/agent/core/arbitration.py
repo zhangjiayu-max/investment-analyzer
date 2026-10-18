@@ -57,6 +57,21 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     P0 修复（2026-08-02）：优先读专家结构化 verdict 字段，消除从 analysis 文本
     关键词提取方向的幻觉。verdict 为 unknown/缺失时回退到 _detect_stance。
     """
+    from agent.infra.output_quality import analysis_issues
+    invalid_keys = set()
+    eligible = []
+    for result in specialist_results or []:
+        invalid = (bool(result.get("analysis") and analysis_issues(result["analysis"], min_chars=1))
+                   or result.get("status", "success") not in {"success", "completed", "done"}
+                   or result.get("completion_status") in {"failed", "truncated", "degraded"}
+                   or (result.get("output_quality") or {}).get("valid") is False)
+        if invalid and not result.get("is_cross_review"):
+            invalid_keys.add(result.get("agent_key", "unknown"))
+            eligible.append({**result, "analysis": "", "verdict": "unknown", "stance": "unknown",
+                             "confidence": 0.0, "asset_actions": [], "action_signals": []})
+        else:
+            eligible.append(result)
+    specialist_results = eligible
     stances = []
     reasons = []
     agent_keys_list = []  # G-2a：与 stances 对齐，用于二次过滤
@@ -266,6 +281,9 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         elif confidence == "medium":
             confidence = "low"
 
+    if invalid_keys:
+        confidence = "low" if "risk_assessor" in invalid_keys else ("medium" if confidence == "high" else confidence)
+
     # P0：stance 来源统计（structured 占比）
     structured_count = sum(1 for s in stance_sources if s == "structured")
     stance_source = "structured" if structured_count > 0 else "keyword_fallback"
@@ -292,6 +310,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         # P0 修复（2026-08-02）新增字段
         "expert_verdicts": expert_verdicts,           # 各专家 verdict 快照（可追溯）
         "stance_source": stance_source,               # stance 来源（structured / keyword_fallback）
+        "invalid_specialists": sorted(invalid_keys),
         "consistency_warning": consistency_warning,    # 一致性告警（空字符串表示一致）
     }
     return summary
@@ -304,7 +323,7 @@ def _collect_asset_actions(results: list[dict]) -> list[dict]:
     for result in results:
         if result.get("is_cross_review") or result.get("is_arbitration"):
             continue
-        for action in _normalize_asset_actions(result.get("asset_actions") or result.get("action_signals") or []):
+        for action in _normalize_asset_actions(result.get("asset_actions") if "asset_actions" in result else result.get("action_signals", [])):
             action = dict(action)
             action["agent_key"] = result.get("agent_key", "unknown")
             actions.append(action)

@@ -234,6 +234,10 @@ def build_portfolio_context(user_id: str = "default", snapshot: dict | None = No
         else:
             lines.append("- 尚未设置单标的上限；不能把默认阈值描述为用户约定，需在给出交易建议前核实。")
 
+        from services.portfolio.analysis_contract import format_portfolio_calculations
+        lines.append("")
+        lines.append(format_portfolio_calculations(snapshot))
+
         lines.append("")
         lines.append("### 减仓约束（必须遵守）")
         lines.append("- 单基金单次减仓金额 ≤ 该基金持仓市值的 20%")

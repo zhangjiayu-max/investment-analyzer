@@ -375,12 +375,17 @@ async function handleUpload(e) {
   if (!files || !files.length) return
   ddUploading.value = true
   try {
+    const uploadedPaths = []
     for (const file of files) {
-      await uploadDdImage(file)
+      const { data } = await uploadDdImage(file)
+      if (data?.path) uploadedPaths.push({ path: data.path, name: file.name })
     }
     await loadDdDates()
     ddSelectedDate.value = ''
     await loadDdImages()
+    if (uploadedPaths.length > 0 && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
+    }
   } catch (e) {
     console.error('Upload failed:', e)
     showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -423,36 +428,61 @@ function confirmParseImage(img) {
       confirm.value.visible = false
       parseResult.value = null
       try {
-        const { data } = await parseDDImageAsync(img.path)
-        const taskId = data.task_id
-        // 存储任务状态
-        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
-        // 启动轮询
-        const cancel = pollDDParseTask(taskId, (taskData) => {
-          if (isUnmounted) return
-          ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: taskData.status } }
-          if (taskData.status === 'done') {
-            const result = taskData.result_json || {}
-            parseResult.value = { ok: true, data: result, name: img.name }
-            ddImages.value = ddImages.value.filter(i => i.path !== img.path)
-            loadRecords()
-            // 清理任务追踪
-            const { [img.path]: _, ...rest } = ddParseTasks.value
-            ddParseTasks.value = rest
-            showToast(`「${img.name}」识别完成`, 'success')
-          } else if (taskData.status === 'error') {
-            parseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
-            const { [img.path]: _, ...rest } = ddParseTasks.value
-            ddParseTasks.value = rest
-            showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
-          }
-        })
-        // 存储取消函数
-        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { ...ddParseTasks.value[img.path], pollCancel: cancel } }
+        await startDdParseTask(img)
       } catch (e) {
         showToast('提交解析任务失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
+  }
+}
+
+/** 提交螺丝钉图片解析任务并启动轮询。 */
+async function startDdParseTask(img, { auto = false } = {}) {
+  const { data } = await parseDDImageAsync(img.path)
+  const taskId = data?.task_id
+  if (!taskId) throw new Error('解析任务创建失败')
+
+  ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
+  const cancel = pollDDParseTask(taskId, (taskData) => {
+    if (isUnmounted) return
+    ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: taskData.status } }
+    if (taskData.status === 'done') {
+      const result = taskData.result_json || {}
+      if (!auto) parseResult.value = { ok: true, data: result, name: img.name }
+      ddImages.value = ddImages.value.filter(i => i.path !== img.path)
+      void loadRecords()
+      const { [img.path]: _, ...rest } = ddParseTasks.value
+      ddParseTasks.value = rest
+      showToast(`「${img.name}」识别完成`, 'success')
+    } else if (taskData.status === 'error') {
+      if (!auto) parseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
+      const { [img.path]: _, ...rest } = ddParseTasks.value
+      ddParseTasks.value = rest
+      showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
+    }
+  })
+  ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { ...ddParseTasks.value[img.path], pollCancel: cancel } }
+  return taskId
+}
+
+/** 上传后自动提交螺丝钉图片解析，避免必须逐张点击“识别估值”。 */
+async function autoParseDdImages(uploadedPaths) {
+  showToast(`上传成功，开始自动解析 ${uploadedPaths.length} 张螺丝钉估值表...`, 'info')
+  let submitted = 0
+  let failed = 0
+  for (const img of uploadedPaths) {
+    if (isUnmounted) break
+    try {
+      await startDdParseTask(img, { auto: true })
+      submitted++
+    } catch (e) {
+      failed++
+      console.error(`提交解析失败: ${img.name}`, e)
+      showToast(`「${img.name}」提交解析失败: ${e.response?.data?.detail || e.message}`, 'error')
+    }
+  }
+  if (!isUnmounted && failed === 0 && submitted > 0) {
+    showToast(`已提交 ${submitted} 张图片解析任务`, 'info')
   }
 }
 
@@ -835,6 +865,8 @@ async function handleDrop(e) {
       } else {
         showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
       }
+    } else if (uploadedPaths.length > 0 && !isLiuyi && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
     } else if (!isUnmounted) {
       showToast(`${files.length} 张图片上传成功`, 'success')
     }
@@ -928,6 +960,8 @@ async function handlePaste(e) {
       } else {
         showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
       }
+    } else if (uploadedPaths.length > 0 && !isLiuyi && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
     } else if (!isUnmounted) {
       showToast(`${imageFiles.length} 张图片粘贴上传成功`, 'success')
     }

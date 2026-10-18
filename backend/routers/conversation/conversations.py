@@ -808,7 +808,8 @@ async def resume_conversation(conv_id: int, request: Request):
                     "execution_status": "completed",
                     "complexity": final_complexity,
                     "specialist_results": [
-                        {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                        {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                         for s in specialist_results_so_far
                     ],
                     "tool_calls": tool_calls_so_far,
@@ -1184,20 +1185,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         _cs = _pf.get("constraints", {})
         _sn = _pf.get("snapshot", {})
         _ras = _pf.get("recent_analyses", [])
-        _constraint_block = f"""## ⚠️ 组合约束（多智能体协同统一规则，最高优先级）
-
-1. **集中度红线**：以下基金已超25%集中度，禁止建议加仓：
-{chr(10).join(f'   - {t}' for t in _cs.get('no_add_targets', []))}
-
-2. **债市温度**：{_cs.get('bond_temperature', '?')}°，{'偏贵，不建议加仓债基' if _cs.get('bond_expensive') else '正常'}
-
-3. **组合概况**：总市值 {_sn.get('total_value', '?')}元，债基占比 {_sn.get('bond_pct', '?')}%
-
-4. **最近分析**：
-{chr(10).join(f'   - [{a.get("type","")}] {a.get("conclusion","")[:200]}...' for a in _ras)}
-
----
-"""
+        _constraint_block = "## 组合事实与用户约束\n" + json.dumps(_pf, ensure_ascii=False, default=str)
         rag_context = _constraint_block + "\n" + (rag_context or "")
     except Exception as _e:
         logger.warning(f"注入组合约束失败: {_e}")
@@ -1224,7 +1212,8 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     specialist_results = llm_result.get("specialist_results", [])
     metadata_dict = {
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
@@ -1264,7 +1253,8 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     return {
         "answer": answer,
         "specialist_results": [
-            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", ""), "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", ""), "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
             for s in specialist_results
         ],
         "rag": {
@@ -1687,7 +1677,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     yield _sse_event('cancelled', {'message_id':stream_msg_id})
                     return
 
-                if "error" not in result:
+                from agent.infra.output_quality import validate_specialist_output
+                if "error" not in result and validate_specialist_output(result)["valid"]:
                     # 发送专家完成事件
                     _spec_done_data = {
                         "agent_key": result.get("agent_key", agent_key),
@@ -1695,6 +1686,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "icon": result.get("icon", ""),
                         "analysis": result.get("analysis", ""),
                         "duration_ms": result.get("duration_ms", 0),
+                        **{k: result[k] for k in ("verdict", "confidence", "status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in result},
                     }
                     append_stream_event(channel_id, "specialist_done", _spec_done_data)
                     yield _sse_event("specialist_done", _spec_done_data)
@@ -1714,6 +1706,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 构建专家结果
                     answer = result.get("analysis", "")
                     specialist_results = [{
+                        **result,
                         "agent_key": result.get("agent_key", agent_key),
                         "agent": result.get("agent", ""),
                         "icon": result.get("icon", ""),
@@ -1730,11 +1723,14 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 存储回复（更新占位消息）
                     metadata_dict = {
                         "specialist_results": [
-                            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                            {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
                         "execution_status": "completed",
+                        "completion_status": "completed", "quality_status": "unverified",
+                        "confidence": result.get("confidence", 0.0),
                         "refined_query": clarification.get("refined_query", effective_query),
                         "reasoning_trail": result.get("reasoning_trail"),
                     }
@@ -1840,23 +1836,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
         # 注入组合约束到多智能体协作上下文
         if facts_text and portfolio_facts:
-            constraints = portfolio_facts.get("constraints", {})
-            constraint_summary = f"""## ⚠️ 组合约束（多智能体协同统一规则，最高优先级）
-
-请所有参与协作的专家注意以下硬约束：
-
-1. **集中度红线**：以下基金已超过25%持仓集中度阈值，任何专家**禁止建议加仓或转入**这些基金：
-{chr(10).join(f'   - {t}' for t in constraints.get('no_add_targets', []))}
-
-2. **债市温度**：当前债市温度 {constraints.get('bond_temperature', '?')}°，{'偏贵，不建议加仓债券型基金' if constraints.get('bond_expensive') else '正常'}
-
-3. **组合概况**：总市值 {portfolio_facts.get('snapshot', {}).get('total_value', '?')}元，债基占比 {portfolio_facts.get('snapshot', {}).get('bond_pct', '?')}%
-
-4. **最近分析结论**：请参考以下24h内其他分析的结论，不要给出矛盾建议：
-{chr(10).join(f'   - [{a.get("type","")}] {a.get("conclusion","")[:200]}...' for a in portfolio_facts.get('recent_analyses', []))}
-
----
-"""
+            constraint_summary = "## 组合事实与用户约束\n" + facts_text
             orchestrator_context = constraint_summary + "\n" + (orchestrator_context or "")
 
         # Bridge A: 注入24h分析结论上下文
@@ -1900,9 +1880,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 except Exception as e:
                     logger.warning(f"增量保存进度失败: {e}")
 
-            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None, completion_status="completed", reflection=None, cross_review_status=None):
+            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None, completion_status="completed", reflection=None, cross_review_status=None, confidence=0.0, phase_timings=None, quality_status="unverified", quality_issues=None):
                 total_ms = int((time.time() - request_start) * 1000)
-                pt = {"orchestrator_ms": orch_ms, "total_ms": total_ms}
+                pt = {**(phase_timings or {}), "orchestrator_ms": orch_ms, "total_ms": total_ms}
+                from services.conversation.quality_contract import merge_specialist_results, selected_asset_actions
+                final_results = merge_specialist_results(_prod_spec_results, spec_results)
                 # 输出审核
                 try:
                     review = review_output(content, spec_results)
@@ -1913,16 +1895,19 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     pass
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                         # P0 修复（2026-08-02）：持久化结构化 verdict/confidence，消除下游幻觉
-                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
-                       for s in _prod_spec_results if not s.get("is_cross_review")]
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                       for s in final_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
-                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
-                       for s in _prod_spec_results if s.get("is_cross_review")]
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                       for s in final_results if s.get("is_cross_review")]
                 # P2-G 修复 conv#131：Pipeline 路径下 _prod_spec_results 可能未捕获 cross_review_done 事件
                 # 此时使用 EVENT_ANSWER 携带的 cross_review_results 作为兜底
                 if not p2 and cross_review_results:
                     p2 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
-                            "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                            "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                            for s in cross_review_results if isinstance(s, dict)]
                 if stream_msg_id > 0:
                     # P0 修复（2026-08-02）：tool_calls 字段归一化（tool → name）
@@ -1938,7 +1923,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
                     _meta = {
                         "execution_status": "completed" if completion_status == "completed" else "failed", "complexity": complexity,
-                        "completion_status": completion_status, "reflection": reflection, "cross_review_status": cross_review_status,
+                        "completion_status": completion_status, "quality_status": quality_status, "quality_issues": quality_issues or [], "confidence": confidence, "reflection": reflection, "cross_review_status": cross_review_status,
                         "specialist_results": p1, "cross_review_results": p2,
                         "tool_calls": _norm_tool_calls, "phase_timings": pt, "trace_id": trace_id,
                     }
@@ -1955,6 +1940,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             "expert_verdicts": (arbitration.get("expert_verdicts", []) or [])[:10],
                             "stance_source": arbitration.get("stance_source", ""),
                             "consistency_warning": (arbitration.get("consistency_warning", "") or "")[:300],
+                            "asset_actions": arbitration.get("asset_actions", []),
+                            "portfolio_stance": arbitration.get("portfolio_stance", "unknown"),
                         }
                         # 仲裁以独立 specialist 卡片形式追加到列表末尾
                         # 修复 conv 127：原仲裁只写 metadata，前端 specialist_results 列表无仲裁 Agent
@@ -1972,68 +1959,52 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         agent_key="chat_turn", agent_name="对话整体",
                         query=effective_query[:500], result=content[:3000],
                         tool_calls=json.dumps(pt, ensure_ascii=False), duration_ms=total_ms,
-                        trace_id=trace_id, status="success")
+                        trace_id=trace_id, status="success" if completion_status == "completed" else "failed")
                 except Exception as e:
                     logger.warning(f"记录 agent_runs 失败: {e}")
                 log_rag_search(conversation_id=conv_id, message_id=stream_msg_id, query=effective_query,
                     keywords=rag_result.get("keywords", []), results=rag_result.get("results", []),
                     content_types=rag_types if rag_types else None,
                     fts_count=rag_result.get("fts_count", 0), chroma_count=rag_result.get("chroma_count", 0),
-                    freshness_filtered=rag_result.get("freshness_filtered", 0), trace_id=trace_id)
-                qm = _calculate_quality_metrics(_prod_spec_results, rag_result, tool_calls)
-                _save_execution_trace(trace_id, conv_id, effective_query, complexity, "completed", total_ms, pt, "none", qm)
+                    freshness_filtered=rag_result.get("freshness_filtered", 0), trace_id=trace_id,
+                    rag_low_quality=rag_result.get("rag_low_quality", False))
+                qm = _calculate_quality_metrics(final_results, rag_result, tool_calls)
+                _save_execution_trace(trace_id, conv_id, effective_query, complexity,
+                    "completed" if completion_status == "completed" else "failed", total_ms, pt,
+                    "none" if completion_status == "completed" else "quality", qm)
 
                 # 自动检测可执行建议 → 创建决策候选
                 try:
-                    _auto_create_decision_candidate(content, conv_id, stream_msg_id)
+                    _auto_create_decision_candidate(content, conv_id, stream_msg_id,
+                        selected_asset_actions(arbitration, final_results), tool_calls, completion_status, quality_status)
                 except Exception:
                     pass
 
                 return content
 
-            def _auto_create_decision_candidate(content: str, conversation_id: int, message_id: int):
-                """自动检测 AI 回复中的可执行建议，创建决策候选。"""
-                actionable_keywords = ["买入", "加仓", "卖出", "减仓", "清仓", "止盈", "止损", "定投", "调仓", "再平衡", "转换"]
-                if not any(kw in content for kw in actionable_keywords):
-                    return
+            def _auto_create_decision_candidate(content, conversation_id, message_id,
+                                                actions, tools, completion_status, quality_status):
+                """只保存有原始证据支持且通过最终化校验的标的动作。"""
+                from services.conversation.quality_contract import build_chat_candidates
                 from db.decisions import create_candidate_from_structured_recommendation
-                import re
-                action_type = "watch"
-                if any(kw in content for kw in ["买入", "加仓", "建仓", "定投"]):
-                    action_type = "buy"
-                elif any(kw in content for kw in ["卖出", "减仓", "清仓", "止盈"]):
-                    action_type = "sell"
-                elif any(kw in content for kw in ["调仓", "再平衡", "转换"]):
-                    action_type = "convert"
-                fund_code = ""
-                code_match = re.search(r"\d{6}(?:\.\w+)?", content)
-                if code_match:
-                    fund_code = code_match.group(0)
-                candidate_id = create_candidate_from_structured_recommendation({
-                    "source_type": "ai_chat",
-                    "source_id": str(conversation_id),
-                    "scenario_type": "auto_detect",
-                    "action_type": action_type,
-                    "target_type": "fund" if fund_code else "portfolio",
-                    "target_code": fund_code,
-                    "summary": content[:200],
-                    "rationale": content,
-                    "confidence": "low",
-                    "evidence": {"auto_detected": True, "conversation_id": conversation_id, "message_id": message_id},
-                    "priority": 4,
-                    "status": "new",
-                })
-                logger.info(f"自动创建决策候选: {candidate_id} (action={action_type}, fund={fund_code})")
+                for payload in build_chat_candidates(content, actions, tools,
+                        conversation_id=conversation_id, message_id=message_id,
+                        completion_status=completion_status, quality_status=quality_status):
+                    candidate_id = create_candidate_from_structured_recommendation(payload)
+                    logger.info("创建已核验动作候选: %s (action=%s, fund=%s)",
+                                candidate_id, payload["action_type"], payload["target_code"])
 
             def _save_failed(err_msg):
                 if stream_msg_id <= 0:
                     return
                 # P0 修复（2026-08-02）：失败路径也补全 verdict/confidence，保持 schema 一致
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
-                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                        for s in _prod_spec_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
-                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                        "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                        for s in _prod_spec_results if s.get("is_cross_review")]
                 update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
                     "execution_status": "failed", "complexity": complexity,
@@ -2068,7 +2039,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     # 案例：conv#132/133 因 akshare HTTP 挂起导致 40min 无日志
                     import itertools as _it
                     import concurrent.futures as _cf
-                    _orch_gen = orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists)
+                    _orch_gen = orchestrate_stream(effective_query, msg_list, orchestrator_context, cancel_event=cancel_event, conversation_id=conv_id, message_id=stream_msg_id, trace_id=trace_id, target_specialists=req.target_specialists, prepared_rag_result=rag_result)
                     _first_evt_executor = _cf.ThreadPoolExecutor(max_workers=1)
                     try:
                         _first_evt_future = _first_evt_executor.submit(next, _orch_gen)
@@ -2098,6 +2069,9 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             update_stream_heartbeat(channel_id)
                         except Exception:
                             pass
+                        if event.get("type") == "answer":
+                            from services.conversation.quality_contract import finalize_answer_event
+                            event = finalize_answer_event(event)
                         # P2-1：在每个事件前检查总耗时
                         elapsed = time.time() - producer_started
                         if elapsed >= abort_at_sec:
@@ -2113,11 +2087,16 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                         arbitration=event.get("arbitration"),
                                         cross_review_results=event.get("cross_review_results"),
                                         completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"),
+                                        confidence=event.get("confidence", 0.0), phase_timings=event.get("phase_timings"),
+                                        quality_status=event.get("quality_status", "unverified"), quality_issues=event.get("quality_issues", []),
                                     )
                                     event = dict(event)
                                     event["content"] = reviewed
                                     try:
-                                        complete_stream_channel(channel_id)
+                                        if event.get("completion_status", "completed") == "completed":
+                                            complete_stream_channel(channel_id)
+                                        else:
+                                            fail_stream_channel(channel_id, "分析质量校验未通过")
                                     except Exception as _e:
                                         logger.warning(f"[trace:{trace_id}] 超时收尾标记 channel 完成失败: {_e}")
                                     logger.info(f"[P0-1] trace:{trace_id} 超时退出前成功保存综合报告")
@@ -2153,12 +2132,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")
                         elif et == "answer":
-                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"), completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"))
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"), completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"), confidence=event.get("confidence", 0.0), phase_timings=event.get("phase_timings"), quality_status=event.get("quality_status", "unverified"), quality_issues=event.get("quality_issues", []))
                             event = dict(event)
                             event["content"] = reviewed
                             # 标记 channel 完成
                             try:
-                                complete_stream_channel(channel_id)
+                                if event.get("completion_status", "completed") == "completed":
+                                    complete_stream_channel(channel_id)
+                                else:
+                                    fail_stream_channel(channel_id, error_message="分析质量校验未通过")
                             except Exception as _e:
                                 logger.warning(f"[trace:{trace_id}] 标记 channel 完成失败: {_e}")
                         elif et == "clarification":
@@ -2609,7 +2591,8 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                             # P0 修复（2026-08-02）：持久化结构化 verdict/confidence
                             p1 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""),
                                    "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000],
-                                   "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0)}
+                                   "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
                                   for s in spec_results if not s.get("is_cross_review")]
                             _meta = {
                                 "execution_status": "completed",
@@ -3017,11 +3000,11 @@ def _save_execution_trace(trace_id: str, conversation_id: int, query: str,
         conn.execute("""
             INSERT OR REPLACE INTO execution_traces
             (trace_id, conversation_id, query, complexity, status,
-             finished_at, total_ms, phase_timings, quality_metrics, error_category)
-            VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), ?, ?, ?, ?)
+             started_at, finished_at, total_ms, phase_timings, quality_metrics, error_category)
+            VALUES (?, ?, ?, ?, ?, datetime('now','localtime', ?), datetime('now','localtime'), ?, ?, ?, ?)
         """, (
             trace_id, conversation_id, query[:500], complexity, status,
-            total_ms, json.dumps(phase_timings, ensure_ascii=False),
+            f"-{max(0, total_ms) / 1000} seconds", total_ms, json.dumps(phase_timings, ensure_ascii=False),
             json.dumps(quality_metrics or {}, ensure_ascii=False),
             error_category,
         ))
@@ -3034,40 +3017,34 @@ def _save_execution_trace(trace_id: str, conversation_id: int, query: str,
 
 def _calculate_quality_metrics(specialist_results: list, rag_result: dict,
                                tool_calls: list) -> dict:
-    """计算本次执行的质量指标。"""
-    # RAG 覆盖率：是否找到相关信息
-    rag_coverage = 1.0 if (rag_result and rag_result.get("results")) else 0.0
-
-    # 工具成功率：检查是否有实际错误（不是结果中包含"error"字样）
-    if tool_calls:
-        success_count = 0
-        for tc in tool_calls:
-            # 有 result_preview 且不是错误消息就算成功
-            has_result = bool(tc.get("result_preview"))
-            is_error = tc.get("error") or (tc.get("result_preview", "").startswith("错误") or tc.get("result_preview", "").startswith("Error"))
-            if has_result and not is_error:
-                success_count += 1
-        tool_success_rate = success_count / len(tool_calls)
-    else:
-        tool_success_rate = 1.0
-
-    # 专家完成度：status=success 且非兜底文本 且 ≥200 字才算完成
-    _FALLBACK_BLACKLIST = {"分析过程遇到问题，请重试。", "交叉审阅完成，请参考其他专家分析。"}
-    if specialist_results:
-        completed = len([s for s in specialist_results
-                        if s.get("analysis")
-                        and s.get("status", "success") == "success"
-                        and s["analysis"].strip() not in _FALLBACK_BLACKLIST
-                        and len(s["analysis"].strip()) >= 200])
-        specialist_completion = completed / len(specialist_results)
-    else:
-        specialist_completion = 0.0
-
+    """调用成功、输出完整性和证据覆盖分别计量，不把审阅次数算为专家数。"""
+    from agent.infra.output_quality import validate_specialist_output
+    primary = {}
+    for index, result in enumerate(specialist_results or []):
+        if not result.get("is_cross_review") and not result.get("is_arbitration"):
+            primary[result.get("agent_key") or str(index)] = result
+    completed = sum(validate_specialist_output(result)["valid"] for result in primary.values())
+    usable = [r for r in (rag_result or {}).get("results", [])
+              if r.get("quality_status") == "usable" and not r.get("quality_issues")]
+    low_quality = (rag_result or {}).get("rag_low_quality", True)
+    successes = 0
+    for call in tool_calls or []:
+        raw = call.get("result") or call.get("result_preview") or ""
+        error = call.get("error") or call.get("success") is False
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                error = error or (isinstance(parsed, dict) and bool(parsed.get("error")))
+            except (ValueError, TypeError):
+                error = error or raw.startswith(("错误", "Error", "（无数据"))
+        successes += bool(raw) and not error
     return {
-        "rag_coverage": round(rag_coverage, 2),
-        "tool_success_rate": round(tool_success_rate, 2),
-        "specialist_completion": round(specialist_completion, 2),
-        "specialist_count": len(specialist_results or []),
+        "rag_coverage": 1.0 if usable and not low_quality else 0.0,
+        "rag_usable_count": len(usable), "rag_low_quality": bool(low_quality),
+        "tool_success_rate": round(successes / len(tool_calls), 2) if tool_calls else None,
+        "specialist_completion": round(completed / len(primary), 2) if primary else 0.0,
+        "specialist_count": len(primary),
+        "review_count": sum(bool(r.get("is_cross_review")) for r in specialist_results or []),
         "tool_count": len(tool_calls or []),
     }
 

@@ -53,6 +53,7 @@ class BlackboardEntry:
     portfolio_impact: Optional[dict] = None
     # 结构化逐标的动作（优先于从长文本猜测）
     asset_actions: list = field(default_factory=list)
+    portfolio_stance: str = "unknown"
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +70,7 @@ class BlackboardEntry:
             "risk_veto": self.risk_veto,
             "portfolio_impact": self.portfolio_impact,
             "asset_actions": self.asset_actions,
+            "portfolio_stance": self.portfolio_stance,
         }
 
 
@@ -397,14 +399,26 @@ def extract_entry_from_result(
     Args:
         result: run_specialist 返回的 dict，包含 analysis/tool_calls/duration_ms 等
     """
-    analysis = result.get("analysis", "") or ""
+    from agent.infra.message_protocol import normalize_specialist_result
+    structured = result.get("structured") or {}
+    inner = structured.get("structured") or structured
+    normalized = normalize_specialist_result(result)
+    analysis = result.get("analysis") or result.get("analysis_markdown") or inner.get("analysis_markdown") or ""
     conclusion = _extract_conclusion(analysis)
-    # 模型已返回结构化动作时只做轻量规范化，避免再次从全文猜测。
-    structured_actions = result.get("asset_actions") or result.get("action_signals") or []
+    # 显式动作列表（包括空数组）是权威结果；拒绝后不能从全文重新激活。
+    if "asset_actions" in result:
+        structured_actions = result["asset_actions"]
+        has_structured_actions = True
+    elif "asset_actions" in inner:
+        structured_actions = inner["asset_actions"]
+        has_structured_actions = True
+    else:
+        structured_actions = result.get("action_signals") or inner.get("action_signals") or []
+        has_structured_actions = bool(structured_actions)
     asset_actions = _normalize_asset_actions(structured_actions)
-    action_signals = asset_actions or _extract_action_signals(analysis, agent_key)
+    action_signals = asset_actions if has_structured_actions else _extract_action_signals(analysis, agent_key)
     key_data = _extract_key_data(analysis, result.get("tool_calls", []))
-    confidence = _estimate_confidence(analysis, action_signals, result=result)
+    confidence = _estimate_confidence(analysis, action_signals, result=normalized)
 
     # P0-A: 风险否决提取（仅 risk_assessor + 开关开启）
     risk_veto = None
@@ -437,6 +451,8 @@ def extract_entry_from_result(
         risk_veto=risk_veto,
         portfolio_impact=portfolio_impact,
         asset_actions=asset_actions,
+        portfolio_stance=normalized.get("portfolio_stance", "unknown"),
+        data_refs=result.get("data_references") or inner.get("data_references") or [],
     )
 
 
@@ -526,19 +542,20 @@ def _normalize_asset_actions(actions) -> list[dict]:
     if not isinstance(actions, list):
         return []
     out = []
-    aliases = {"BUY": "BUY", "买入": "BUY", "加仓": "BUY", "增持": "BUY",
+    aliases = {"BUY": "BUY", "ADD": "BUY", "买入": "BUY", "加仓": "BUY", "增持": "BUY",
                "SELL": "SELL", "卖出": "SELL", "减仓": "SELL", "清仓": "SELL",
-               "HOLD": "HOLD", "持有": "HOLD", "观望": "HOLD", "REDUCE_CONCENTRATION": "SELL"}
+               "HOLD": "HOLD", "持有": "HOLD", "观望": "HOLD", "REDUCE": "SELL", "REDUCE_CONCENTRATION": "SELL"}
     for raw in actions:
         if not isinstance(raw, dict):
             continue
-        target = str(raw.get("target") or raw.get("asset") or raw.get("code") or "").strip()
+        target = str(raw.get("target_code") or raw.get("target") or raw.get("asset") or raw.get("code") or "").strip()
         action = aliases.get(str(raw.get("type") or raw.get("action") or "").upper(),
                              aliases.get(str(raw.get("type") or raw.get("action") or "")))
         if not target or action not in {"BUY", "SELL", "HOLD"}:
             continue
         # 明确标记 conditional/negated/history 的动作不参与现时仲裁。
-        if raw.get("negated") or raw.get("historical") or str(raw.get("status", "")).lower() in {"conditional", "historical", "rejected"}:
+        if (raw.get("negated") or raw.get("historical") or raw.get("condition") or raw.get("conditions")
+                or str(raw.get("status", "")).strip().lower() in {"conditional", "historical", "negated", "rejected"}):
             continue
         item = dict(raw)
         item.update({"type": action, "target": target})
