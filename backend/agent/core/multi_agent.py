@@ -462,7 +462,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
     Args:
         from_pipeline: Pipeline 路径标记。True 时 prebuilt_context 已含 Layer 0-5
-                      （含 system_prompt/KYC/持仓），跳过重复注入。
+                      （含 system_prompt/KYC/持仓），跳过重复注入，并交由 Pipeline 统一反思。
 
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
@@ -837,7 +837,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             evaluate_analysis, build_retry_prompt,
             is_self_reflection_enabled, get_max_retry,
         )
-        if is_self_reflection_enabled() and is_valid_analysis(answer, completion_status=completion_status):
+        # Pipeline 在全部专家返回后统一反思和补跑；此处再评估并全文重写会
+        # 把已完成初稿卡在专家阶段，耗尽共享截止时间（对话 204）。
+        pipeline_reviews = from_pipeline and get_config_bool("pipeline.reflection_enabled", True)
+        if not pipeline_reviews and is_self_reflection_enabled() and is_valid_analysis(answer, completion_status=completion_status):
             # M7：从黑板获取其他专家结论，供跨专家盲点检查（开关关闭时不传，无额外成本）
             peer_conclusions = ""
             if blackboard:

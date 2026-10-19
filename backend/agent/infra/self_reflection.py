@@ -349,9 +349,9 @@ def is_self_reflection_enabled() -> bool:
 
 
 def get_max_retry() -> int:
-    """获取反思后最大重试次数。"""
+    """反思最多补跑一次，防止异常配置造成重复全文重写。"""
     try:
         from db.config import get_config_int
-        return get_config_int("agent.self_reflection_max_retry", 1)
+        return max(0, min(1, get_config_int("agent.self_reflection_max_retry", 1)))
     except Exception:
         return 1

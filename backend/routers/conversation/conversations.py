@@ -2028,10 +2028,10 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
 
                     _hb_thread = threading.Thread(target=_heartbeat_daemon, daemon=True)
                     _hb_thread.start()
-                    # P2-1：长对话超时保护（5min 警告 / 8min 硬收尾）
+                    # 长对话默认 5min 警告 / 15min 在下一个事件边界收尾。
                     producer_started = time.time()
                     warn_at_sec = get_config_int("conversation.warn_at_minutes", 5) * 60
-                    abort_at_sec = get_config_int("conversation.abort_at_minutes", 8) * 60
+                    abort_at_sec = get_config_int("conversation.abort_at_minutes", 15) * 60
                     timeout_warned = False
                     # 首事件超时守卫：orchestrate_stream 在 yield 第一个事件前可能卡在
                     # _stream_build_context（akshare/HTTP 无超时），此时 for 循环体不执行，

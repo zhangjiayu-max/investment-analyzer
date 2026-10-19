@@ -90,6 +90,8 @@ def test_structured_tool_evidence_stays_complete_during_history_compression(core
 @pytest.mark.parametrize('retry, reason', [(XML, 'stop'), (VALID + '（来源：知识库', 'stop'),
                                          (VALID, 'length')])
 def test_invalid_reflection_retry_cannot_replace_valid_draft(core, monkeypatch, retry, reason):
+    # Pipeline 审查关闭时仍由专家自己反思；开启时统一留给 Pipeline。
+    monkeypatch.setattr(core, 'get_config_bool', lambda key, default: False if key == 'pipeline.reflection_enabled' else default)
     reflection = importlib.import_module('agent.infra.self_reflection')
     monkeypatch.setattr(reflection, 'is_self_reflection_enabled', lambda: True)
     monkeypatch.setattr(reflection, 'evaluate_analysis', lambda **kwargs: {
@@ -105,6 +107,22 @@ def test_invalid_reflection_retry_cannot_replace_valid_draft(core, monkeypatch, 
     assert result['self_reflection']['gaps_resolved'] is False
     assert result['status'] == 'degraded'
     assert calls[1]['messages'][-2]['reasoning_content'] == '初稿推理'
+
+
+def test_pipeline_returns_draft_without_duplicate_self_reflection(core, monkeypatch):
+    reflection = importlib.import_module('agent.infra.self_reflection')
+    monkeypatch.setattr(reflection, 'is_self_reflection_enabled', lambda: True)
+    reviews = []
+    monkeypatch.setattr(reflection, 'evaluate_analysis', lambda **kw: reviews.append(kw) or {
+        'need_retry': True, 'gaps': ['补查政策信息']})
+    calls = []
+    monkeypatch.setattr(core, '_call_llm', lambda **kw: calls.append(kw) or response(VALID))
+    result = run(core)
+    assert result['analysis'] == VALID
+    assert result['status'] == 'success'
+    assert result['self_reflection'] is None
+    assert reviews == []
+    assert len(calls) == 1
 
 
 def test_length_stopped_analysis_is_continued_with_mimo_reasoning(core, monkeypatch):

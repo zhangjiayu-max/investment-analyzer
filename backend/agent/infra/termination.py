@@ -82,7 +82,7 @@ class TerminationChecker:
             return True, reason
 
         # 2. 超时检查
-        timeout_sec = self._get_config_int_safe("conversation.abort_at_minutes", 8) * 60
+        timeout_sec = self._get_config_int_safe("conversation.abort_at_minutes", 15) * 60
         elapsed = time.time() - self.start_time
         if elapsed > timeout_sec:
             reason = f"执行超时 ({elapsed:.0f}s > {timeout_sec}s)"

@@ -271,6 +271,129 @@ def test_pipeline_deadline_is_terminal_instead_of_react_restart(monkeypatch):
     assert '超时' in events[-1]['message']
 
 
+@pytest.mark.parametrize('cancelled', [False, True, 'after_timeout'])
+def test_parallel_timeout_keeps_finished_specialists_for_degraded_synthesis(monkeypatch, cancelled):
+    p = import_module('agent.core.pipeline')
+    multi_agent = import_module('agent.core.multi_agent')
+    builder = import_module('agent.core.context_builder')
+    release = threading.Event()
+    cancel = threading.Event()
+    specs = [{'agent_key': key, 'name': key, 'system_prompt': 'configured'} for key in ('fast', 'slow')]
+    plan = {'specialists': specs, 'plan': {'steps': [{'agent_key': s['agent_key']} for s in specs]}}
+    monkeypatch.setattr(p, '_phase_preprocess', lambda *a: {'complexity': 'medium', 'query_info': {}})
+    monkeypatch.setattr(p, 'is_simple_chat', lambda *a: False)
+    monkeypatch.setattr(p, 'needs_clarification', lambda *a: (False, ''))
+    monkeypatch.setattr(p, '_phase_info_gather', lambda *a, **kw: {})
+    monkeypatch.setattr(p, '_phase_planning', lambda *a: plan)
+    monkeypatch.setattr(p, 'get_config_bool', lambda key, default: key == 'pipeline.parallel_execution')
+    original_config = p.get_config_int
+    monkeypatch.setattr(p, 'get_config_int', lambda key, default: .06 if key == 'agent.specialist_timeout' else original_config(key, default))
+    monkeypatch.setattr(builder, 'build_specialist_context', lambda **kw: 'prepared')
+    monkeypatch.setattr(p, '_route_model', lambda *a: 'mimo')
+    monkeypatch.setattr(p, '_phase_memory', lambda *a, **kw: {})
+    monkeypatch.setattr(p, '_synthesize_multiple_specialists', lambda *a, **kw: ('根据本轮证据核对风险，缺失专家意见需进一步复核。' * 12, {}, 'completed'))
+    analysis = '已核对可用持仓证据，风险敞口应依据总资产口径评估，缺失信息需要保留并补查。' * 10
+    def specialist(**kw):
+        if kw['agent_key'] == 'slow':
+            release.wait(.3)
+        return {'agent_key': kw['agent_key'], 'agent': kw['agent_key'], 'analysis': analysis,
+                'status': 'success', 'tool_calls': [{'name': 'query_portfolio', 'result': '{}'}]}
+    monkeypatch.setattr(multi_agent, 'run_specialist', specialist)
+    events = []
+    try:
+        for event in p.run_pipeline('q', [], None, None, '204-timeout', cancel_event=cancel):
+            events.append(event)
+            if event['type'] == 'specialist_done' and (cancelled is True or
+                    (cancelled == 'after_timeout' and event.get('status') == 'timeout')):
+                cancel.set()
+        if cancelled:
+            assert events[-1]['type'] == 'terminated'
+            assert not any(e['type'] == 'answer' for e in events)
+        else:
+            answer = next(e for e in events if e['type'] == 'answer')
+            assert answer['completion_status'] == 'degraded'
+            assert answer['quality_status'] == 'degraded'
+            assert answer['confidence'] <= .45
+            assert answer['tool_calls'][0]['name'] == 'query_portfolio'
+            fast, slow = answer['specialist_results']
+            assert fast['analysis'] == analysis
+            assert slow['status'] == 'timeout'
+            assert slow['asset_actions'] == []
+            assert not any(e['type'] in {'terminated', 'degrade', 'error'} for e in events)
+    finally:
+        release.set()
+
+
+def test_worker_timeout_does_not_discard_another_finished_specialist(monkeypatch):
+    p = import_module('agent.core.pipeline')
+    from concurrent.futures import Future
+    from agent.infra.blackboard import Blackboard
+    from agent.infra.convergence import ConvergenceDetector
+    from agent.infra.termination import TerminationChecker
+    from agent.state.pipeline_state import PipelineState
+    builder = import_module('agent.core.context_builder')
+    monkeypatch.setattr(builder, 'build_specialist_context', lambda **kw: 'prepared')
+    failed, finished = Future(), Future()
+    failed.set_exception(TimeoutError('worker exhausted its own budget'))
+    analysis = '已核对持仓证据，风险敞口应根据总资产计算，保留数据缺口等待复核。' * 10
+    finished.set_result({'agent_key': 'fast', 'analysis': analysis, 'status': 'success',
+                         'tool_calls': [{'name': 'query_portfolio', 'result': '{}'}]})
+    # 模拟同一批 done 中，超时 future 恰好先被消费的竞争。
+    monkeypatch.setattr(p, '_phase_futures', lambda *a: iter([(0, failed), (1, finished)]))
+    steps = [{'agent_key': key} for key in ('slow', 'fast')]
+    specs = [{'agent_key': key, 'name': key} for key in ('slow', 'fast')]
+    state = PipelineState(refined_query='q')
+    gen = p._execute_steps_parallel(state, steps, {'specialists': specs}, {}, {},
+        ConvergenceDetector(), Blackboard(), TerminationChecker(), None, 'worker-timeout')
+    while True:
+        try:
+            next(gen)
+        except StopIteration as stop:
+            result = stop.value
+            break
+    by_key = {s['agent_key']: s for s in result['specialists']}
+    assert by_key['fast']['analysis'] == analysis
+    assert by_key['slow']['status'] == 'timeout'
+    assert result['tool_calls'][0]['name'] == 'query_portfolio'
+
+
+def test_cancel_is_checked_before_followup_budget_shortcut():
+    from agent.core.pipeline import _run_followup_phase, _PipelineCancelled
+    from agent.state.pipeline_state import PipelineState
+    cancel = threading.Event()
+    cancel.set()
+    state = PipelineState(tokens_used=1000, token_budget={'max_total': 1000})
+    with pytest.raises(_PipelineCancelled):
+        _run_followup_phase(lambda *a: pytest.fail('cancelled review'), (state,), cancel, 'reflection')
+
+
+@pytest.mark.parametrize('phase', ['reflection', 'debate'])
+def test_optional_review_timeout_still_returns_degraded_report(monkeypatch, phase):
+    p = import_module('agent.core.pipeline')
+    from agent.infra.blackboard import Blackboard
+    monkeypatch.setattr(p, '_phase_preprocess', lambda *a: {'complexity': 'medium', 'query_info': {}})
+    monkeypatch.setattr(p, 'is_simple_chat', lambda *a: False)
+    monkeypatch.setattr(p, 'needs_clarification', lambda *a: (False, ''))
+    monkeypatch.setattr(p, '_phase_info_gather', lambda *a, **kw: {})
+    monkeypatch.setattr(p, '_phase_planning', lambda *a: {})
+    monkeypatch.setattr(p, 'get_config_bool', lambda key, default: key == f'pipeline.{phase}_enabled')
+    monkeypatch.setattr(Blackboard, 'find_conflicts', lambda *a: [{'severity': 'medium'}])
+    def execution(*a):
+        yield from ()
+        return {'specialists': [{'agent_key': 'risk', 'analysis': '依据现有持仓证据评估风险，保留数据缺口并等待核对。' * 10}]}
+    monkeypatch.setattr(p, '_phase_execution', execution)
+    def timeout(*a, **kw):
+        raise TimeoutError('optional review deadline')
+    monkeypatch.setattr(p, '_run_followup_phase', timeout)
+    monkeypatch.setattr(p, '_phase_memory', lambda *a, **kw: {})
+    events = list(p.run_pipeline('q', [], None, None, '204-review-timeout'))
+    answer = next(e for e in events if e['type'] == 'answer')
+    assert answer['completion_status'] == 'degraded'
+    assert answer['quality_status'] == 'degraded'
+    assert answer['confidence'] <= .45
+    assert not any(e['type'] in {'terminated', 'error'} for e in events)
+
+
 @pytest.mark.parametrize('fallback', [False, True])
 def test_sequential_pipeline_specialist_uses_bounded_wait(monkeypatch, fallback):
     m = import_module('agent.core.pipeline')
