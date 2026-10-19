@@ -88,7 +88,7 @@ export const navItems = [
         desc: '公众号文章采集、图片解析、估值提取' },
       { key: 'valuation', label: '估值数据', icon: 'valuation', hot: true,
         desc: '指数PE/PB估值历史、百分位、AI市场分析' },
-      { key: 'gallery', label: '估值图片', icon: 'gallery', hidden: true,
+      { key: 'gallery', label: '估值图片', icon: 'gallery',
         desc: '估值图片归档、批量识别、日期检索' },
       { key: 'knowledge', label: '蒸馏知识', icon: 'book', hidden: true,
         desc: '书籍/文章蒸馏的知识卡片、分类检索' },

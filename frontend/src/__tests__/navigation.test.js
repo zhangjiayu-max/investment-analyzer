@@ -39,12 +39,13 @@ describe('navigation config', () => {
 
       // 下沉页面默认隐藏
       expect(leafKeys).not.toContain('attribution')
-      expect(leafKeys).not.toContain('gallery')
+      expect(leafKeys).not.toContain('knowledge')
       // 核心页面保留
       expect(leafKeys).toContain('dashboard')
       expect(leafKeys).toContain('chat')
       expect(leafKeys).toContain('event-radar')
       expect(leafKeys).toContain('health-v2')
+      expect(visible.find(g => g.key === 'group-knowledge').children.map(i => i.key)).toContain('gallery')
     })
 
     it('shows everything in dev mode', () => {

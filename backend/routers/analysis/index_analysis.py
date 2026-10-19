@@ -26,6 +26,7 @@ from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from ._shared import inject_rag_context, build_portfolio_facts_with_check
 from ._agent_contract import require_analysis_agent, complete_text_analysis
+from infra.analysis_errors import build_error_details
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
@@ -309,11 +310,15 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
         await _execute_index_analysis(history_id, req_data, agent, async_task_id, trace_id, start_ts)
     except (Exception, asyncio.CancelledError) as error:
         error_msg = str(error) or "分析任务已取消"
+        details = getattr(error, 'analysis_error_details', None) or build_error_details(
+            error, stage='background_analysis', trace_id=trace_id,
+            elapsed_ms=int((time.time() - start_ts) * 1000))
         logger.error(f"指数分析后台失败 history_id={history_id}: {error_msg}")
         updates = [
             ("analysis_history", lambda: update_analysis_history(history_id, status="error", error_msg=error_msg)),
             ("analysis_log", lambda: complete_analysis_log(
-                trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000), error_msg=error_msg)),
+                trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000),
+                error_msg=error_msg, error_details=details)),
         ]
         if async_task_id is not None:
             updates.append(("async_task", lambda: update_async_task(async_task_id, status="error", error_msg=error_msg)))
@@ -484,13 +489,18 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
         result_text = evidence_header + '\n' + result_text
     except Exception as e:
         error_msg = str(e) or "模型分析超时，请稍后重试"
-        logger.error(f"AI 分析失败: {error_msg}")
+        details = getattr(e, 'analysis_error_details', None) or build_error_details(
+            e, stage='model_analysis', caller='index_deep_analysis', trace_id=trace_id,
+            model=MODEL_ANALYSIS, elapsed_ms=int((time.time() - _start_ts) * 1000))
+        logger.error('[trace:%s] 指数分析失败 history_id=%s diagnostics=%s',
+                     trace_id, history_id, json.dumps(details, ensure_ascii=False))
         update_analysis_history(history_id, status="error", error_msg=error_msg)
         try:
             complete_analysis_log(
                 trace_id=trace_id, status="error",
                 duration_ms=int((time.time() - _start_ts) * 1000),
                 error_msg=error_msg,
+                error_details=details,
             )
         except Exception as _e:
             logger.warning(f"complete_analysis_log 失败: {_e}")

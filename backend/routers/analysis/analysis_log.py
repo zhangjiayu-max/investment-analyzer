@@ -135,7 +135,11 @@ async def get_analysis_log_detail_api(log_id: int):
             }
     except Exception as e:
         logger.warning(f"查询质量评估反馈失败 log_id={log_id}: {e}")
-    return {"log": log, "source_result": source_result, "eval_feedback": eval_feedback}
+    diagnostic_note = ''
+    if log.get('status') == 'error' and not log.get('error_details'):
+        diagnostic_note = '此历史记录未保存底层异常，无法还原具体失败原因。后续失败会记录异常链和请求信息。'
+    return {"log": log, "source_result": source_result, "eval_feedback": eval_feedback,
+            "diagnostic_note": diagnostic_note}
 
 
 @router.post("/api/analysis/log/{log_id}/evaluate")

@@ -46,18 +46,18 @@ else:
 logger.info(f"数据库路径: {DB_PATH}")
 
 
-def _get_conn() -> sqlite3.Connection:
+def _get_conn(*, timeout: float = 30) -> sqlite3.Connection:
     """获取数据库连接 — 所有模块统一使用此函数。
 
     自动配置：
     - WAL 模式：允许读写并发，新连接可正确读取 WAL 中已提交的数据
-    - busy_timeout=30s：由 connect(timeout=30) 设置，友好处理锁竞争
+    - 默认 busy_timeout=30s；可为可选诊断写入指定更短等待
     - row_factory=Row：支持按列名访问
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # 2026-07-13 性能优化：timeout=30 已等价于 PRAGMA busy_timeout=30000，
     # 不再需要单独执行 PRAGMA busy_timeout（省一条 SQL）
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn = sqlite3.connect(str(DB_PATH), timeout=timeout)
     conn.row_factory = sqlite3.Row
     # 启用 WAL 模式：允许读写并发，减少锁等待
     # 新连接打开时会自动恢复 WAL，确保能读到 WAL 中已提交的数据
