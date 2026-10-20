@@ -49,7 +49,8 @@ from db import (
     create_async_task, update_async_task, get_async_task, get_running_async_task,
     get_analysis_cache,
 )
-from db.portfolio import update_analysis_record
+from db.portfolio import update_analysis_record, preview_transaction_nav
+from db.portfolio_accounting import list_cash_ledger, get_portfolio_performance
 from db.config import get_config as _get_config
 from mcp.trading_calendar import expected_confirm_date
 from services.rag import build_rag_context_with_details, log_rag_search
@@ -133,7 +134,10 @@ async def portfolio_stress_test_api(req: StressTestRequest):
 @router.post("/api/portfolio/clear")
 async def clear_portfolio_api():
     """清空所有持仓数据。"""
-    clear_all_portfolio_data()
+    try:
+        clear_all_portfolio_data()
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
     return {"ok": True, "message": "所有持仓数据已清空"}
 
 
@@ -233,10 +237,13 @@ async def get_cash_api(user_id: str = "default"):
 async def adjust_cash_api(req: AdjustCashRequest):
     """调整零钱余额。mode='add' 时 amount 正数存入/负数支出，mode='set' 时直接设置余额。"""
     uid = req.user_id or "default"
-    if req.mode == "set":
-        new_balance = set_cash_balance(uid, req.amount)
-    else:
-        new_balance = add_cash(uid, req.amount)
+    try:
+        if req.mode == "set":
+            new_balance = set_cash_balance(uid, req.amount)
+        else:
+            new_balance = add_cash(uid, req.amount)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
     return {"ok": True, "balance": new_balance}
 
 
@@ -278,19 +285,21 @@ async def backfill_snapshots_api():
 
 
 @router.get("/api/portfolio/alerts")
-async def list_alerts_api(unread_only: bool = False, limit: int = 50):
-    """获取预警列表（含可靠性标注 + 相关新闻）。
-
-    P0-1: 跨日合并 — 同基金同类型同 severity 合并为一条。
-    P0-2: reliability 字段 — 基于 alert_accuracy_stats 回测数据。
-    P1-3: related_news 字段 — MCP 财经新闻（受 alert.news_integration 开关控制）。
-    """
-    alerts = list_alerts(limit=limit, unread_only=unread_only)
-    # 附加新闻（受开关控制，关闭时直接返回空列表）；MCP 调用是同步阻塞，放到线程池
-    if alerts:
+async def list_alerts_api(unread_only: bool = False, limit: int = 50, offset: int = 0,
+                          active_only: bool = False, severity: str | None = None, alert_type: str | None = None):
+    """服务端先筛选活动风险及严重度，再分页；通知已读与风险恢复相互独立。"""
+    from db.alert_lifecycle import list_active_alerts_page
+    if not 1 <= limit <= 200 or offset < 0:
+        raise HTTPException(400, "limit 必须为1–200，offset 不得为负")
+    result = list_active_alerts_page(limit=limit, offset=offset, active_only=active_only,
+                                    unread_only=unread_only, severity=severity, alert_type=alert_type)
+    if result['alerts']:
         from services.alert_news_service import enrich_alerts_with_news
-        alerts = await asyncio.to_thread(enrich_alerts_with_news, alerts)
-    return {"alerts": alerts}
+        try:
+            result['alerts'] = await asyncio.to_thread(enrich_alerts_with_news, result['alerts'])
+        except Exception as exc:
+            result['news_error'] = str(exc)
+    return result
 
 
 @router.get("/api/portfolio/alerts/unread-count")
@@ -309,30 +318,41 @@ async def mark_alert_read_api(alert_id: int):
 
 @router.delete("/api/portfolio/alerts/{alert_id}")
 async def delete_alert_api(alert_id: int):
-    """删除预警。"""
-    if not delete_alert(alert_id):
+    """仅允许清理完整恢复的风险分组，活动重复行也受保护。"""
+    from db.alert_lifecycle import delete_resolved_alert
+    try:
+        deleted = delete_resolved_alert(alert_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "预警不存在")
     return {"ok": True}
+
+
+class AlertLifecycleActionRequest(BaseModel):
+    status: str
+    reason: str | None = None
+    review_date: str | None = None
 
 
 @router.post("/api/portfolio/alerts/{alert_id}/acknowledge")
-async def acknowledge_alert_api(alert_id: int, body: AcknowledgeAlertRequest):
-    """更新预警业务确认状态（已采纳/已忽略），用于后续回测用户决策质量。
-
-    status: 'acknowledged'（已采纳）或 'ignored'（已忽略）
-    """
-    if body.status not in ("acknowledged", "ignored"):
-        raise HTTPException(400, "status 只能为 'acknowledged' 或 'ignored'")
-    if not update_alert_acknowledgment(alert_id, body.status):
+async def acknowledge_alert_api(alert_id: int, body: AlertLifecycleActionRequest):
+    """采纳表示处理中而非成交/恢复；忽略须说明原因和复查日期。"""
+    from db.alert_lifecycle import update_alert_action
+    try:
+        updated = update_alert_action(alert_id, body.status, reason=body.reason, review_date=body.review_date)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not updated:
         raise HTTPException(404, "预警不存在")
-    return {"ok": True}
+    return {"ok": True, "trade_executed": False, "risk_resolved": False}
 
 
 @router.get("/api/portfolio/alerts/{alert_id}/history")
 async def get_alert_history_api(alert_id: int, days: int = 30):
     """P1-3.1：查询同持仓同类型预警的历史记录。"""
-    from db.portfolio import get_alert_history
-    history = get_alert_history(alert_id, days)
+    from db.alert_lifecycle import get_lifecycle_history
+    history = get_lifecycle_history(alert_id)
     return {"history": history, "count": len(history)}
 
 
@@ -344,7 +364,7 @@ async def trigger_proactive_scan_api():
     开关：alerts.proactive_scan_enabled（默认 true）。
     """
     from services.alert_scanner import run_periodic_scan
-    return run_periodic_scan()
+    return await asyncio.to_thread(run_periodic_scan)
 
 
 @router.post("/api/portfolio/alerts/scan-watchlist")
@@ -391,358 +411,11 @@ async def generate_alert_api(req: CreateAlertRequest):
 
 @router.post("/api/portfolio/alerts/scan-detailed")
 async def scan_portfolio_alerts():
-    """持仓风险巡检 — 细粒度扫描（回撤/集中度/现金/数据过期/补仓后跌幅）。
-
-    与 /alerts/scan（3类综合扫描）互补，覆盖更细的持仓维度。
-    """
-    from datetime import datetime, timedelta
-    from db import get_config_int
-
-    holdings = list_holdings()
-    if not holdings:
-        return {"ok": True, "generated": 0, "message": "暂无持仓"}
-
-    # 自动清理过期预警，防止表无限膨胀
-    from db.portfolio import cleanup_old_alerts
-    cleaned_result = cleanup_old_alerts()
-    if cleaned_result and (cleaned_result.get("deleted") or cleaned_result.get("auto_ignored")):
-        logger.info(
-            f"自动清理预警: 删除 {cleaned_result.get('deleted', 0)} 条, "
-            f"自动忽略 info {cleaned_result.get('auto_ignored', 0)} 条"
-        )
-
-    # 读取可配置阈值
-    val_high = get_config_int('alert.valuation_high', 80)       # 高估百分位
-    val_low = get_config_int('alert.valuation_low', 20)          # 低估百分位
-    drawdown_threshold = get_config_int('alert.drawdown_pct', 10)  # 回撤预警(%)
-    concentration_threshold = get_config_int('alert.concentration_pct', 30)  # 集中度(%)
-    cash_high_pct = get_config_int('alert.cash_high_pct', 15)    # 现金闲置(%)
-    stale_days = get_config_int('alert.stale_days', 5)           # 数据过期(天)
-    buy_drop_threshold = get_config_int('alert.buy_drop_pct', 4)  # 补仓后跌幅(%)
-
-    generated = 0
-    today = datetime.now().strftime("%Y-%m-%d")
-    today_prefix = datetime.now().strftime("%Y-%m-%d")
-
-    # ── 去重：同一天同一类型+同一基金不重复生成 ──
-    # P0-1 修复：原代码用 list_alerts 聚合行的 created_at（实际字段是 latest_at），永远拿不到今日记录
-    # 改为直接从原始表查今日已生成的 (alert_type, fund_code) 对
-    from db._conn import _get_conn as _get_alert_conn
-    _alert_conn = _get_alert_conn()
-    try:
-        _today_start = f"{today} 00:00:00"
-        _existing_rows = _alert_conn.execute(
-            """SELECT DISTINCT alert_type, COALESCE(related_fund_code, '') as fund_code
-               FROM portfolio_alerts
-               WHERE created_at >= ? AND user_id = 'default'""",
-            (_today_start,),
-        ).fetchall()
-        existing_keys = {(r["alert_type"], r["fund_code"]) for r in _existing_rows}
-    finally:
-        _alert_conn.close()
-
-    def should_create(alert_type, fund_code=""):
-        key = (alert_type, fund_code)
-        if key in existing_keys:
-            return False
-        existing_keys.add(key)
-        return True
-
-    # ── 1. 估值预警 ──
-    try:
-        for h in holdings:
-            code = h.get("fund_code", "")
-            name = h.get("fund_name", code)
-            if not code:
-                continue
-            val = get_latest_valuation(code)
-            if not val:
-                continue
-            pct = val.get("percentile")
-            metric = val.get("metric_type", "PE")
-            if pct is None:
-                continue
-            if pct >= val_high and should_create("valuation_alert", code):
-                create_alert(
-                    alert_type="valuation_alert",
-                    title=f"{name} 估值偏高（{metric}百分位 {pct}%）",
-                    content=f"{name}（{code}）当前{metric}百分位为 {pct}%，已进入高估区间（>{val_high}%）。建议关注是否需要减仓或止盈。",
-                    severity="warning",
-                    related_fund_code=code,
-                    related_fund_name=name,
-                    source="system_scan",
-                )
-                generated += 1
-            elif pct <= val_low and should_create("valuation_opportunity", code):
-                create_alert(
-                    alert_type="valuation_opportunity",
-                    title=f"{name} 估值偏低（{metric}百分位 {pct}%）",
-                    content=f"{name}（{code}）当前{metric}百分位为 {pct}%，处于低估区间（<{val_low}%）。可考虑逢低加仓。",
-                    severity="info",
-                    related_fund_code=code,
-                    related_fund_name=name,
-                    source="system_scan",
-                )
-                generated += 1
-    except Exception as e:
-        logger.warning(f"[alert_scan] 估值预警异常: {e}")
-
-    # ── 2. 回撤预警 ──
-    try:
-        for h in holdings:
-            code = h.get("fund_code", "")
-            name = h.get("fund_name", code)
-            if not code:
-                continue
-            nav_data = get_fund_nav_history(code, days=60)
-            if not nav_data or len(nav_data) < 10:
-                continue
-            navs = [d.get("nav", 0) for d in nav_data if d.get("nav")]
-            if len(navs) < 10:
-                continue
-            peak = max(navs[-30:]) if len(navs) >= 30 else max(navs)
-            current = navs[-1]
-            if peak <= 0:
-                continue
-            drawdown_pct = (peak - current) / peak * 100
-            if drawdown_pct >= drawdown_threshold and should_create("drawdown_alert", code):
-                create_alert(
-                    alert_type="drawdown_alert",
-                    title=f"{name} 近期回撤 {drawdown_pct:.1f}%",
-                    content=f"{name}（{code}）从近期高点 {peak:.4f} 回撤至 {current:.4f}，跌幅 {drawdown_pct:.1f}%。请评估是否需要止损或加仓。",
-                    severity="danger" if drawdown_pct >= drawdown_threshold * 1.5 else "warning",
-                    related_fund_code=code,
-                    related_fund_name=name,
-                    source="system_scan",
-                )
-                generated += 1
-    except Exception as e:
-        logger.warning(f"[alert_scan] 回撤预警异常: {e}")
-
-    # ── 3. 集中度预警（P1-3.1: 集中度+趋势双因子）──
-    try:
-        total_value = sum(h.get("current_value", 0) or 0 for h in holdings)
-        if total_value > 0:
-            for h in holdings:
-                code = h.get("fund_code", "")
-                name = h.get("fund_name", code)
-                value = h.get("current_value", 0) or 0
-                pct = value / total_value * 100
-                if pct >= concentration_threshold and should_create("concentration_alert", code):
-                    # P1-3.1: 计算近5日趋势（双因子判定）
-                    trend_ch = 0.0
-                    try:
-                        from services.fund_data_service import get_fund_nav_history_from_cache
-                        navs = get_fund_nav_history_from_cache(code, days=5)
-                        if navs and len(navs) >= 2:
-                            valid = [n for n in navs if n.get("nav") and n["nav"] > 0]
-                            if len(valid) >= 2 and valid[0]["nav"] > 0:
-                                trend_ch = (valid[-1]["nav"] - valid[0]["nav"]) / valid[0]["nav"] * 100
-                    except Exception as te:
-                        logger.debug(f"[alert_scan] 集中度趋势计算跳过 {code}: {te}")
-
-                    # 双因子判定 severity
-                    if pct >= concentration_threshold * 1.5:  # ≥45% 严重超限 → danger
-                        severity = "danger"
-                        advice = f"占比 {pct:.1f}% 严重超限，建议立即减仓 10-15%"
-                    elif trend_ch < -1.0:  # 集中度高 + 持续下跌 → danger
-                        severity = "danger"
-                        advice = f"占比 {pct:.1f}% 且近5日下跌 {trend_ch:.2f}%，建议减仓 5-10%"
-                    elif trend_ch < 0:  # 集中度高 + 微跌 → warning
-                        severity = "warning"
-                        advice = f"占比 {pct:.1f}%，近5日 {trend_ch:.2f}%，建议关注走势"
-                    else:  # 集中度高 + 上涨/平稳 → warning
-                        severity = "warning"
-                        advice = f"占比 {pct:.1f}%，建议适当分散配置"
-
-                    create_alert(
-                        alert_type="concentration_alert",
-                        title=f"{name} 占比过高（{pct:.1f}%）",
-                        content=f"{name}（{code}）占组合总市值 {pct:.1f}%，超过集中度阈值 {concentration_threshold}%。近5日走势 {trend_ch:+.2f}%。{advice}。",
-                        severity=severity,
-                        related_fund_code=code,
-                        related_fund_name=name,
-                        source="system_scan",
-                    )
-                    generated += 1
-    except Exception as e:
-        logger.warning(f"[alert_scan] 集中度预警异常: {e}")
-
-    # ── 4. 现金闲置预警 ──
-    try:
-        cash_balance = get_cash_balance() or 0
-        total_assets = total_value + cash_balance
-        if total_assets > 0:
-            cash_pct = cash_balance / total_assets * 100
-            if cash_pct >= cash_high_pct and should_create("cash_idle"):
-                create_alert(
-                    alert_type="cash_idle",
-                    title=f"现金占比偏高（{cash_pct:.1f}%）",
-                    content=f"当前现金余额 ¥{cash_balance:,.0f}，占总资产 {cash_pct:.1f}%，超过 {cash_high_pct}% 阈值。资金闲置会拖低整体收益，建议逐步配置。",
-                    severity="info",
-                    source="system_scan",
-                )
-                generated += 1
-    except Exception as e:
-        logger.warning(f"[alert_scan] 现金预警异常: {e}")
-
-    # ── 5. 数据过期预警 ──
-    try:
-        stale_funds = []
-        cutoff = (datetime.now() - timedelta(days=stale_days)).strftime("%Y-%m-%d")
-        for h in holdings:
-            updated = h.get("price_updated_at", "") or ""
-            if updated < cutoff and h.get("shares", 0) > 0:
-                stale_funds.append(h)
-        if stale_funds and should_create("stale_data"):
-            names = "、".join(h.get("fund_name", h.get("fund_code", "")) for h in stale_funds[:5])
-            create_alert(
-                alert_type="stale_data",
-                title=f"{len(stale_funds)} 只基金数据超过 {stale_days} 天未更新",
-                content=f"以下基金净值数据过期：{names}。建议刷新行情数据。",
-                severity="info",
-                source="system_scan",
-            )
-            generated += 1
-    except Exception as e:
-        logger.warning(f"[alert_scan] 数据过期预警异常: {e}")
-
-    # ── 6. 补仓后跌幅预警 ──
-    try:
-        for h in holdings:
-            code = h.get("fund_code", "")
-            name = h.get("fund_name", code)
-            if not code:
-                continue
-            last_buy_price = h.get("last_buy_price")
-            current_price = h.get("current_price")
-            if not last_buy_price or last_buy_price <= 0 or not current_price:
-                continue
-            drop_pct = (last_buy_price - current_price) / last_buy_price * 100
-            if drop_pct >= buy_drop_threshold:
-                last_buy_date = h.get("last_buy_date", "")
-                if should_create("buy_drop_alert", code):
-                    is_danger = drop_pct >= buy_drop_threshold * 1.5
-                    create_alert(
-                        alert_type="buy_drop_alert",
-                        title=f"{name} 补仓后下跌 {drop_pct:.1f}%",
-                        content=f"{name}（{code}）最近一次买入价 {last_buy_price:.4f}（{last_buy_date}），当前净值 {current_price:.4f}，已下跌 {drop_pct:.1f}%（阈值 {buy_drop_threshold}%）。请评估是否继续持有或止损。",
-                        severity="danger" if is_danger else "warning",
-                        related_fund_code=code,
-                        related_fund_name=name,
-                        source="system_scan",
-                    )
-                    generated += 1
-
-                    # P0-2.2: danger 级预警联动 dca_add 信号
-                    # 历史回测：buy_drop_alert danger 级后续 100% 反弹，平均涨幅 3-7%
-                    if is_danger:
-                        try:
-                            from db.daily_advice import create_signal
-                            today = datetime.now().strftime("%Y-%m-%d")
-                            base_amount = 500
-                            if drop_pct >= 8:
-                                suggested_amount = base_amount * 2.0   # 2倍
-                            elif drop_pct >= 6:
-                                suggested_amount = base_amount * 1.5   # 1.5倍
-                            else:
-                                suggested_amount = base_amount
-                            create_signal({
-                                "run_id": 0,  # 0 表示预警联动生成，非每日建议运行
-                                "user_id": "default",
-                                "signal_date": today,
-                                "signal_type": "dca_add",
-                                "action_type": "dca",
-                                "target_type": "fund",
-                                "target_code": code,
-                                "target_name": name,
-                                "severity": "actionable",  # danger 级预警直接 actionable
-                                "score": 75,               # 基础分 75（高分组）
-                                "confidence": "high",
-                                "score_detail": {
-                                    "来源": "buy_drop_alert danger 联动",
-                                    "补仓后跌幅": round(drop_pct, 2),
-                                    "历史胜率": "100%",
-                                    "平均反弹": "3-7%",
-                                },
-                                "suggested_amount": suggested_amount,
-                                "suggested_ratio": None,
-                                "summary": f"{name} 补仓后跌 {drop_pct:.1f}%，短期超跌反弹概率高，建议加仓 ¥{suggested_amount:.0f}",
-                                "rationale": f"历史回测：buy_drop_alert danger 级预警后续 100% 反弹，平均涨幅 3-7%。最近买入价 {last_buy_price:.4f}，当前 {current_price:.4f}。",
-                                "evidence": {
-                                    "alert_type": "buy_drop_alert",
-                                    "drop_pct": round(drop_pct, 2),
-                                    "last_buy_price": last_buy_price,
-                                    "current_price": current_price,
-                                    "last_buy_date": last_buy_date,
-                                },
-                                "risks": {"notes": ["短期超跌反弹信号，非长期投资判断"]},
-                                "dedupe_key": f"alert_link:{today}:buy_drop_danger:{code}",
-                            })
-                            logger.info(f"buy_drop_alert danger 联动生成 dca_add 信号: {code}")
-                        except Exception as e:
-                            logger.warning(f"buy_drop_alert 联动 dca_add 失败: {e}")
-    except Exception as e:
-        logger.warning(f"[alert_scan] 补仓后跌幅预警异常: {e}")
-
-    # ── P0-2.3：预警→候选自动转化 — danger/warning 预警自动入 recommendation_candidates ──
-    # 纯数据库操作，0 LLM；dedupe_key 防止同日重复转化
-    try:
-        from db.decisions import create_recommendation_candidate
-        from db._conn import _get_conn
-        conn = _get_conn()
-        today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
-        new_alerts = conn.execute(
-            """SELECT id, alert_type, severity, title, content, related_fund_code, related_fund_name
-               FROM portfolio_alerts
-               WHERE severity IN ('warning', 'danger')
-                 AND created_at >= ?
-                 AND source = 'system_scan'
-               ORDER BY created_at DESC""",
-            (today_start,),
-        ).fetchall()
-        conn.close()
-
-        # alert_type → action_type 映射
-        _ALERT_ACTION_MAP = {
-            "drawdown_alert": "reduce",          # 回撤→减仓
-            "buy_drop_alert": "watch",           # 补仓后跌幅→观察
-            "concentration_alert": "rebalance",  # 集中度→调仓
-            "valuation_alert": "reduce",         # 高估→减仓
-            "valuation_opportunity": "add",      # 低估→加仓
-            "cash_idle": "cash_reserve",         # 现金闲置→备用金
-            "stale_data": "watch",               # 数据过期→观察
-        }
-        converted = 0
-        for a in new_alerts:
-            a = dict(a)
-            fund_code = a.get("related_fund_code") or ""
-            action_type = _ALERT_ACTION_MAP.get(a["alert_type"], "watch")
-            dedupe_key = f"alert:{a['alert_type']}:{fund_code}:{today_prefix}"
-            try:
-                create_recommendation_candidate(
-                    source_type="alert",
-                    source_id=a["id"],
-                    action_type=action_type,
-                    target_type="fund",
-                    target_code=fund_code,
-                    target_name=a.get("related_fund_name") or "",
-                    summary=a["title"],
-                    rationale=a.get("content", "")[:500],
-                    confidence="high" if a["severity"] == "danger" else "medium",
-                    evidence={"alert_type": a["alert_type"], "severity": a["severity"], "alert_id": a["id"]},
-                    dedupe_key=dedupe_key,
-                    priority=5 if a["severity"] == "danger" else 3,
-                )
-                converted += 1
-            except Exception as ce:
-                logger.debug(f"[alert_to_candidate] 转化失败 alert_id={a['id']}: {ce}")
-        if converted:
-            logger.info(f"[alert_to_candidate] 转化 {converted} 条预警为决策候选")
-    except Exception as e:
-        logger.warning(f"[alert_to_candidate] 预警转候选批量异常: {e}")
-
-    return {"ok": True, "generated": generated}
+    """完整覆盖证明驱动恢复；历史失败或数据缺失均保留活动风险。"""
+    from services.advisor.alert_scanner import scan_detailed_risks
+    return await asyncio.to_thread(scan_detailed_risks, holdings=list_holdings(),
+                                   nav_history_loader=get_fund_nav_history,
+                                   valuation_loader=get_latest_valuation,cash_loader=get_cash_balance)
 
 
 # ── P2-4.3: 预警准确性回测 API ──────────────────────────────
@@ -855,6 +528,31 @@ async def get_audit_log(fund_code: str = None, tx_id: int = None, limit: int = 5
     return {"logs": [dict(r) for r in rows]}
 
 
+@router.get("/api/portfolio/cash-ledger")
+async def cash_ledger_api(account: str = None, limit: int = 200):
+    """现金变动、冻结和应收流水；读取不结息。"""
+    return {'ledger': list_cash_ledger(account=account,limit=max(1,min(limit,1000)))}
+
+
+@router.get("/api/portfolio/performance")
+async def portfolio_performance_api(account: str = None):
+    """已确认真实成交收益与历史覆盖，不读取或创建假设成交。"""
+    return get_portfolio_performance(account=account)
+
+
+@router.get("/api/portfolio/transactions/{tx_id}/nav-preview")
+async def transaction_nav_preview_api(tx_id: int):
+    """行情预览与成交确认严格分离。"""
+    from db.portfolio import get_transaction
+    from infra.blocking import run_blocking
+    if not get_transaction(tx_id):
+        raise HTTPException(404,'交易记录不存在')
+    try:
+        return await run_blocking(preview_transaction_nav,tx_id)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
 @router.get("/api/portfolio/{holding_id}")
 async def get_holding_api(holding_id: int):
     """获取单个持仓详情。"""
@@ -879,7 +577,11 @@ async def update_holding_api(holding_id: int, req: UpdateHoldingRequest):
 @router.delete("/api/portfolio/{holding_id}")
 async def delete_holding_api(holding_id: int):
     """删除持仓。"""
-    if not delete_holding(holding_id):
+    try:
+        deleted = delete_holding(holding_id)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "持仓不存在")
     return {"ok": True}
 
@@ -896,7 +598,9 @@ async def list_transactions_api(holding_id: int, limit: int = 100,
 
 @router.post("/api/portfolio/transactions")
 async def create_transaction_api(req: CreateTransactionRequest):
-    """新增交易记录。"""
+    """新增实际操作必须明确资金来源；历史导入使用独立对账路径。"""
+    if req.transaction_type == 'buy' and not req.funding_source:
+        raise HTTPException(400,'请明确买入资金来源：账户内现金或外部新增资金')
     # 自动计算 T+1 确认日
     expected_confirm = None
     if req.status == "pending" and req.transaction_date:
@@ -907,18 +611,23 @@ async def create_transaction_api(req: CreateTransactionRequest):
         except (ValueError, TypeError):
             pass
 
-    tx_id = create_transaction(
-        fund_code=req.fund_code, transaction_type=req.transaction_type,
-        amount=req.amount, transaction_date=req.transaction_date,
-        shares=req.shares, price=req.price,
-        holding_id=req.holding_id, notes=req.notes,
-        status=req.status, submitted_shares=req.submitted_shares,
-        submitted_amount=req.submitted_amount,
-        transaction_time=req.transaction_time,
-        expected_confirm_date=expected_confirm,
-        fund_name=req.fund_name,
-        account=req.account,
-    )
+    try:
+        tx_id = create_transaction(
+            fund_code=req.fund_code, transaction_type=req.transaction_type,
+            amount=req.amount, transaction_date=req.transaction_date,
+            shares=req.shares, price=req.price,
+            holding_id=req.holding_id, notes=req.notes,
+            status=req.status, submitted_shares=req.submitted_shares,
+            submitted_amount=req.submitted_amount,
+            transaction_time=req.transaction_time,
+            expected_confirm_date=expected_confirm,
+            fund_name=req.fund_name,
+            account=req.account,
+            funding_source=req.funding_source or 'internal',
+            cash_account=req.cash_account,
+        )
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
 
     # 买入交易自动标记关注列表为「已上车」
     if req.transaction_type in ("buy", "buyin", "subscribe"):
@@ -985,13 +694,16 @@ async def confirm_transaction_api(tx_id: int, req: ConfirmTransactionRequest):
             holding = get_holding(tx["holding_id"]) if tx.get("holding_id") else None
             fee, fee_basis = calc_fee_for_tx(tx, req.confirmed_price, holding)
 
-    ok = confirm_transaction(tx_id, req.confirmed_price,
-                             confirmed_shares=req.confirmed_shares,
-                             confirmed_amount=req.confirmed_amount,
-                             target_fund_code=req.target_fund_code,
-                             target_fund_name=req.target_fund_name,
-                             fee=fee, target_price=req.target_price,
-                             target_shares=req.target_shares)
+    try:
+        ok = confirm_transaction(tx_id, req.confirmed_price,
+                                 confirmed_shares=req.confirmed_shares,
+                                 confirmed_amount=req.confirmed_amount,
+                                 target_fund_code=req.target_fund_code,
+                                 target_fund_name=req.target_fund_name,
+                                 fee=fee, target_price=req.target_price,
+                                 target_shares=req.target_shares)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
     if not ok:
         raise HTTPException(409, "确认失败：请检查交易状态、可用份额及转换目标净值")
     return {"ok": True, "fee": fee, "fee_basis": fee_basis}
@@ -1204,71 +916,22 @@ async def profit_trend_api(days: int = 30):
 
 @router.post("/api/portfolio/quick-entry")
 async def quick_entry_api(data: QuickEntryRequest):
-    """快速录入：只输基金代码+金额，自动查基金名称和当前净值。"""
-    fund_code = data.fund_code.strip()
-    amount = data.amount
-    tx_type = data.transaction_type
-    from datetime import datetime as _dt
-    tx_date = data.transaction_date or _dt.now().strftime("%Y-%m-%d")
-    account = data.account
-    notes = data.notes
-
-    if not fund_code:
-        raise HTTPException(400, "基金代码不能为空")
-    if amount <= 0:
-        raise HTTPException(400, "金额必须大于 0")
-
-    # 自动查基金名称
-    fund_name = fund_code
-    try:
-        import akshare as ak
-        info = ak.fund_individual_basic_info_xq(symbol=fund_code)
-        if info is not None and not info.empty:
-            name_row = info[info["item"] == "基金简称"]
-            if not name_row.empty:
-                fund_name = str(name_row.iloc[0]["value"])
-    except Exception:
-        pass
-
-    # 自动查当前净值
-    current_price = None
-    try:
-        import akshare as ak
-        nav = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值")
-        if nav is not None and not nav.empty:
-            current_price = float(nav.iloc[-1]["单位净值"])
-    except Exception:
-        pass
-
-    # 计算份额（如果有净值）
-    shares = None
-    price = current_price
-    if price and price > 0:
-        shares = round(amount / price, 2)
-
-    # 创建交易记录
-    from db.portfolio import create_transaction
-    tx_id = create_transaction(
-        fund_code=fund_code,
-        transaction_type=tx_type,
-        amount=amount,
-        transaction_date=tx_date,
-        shares=shares,
-        price=price,
-        fund_name=fund_name,
-        account=account,
-        notes=notes or "快速录入",
-    )
-
-    return {
-        "ok": True,
-        "transaction_id": tx_id,
-        "fund_code": fund_code,
-        "fund_name": fund_name,
-        "current_price": current_price,
-        "shares": shares,
-        "amount": amount,
-    }
+    """快速提交待确认交易；必须明确资金来源，不用当前行情捏造历史成交。"""
+    if data.transaction_type == 'buy' and not data.funding_source:
+        raise HTTPException(400,'快速买入必须明确账户内现金或外部新增资金')
+    from datetime import date
+    holding = get_holding_by_fund(data.fund_code,account=data.account)
+    if data.transaction_type in ('sell','convert') and (not holding or not data.shares):
+        raise HTTPException(400,'快速卖出或转换需要已有持仓及明确提交份额')
+    result = await create_transaction_api(CreateTransactionRequest(
+        fund_code=data.fund_code, fund_name=data.fund_name or (holding or {}).get('fund_name') or data.fund_code,
+        transaction_type=data.transaction_type, amount=0 if data.transaction_type=='buy' else data.amount,
+        transaction_date=data.transaction_date or date.today().isoformat(),status='pending',
+        holding_id=(holding or {}).get('id'),submitted_amount=data.amount if data.transaction_type=='buy' else None,
+        submitted_shares=data.shares,account=data.account,notes=data.notes or '快速录入待确认',
+        funding_source=data.funding_source,cash_account=data.cash_account))
+    return {**result,'fund_code':data.fund_code,'status':'pending','preview_only':False,
+            'message':'已提交待确认，需核对实际成交净值后确认'}
 
 
 @router.post("/api/portfolio/ai-suggestion-to-decision")

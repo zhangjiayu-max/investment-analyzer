@@ -23,10 +23,13 @@
 - alerts.valuation_failure_scan_enabled (默认 true)：估值查询失败预警开关
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from contextvars import ContextVar
+import math
 
 from db.config import get_config_bool, get_config_int
-from db.portfolio import create_alert, list_holdings
+from db.portfolio import list_holdings
+from db.alert_lifecycle import create_alert
 from db.dashboard import (
     list_pending_verification_recommendations,
     auto_verify_pending_recommendations,
@@ -34,6 +37,97 @@ from db.dashboard import (
 from db.valuations import get_latest_valuation, get_best_valuation
 
 logger = logging.getLogger(__name__)
+
+
+# 每次扫描使用独立计数，避免并发手动巡检与后台扫描混淆。
+_SCAN_COUNTS = ContextVar('alert_scan_counts', default=None)
+
+
+def _emit_alert(**kwargs):
+    tracker = _SCAN_COUNTS.get()
+    existed = False
+    if tracker is not None:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            existed = conn.execute("SELECT id FROM portfolio_alerts WHERE user_id=? AND alert_type=? AND COALESCE(related_fund_code,'')=? LIMIT 1",
+                (kwargs.get('user_id','default'),kwargs['alert_type'],kwargs.get('related_fund_code') or '')).fetchone() is not None
+        finally:
+            conn.close()
+    result = create_alert(**kwargs)
+    if tracker is not None:
+        tracker['updated' if existed else 'generated'] += 1
+    return result
+
+
+def _number(value):
+    try:
+        result = float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError,ValueError):
+        return None
+
+
+def _price_fact_is_current(value, as_of=None):
+    """净值所属日允许上一交易日；周末不要求自然日当天净值。读取已缓存交易日历，未缓存时以周末回退。"""
+    try:
+        fact = date.fromisoformat(str(value)[:10]); today = as_of or date.today()
+    except (TypeError,ValueError):
+        return False
+    if fact > today:
+        return False
+    from mcp import trading_calendar
+    cached_days = trading_calendar._trade_days
+    def is_trading_day(day):
+        return day in cached_days if cached_days else day.weekday() < 5
+    latest = today - timedelta(days=1)
+    # 交易日收盘前通常仍以昨日确认净值为最新事实；节假日由本地日历处理。
+    while not is_trading_day(latest):
+        latest -= timedelta(days=1)
+    return fact >= latest
+
+
+def _valuation_current(val):
+    if not val or val.get('is_expired') or val.get('is_stale') or val.get('stale'):
+        return False
+    stamp = val.get('snapshot_date') or val.get('valuation_date') or val.get('date')
+    return _price_fact_is_current(stamp)
+
+
+def _coverage(kinds, expected):
+    return {kind:{'expected':expected,'checked':0,'status':'complete','errors':[]} for kind in kinds}
+
+
+def _gap(coverage, kind, reason):
+    coverage[kind]['status']='incomplete'
+    coverage[kind]['errors'].append(str(reason))
+
+
+def _finish_risk_scan(coverage, observed, alerts_created, source='alert_scanner'):
+    from db.alert_lifecycle import resolve_completed_scan
+    complete = [kind for kind, data in coverage.items()
+                if data['status']=='complete' and data['checked']==data['expected']]
+    for kind,data in coverage.items():
+        if data['checked']<data['expected']:
+            data['status']='incomplete'
+    resolved = resolve_completed_scan(complete, observed, source=source, success=True,
+                                     evidence={'coverage':coverage,'observed_at':datetime.now().isoformat()})
+    failed = sum(len(data['errors']) for data in coverage.values())
+    return {'alerts_created':alerts_created,'generated':alerts_created,'updated':0,'resolved':resolved,
+            'failed':failed,'skipped':sum(data['expected']-data['checked'] for data in coverage.values()),
+            'coverage':coverage,'status':'incomplete' if failed or len(complete)<len(coverage) else 'complete'}
+
+
+def _drawdown_facts(payload):
+    records = payload.get('nav_history') if isinstance(payload,dict) else payload
+    if not isinstance(records,list):
+        return None
+    valid = sorted((r for r in records if _number(r.get('nav')) is not None and _number(r.get('nav'))>0 and r.get('date')),
+                   key=lambda r:r['date'])
+    if len(valid)<10:
+        return None
+    recent=valid[-30:]; peak=max(float(r['nav']) for r in recent); current=float(recent[-1]['nav'])
+    return {'drawdown_pct':(peak-current)/peak*100,'peak':peak,'current':current,'fact_date':recent[-1]['date'],'samples':len(valid)}
 
 
 def _is_enabled(switch: str, default: bool = True) -> bool:
@@ -109,7 +203,7 @@ def scan_and_verify_recommendations() -> dict:
                 title = f"建议验证：{name} 波动较小"
                 content = f"你 {today} 前的建议已验证，{name} 涨跌幅 {change}%，波动较小未达验证阈值"
                 severity = "info"
-            create_alert(
+            _emit_alert(
                 alert_type="recommendation_verified",
                 title=title,
                 content=content,
@@ -183,255 +277,97 @@ def _fetch_current_price(index_code: str):
 
 
 def scan_valuation_thresholds() -> dict:
-    """扫描持仓相关指数的估值分位，触达阈值时生成 alert。
-
-    Returns:
-        {"alerts_created": int}
-    """
-    if not _is_enabled("alerts.proactive_scan_enabled", True):
-        return {"alerts_created": 0, "skipped": "disabled"}
-
-    # 阈值优化：低估从 20% 收紧到 15%，高估从 80% 收紧到 85%
-    # 避免边缘值频繁触发（原 20% 时分位在 18-20% 间波动会反复触发）
-    low_threshold = _get_int("alerts.valuation_low_threshold", 15)
-    high_threshold = _get_int("alerts.valuation_high_threshold", 85)
-
-    # 从持仓中收集关注的指数代码（去重）
-    holdings = list_holdings()
-    index_codes = {}
-    for h in holdings:
-        code = h.get("index_code")
-        if code and code not in index_codes:
-            index_codes[code] = h.get("index_name") or code
-
-    if not index_codes:
-        return {"alerts_created": 0}
-
-    alerts_created = 0
-    today = datetime.now().strftime("%Y-%m-%d")
-    for code, name in index_codes.items():
+    """当前估值事实；过期/未知仅记覆盖缺口，不转成买入信号。"""
+    if not _is_enabled('alerts.proactive_scan_enabled',True):
+        return {'alerts_created':0,'skipped':'disabled'}
+    low=_get_int('alerts.valuation_low_threshold',15); high=_get_int('alerts.valuation_high_threshold',85)
+    indexes={h['index_code']:h.get('index_name') or h['index_code'] for h in list_holdings() if h.get('index_code')}
+    kinds=('valuation_low','valuation_high'); coverage=_coverage(kinds,len(indexes)); observed=[]; created=0
+    for code,name in indexes.items():
         try:
-            # 修复 P1-2：此前硬编码 enable_online=False 导致本地缺失时无法在线兜底，
-            # 9 个指数全部返回 None。改为启用在线兜底（受全局 valuation.online_fallback_enabled 开关控制）
-            #
-            # 2026-07-20 改造：之前硬编码 metric_type="市盈率"（get_best_valuation 默认值），
-            # 但持仓中 6 个指数本地只有"市净率/市销率/股息率" → 必然本地查不到 → 走在线兜底 →
-            # akshare 不支持国证 H 系/Wind 88xxxx → 最终 failed → 触发 scan_valuation_failures 预警。
-            # 现改为：先查本地该指数有哪些 metric_type，优先用本地已有的；同时传 allow_metric_fallback=True
-            # 让 get_best_valuation 在指定 metric_type 查不到时自动 fallback 到本地其他指标。
-            preferred_metric = _get_preferred_metric_type(code)
-            val = get_best_valuation(
-                code,
-                metric_type=preferred_metric,
-                query_source="alert_scanner",
-                enable_online=True,
-                allow_metric_fallback=True,
-            )
-            if not val:
-                continue
-            percentile = val.get("percentile")
-            if percentile is None:
-                continue
-            # 转浮点（容错字符串）
-            try:
-                pct = float(percentile)
-            except (TypeError, ValueError):
-                continue
-
-            if pct < low_threshold:
-                # 2026-07-13：低估触发追加趋势验证，避免"低估但仍在跌"陷阱
-                trend_hint = ""
-                trend_severity = "info"
-                try:
-                    # 查该指数关联的基金，用基金净值趋势近似
-                    related_fund = _find_related_fund_for_index(code, holdings)
-                    if related_fund:
-                        from services.daily_position_advisor import _calc_trend_score
-                        ts, tr = _calc_trend_score(related_fund.get("fund_code", ""), 5)
-                        # O-1 修复（2026-07-21）：_calc_trend_score 返回的 tr 已含「近5日」前缀，
-                        # 此处无需重复拼接，否则会生成「近5日近5日」重复 title
-                        if ts >= 7:
-                            trend_hint = f"（{tr}，上车信号强）"
-                            trend_severity = "info"
-                        elif ts <= 3:
-                            trend_hint = f"（{tr}，建议等待企稳）"
-                            trend_severity = "info"
-                        else:
-                            trend_hint = f"（{tr}，可分批建仓）"
-                except Exception as e:
-                    logger.debug(f"[alert_scanner] 趋势验证 {code} 失败: {e}")
-
-                title = f"{name} 估值进入低估区（分位 {pct:.1f}%）{trend_hint}"
-                content = (
-                    f"{name}（{code}）当前估值分位 {pct:.1f}%，"
-                    f"低于 {low_threshold}% 阈值，可关注加仓机会。{trend_hint}"
-                )
-                create_alert(
-                    alert_type="valuation_low",
-                    title=title,
-                    content=content,
-                    severity=trend_severity,
-                    related_fund_code=code,
-                    related_fund_name=name,
-                    source="alert_scanner",
-                )
-                _auto_candidate(code, name, "valuation_low", title, content,
-                                trend_severity, {"percentile": pct, "metric_type": val.get("metric_type")})
-                alerts_created += 1
-            elif pct > high_threshold:
-                title = f"{name} 估值进入高估区（分位 {pct:.1f}%）"
-                content = (
-                    f"{name}（{code}）当前估值分位 {pct:.1f}%，"
-                    f"高于 {high_threshold}% 阈值，注意减仓风险。"
-                )
-                create_alert(
-                    alert_type="valuation_high",
-                    title=title,
-                    content=content,
-                    severity="warning",
-                    related_fund_code=code,
-                    related_fund_name=name,
-                    source="alert_scanner",
-                )
-                _auto_candidate(code, name, "valuation_high", title, content,
-                                "warning", {"percentile": pct, "metric_type": val.get("metric_type")})
-                alerts_created += 1
-        except Exception as e:
-            logger.debug(f"[alert_scanner] 估值扫描 {code} 失败: {e}")
-
-    logger.info(f"[alert_scanner] 估值阈值扫描生成 {alerts_created} 个 alert")
-    return {"alerts_created": alerts_created, "scanned_indexes": len(index_codes)}
+            val=get_best_valuation(code,metric_type=_get_preferred_metric_type(code),query_source='alert_scanner',
+                                   enable_online=True,allow_metric_fallback=True)
+            if not _valuation_current(val) or _number(val.get('percentile')) is None:
+                raise ValueError(f'{code}估值过期、日期未知或缺少分位')
+            pct=float(val['percentile'])
+            for kind in kinds: coverage[kind]['checked']+=1
+            kind='valuation_low' if pct<low else 'valuation_high' if pct>high else None
+            if not kind: continue
+            title=f'{name} 估值分位 {pct:.1f}%（'+('低估参考' if kind=='valuation_low' else '高估风险')+'）'
+            content=f"{name}（{code}）估值事实日期 {val.get('snapshot_date')}，分位 {pct:.1f}%。低估不等于买点；先核对现金、集中度与数据完整性。"
+            _emit_alert(alert_type=kind,title=title,content=content,severity='info' if kind=='valuation_low' else 'warning',
+                        related_fund_code=code,related_fund_name=name,source='alert_scanner',fact_date=val.get('snapshot_date'),
+                        recovery_condition=f'估值分位回到 {low}%–{high}% 内',evidence={'percentile':pct,'risk_value':100-pct if kind=='valuation_low' else pct})
+            observed.append((kind,code)); created+=1
+            # 指数代码只作为事实；没有明确基金和金额时保留观察候选。
+            _auto_candidate(code,name,kind,title,content,'info' if kind=='valuation_low' else 'warning',{'percentile':pct,'valuation':val})
+        except Exception as exc:
+            for kind in kinds: _gap(coverage,kind,f'{code}: {exc}')
+    return _finish_risk_scan(coverage,observed,created)
 
 
 # ── P0-B 持仓风险扫描 ────────────────────────────────────
 
 
 def scan_portfolio_risk() -> dict:
-    """扫描持仓集中度和亏损，生成风险 alert。
-
-    增强版：content 不仅包含占比/亏损数据，还包含基金底层持仓的关键风险信息
-    （重仓股、可转债占比、资产配置），让预警更有说服力。
-
-    Returns:
-        {"alerts_created": int}
-    """
-    if not _is_enabled("alerts.proactive_scan_enabled", True):
-        return {"alerts_created": 0, "skipped": "disabled"}
-
-    concentration_threshold = _get_int("alerts.concentration_threshold", 30)
-    loss_threshold = _get_int("alerts.loss_threshold", 15)
-    # P0-2 新增：当日跌幅阈值（独立于累计亏损），开关 alerts.daily_drop_scan_enabled 默认开启
-    daily_drop_enabled = _is_enabled("alerts.daily_drop_scan_enabled", True)
-    # 阈值优化：当日跌幅从 3% 提升到 4%，避免小幅波动频繁触发
-    daily_drop_threshold = _get_int("alerts.daily_drop_threshold", 4)  # 当日跌幅 ≥4% 触发
-
-    holdings = list_holdings()
-    if not holdings:
-        return {"alerts_created": 0}
-
-    # 计算总市值
-    total_value = 0.0
+    """按家庭基金代码汇总集中度，各风险独立检测，缺价不算零或亏损。"""
+    if not _is_enabled('alerts.proactive_scan_enabled',True):
+        return {'alerts_created':0,'skipped':'disabled'}
+    concentration=_get_int('alerts.concentration_threshold',30); loss=_get_int('alerts.loss_threshold',15)
+    daily=_get_int('alerts.daily_drop_threshold',4); daily_enabled=_is_enabled('alerts.daily_drop_scan_enabled',True)
+    holdings=[h for h in list_holdings() if (_number(h.get('shares')) or 0)>0]
+    grouped={}
     for h in holdings:
-        try:
-            shares = float(h.get("shares") or 0)
-            if shares <= 0:
-                continue
-            current_price = float(h.get("current_price") or 0)
-            total_value += shares * current_price
-        except (TypeError, ValueError):
+        grouped.setdefault(h.get('fund_code') or '',[]).append(h)
+    kinds=['concentration_high','loss_warning']+(['daily_drop'] if daily_enabled else [])
+    coverage=_coverage(kinds,len(grouped)); observed=[]; created=0
+    complete_prices=all((_number(h.get('current_price')) or 0)>0 and _price_fact_is_current(h.get('price_updated_at')) for h in holdings)
+    total=sum(float(h['shares'])*(_number(h.get('current_price')) or 0) for h in holdings)
+    for code,rows in grouped.items():
+        name=rows[0].get('fund_name') or code
+        valid=all((_number(h.get('current_price')) or 0)>0 and _price_fact_is_current(h.get('price_updated_at')) for h in rows)
+        if not valid:
+            for kind in kinds: _gap(coverage,kind,f'{code}: 净值缺失或过期')
             continue
-
-    alerts_created = 0
-    if total_value <= 0:
-        return {"alerts_created": 0}
-
-    for h in holdings:
-        try:
-            shares = float(h.get("shares") or 0)
-            if shares <= 0:
-                continue
-            current_price = float(h.get("current_price") or 0)
-            cost_price = float(h.get("cost_price") or 0)
-            current_value = shares * current_price
-            fund_code = h.get("fund_code") or ""
-            fund_name = h.get("fund_name") or ""
-
-            weight = current_value / total_value * 100
-            alert_triggered = False
-
-            # 集中度检测
-            if weight > concentration_threshold:
-                alert_triggered = True
-                title = f"{fund_name} 占比 {weight:.1f}%，集中度过高"
-                content = _build_risk_content(fund_code, fund_name, weight, concentration_threshold, None)
-                create_alert(
-                    alert_type="concentration_high",
-                    title=title,
-                    content=content,
-                    severity="warning",
-                    related_fund_code=fund_code,
-                    related_fund_name=fund_name,
-                    source="alert_scanner",
-                )
-                _auto_candidate(fund_code, fund_name, "concentration_high", title, content,
-                                "warning", {"weight": weight, "threshold": concentration_threshold})
-                alerts_created += 1
-
-            # 亏损检测（累计亏损）
-            if cost_price > 0 and not alert_triggered:
-                profit_rate = (current_price - cost_price) / cost_price * 100
-                if profit_rate < -loss_threshold:
-                    alert_triggered = True
-                    title = f"{fund_name} 当前亏损 {abs(profit_rate):.1f}%"
-                    content = _build_risk_content(fund_code, fund_name, weight, None, profit_rate)
-                    create_alert(
-                        alert_type="loss_warning",
-                        title=title,
-                        content=content,
-                        severity="warning",
-                        related_fund_code=fund_code,
-                        related_fund_name=fund_name,
-                        source="alert_scanner",
-                    )
-                    _auto_candidate(fund_code, fund_name, "loss_warning", title, content,
-                                    "warning", {"profit_rate": profit_rate, "threshold": loss_threshold})
-                    alerts_created += 1
-
-            # P0-2 新增：当日跌幅检测（区别于累计亏损，捕捉"今天突然大跌"）
-            # 数据源：holding 的 change_pct 字段（基金当日涨跌幅，由 refresh_all_fund_prices 更新）
-            if daily_drop_enabled and not alert_triggered:
-                try:
-                    change_pct = float(h.get("change_pct") or 0)
-                except (TypeError, ValueError):
-                    change_pct = 0.0
-                # 数据时效性检查：nav_updated_at 必须是今天，避免用昨日数据误报
-                nav_updated = h.get("nav_updated_at") or ""
-                is_today = nav_updated.startswith(datetime.now().strftime("%Y-%m-%d"))
-                if is_today and change_pct <= -daily_drop_threshold:
-                    title = f"{fund_name} 当日跌幅 {abs(change_pct):.2f}%"
-                    content = (
-                        f"{fund_name}（{fund_code}）今日下跌 {abs(change_pct):.2f}%，"
-                        f"超过 {daily_drop_threshold}% 当日跌幅阈值。"
-                        f"当前持仓市值 {current_value:.0f} 元，占组合 {weight:.1f}%。"
-                    )
-                    create_alert(
-                        alert_type="daily_drop",
-                        title=title,
-                        content=content,
-                        severity="danger" if change_pct <= -5 else "warning",
-                        related_fund_code=fund_code,
-                        related_fund_name=fund_name,
-                        source="alert_scanner",
-                    )
-                    _auto_candidate(fund_code, fund_name, "daily_drop", title, content,
-                                    "danger" if change_pct <= -5 else "warning",
-                                    source_snapshot={"change_pct": change_pct, "threshold": daily_drop_threshold})
-                    alerts_created += 1
-        except Exception as e:
-            logger.debug(f"[alert_scanner] 持仓扫描失败 {h.get('fund_code')}: {e}")
-
-    logger.info(f"[alert_scanner] 持仓风险扫描生成 {alerts_created} 个 alert")
-    return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
+        value=sum(float(h['shares'])*float(h['current_price']) for h in rows)
+        fact_date=min(str(h['price_updated_at'])[:10] for h in rows)
+        def emit(kind,title,content,severity,risk_value,recovery):
+            nonlocal created
+            _emit_alert(alert_type=kind,title=title,content=content,severity=severity,related_fund_code=code,
+                        related_fund_name=name,source='alert_scanner',fact_date=fact_date,
+                        recovery_condition=recovery,evidence={'risk_value':risk_value,'fact_date':fact_date,'current_value':value})
+            observed.append((kind,code)); created+=1
+            _auto_candidate(code,name,kind,title,content,severity,{'risk_value':risk_value,'fact_date':fact_date})
+        if complete_prices and total>0:
+            weight=value/total*100; coverage['concentration_high']['checked']+=1
+            if weight>concentration:
+                emit('concentration_high',f'{name} 家庭合计占比 {weight:.1f}%，集中度过高',
+                     f'同代码跨账户合计市值 {value:.0f} 元，占投资持仓市值 {weight:.1f}%。',
+                     'danger' if weight>=concentration*1.5 else 'warning',weight,f'家庭同代码占投资持仓市值 ≤ {concentration}%')
+        else:
+            _gap(coverage,'concentration_high','组合净值覆盖不足，集中度分母未知')
+        costs=[_number(h.get('cost_price')) for h in rows]
+        if all(c is not None and c>0 for c in costs):
+            cost=sum(float(h['shares'])*c for h,c in zip(rows,costs)); rate=(value-cost)/cost*100
+            coverage['loss_warning']['checked']+=1
+            if rate<=-loss:
+                weight=value/total*100 if total>0 else 0
+                emit('loss_warning',f'{name} 当前浮亏 {abs(rate):.1f}%',_build_risk_content(code,name,weight,None,rate),
+                     'danger' if rate<=-loss*2 else 'warning',abs(rate),f'浮亏小于 {loss}% 且价格有效')
+        else: _gap(coverage,'loss_warning',f'{code}: 成本缺失')
+        if daily_enabled:
+            changes=[_number(h.get('today_change_pct')) for h in rows]
+            if all(v is not None for v in changes):
+                # 跨账户同代码只有相同所属日的净值涨跌才可形成统一事实。
+                if len({str(h['price_updated_at'])[:10] for h in rows})>1:
+                    _gap(coverage,'daily_drop',f'{code}: 跨账户行情日期不一致'); continue
+                change=min(changes); coverage['daily_drop']['checked']+=1
+                if change<=-daily:
+                    emit('daily_drop',f'{name} 净值所属日下跌 {abs(change):.2f}%',
+                         f'净值事实日期 {fact_date}，下跌 {abs(change):.2f}%，阈值 {daily}%。跌幅本身不是补仓依据。',
+                         'danger' if change<=-5 else 'warning',abs(change),f'最新有效净值单日跌幅小于 {daily}%')
+            else: _gap(coverage,'daily_drop',f'{code}: 当日涨跌幅缺失')
+    return _finish_risk_scan(coverage,observed,created)
 
 
 # ── 亏损+低估联合预警（2026-07-30 conv#194 补强）──────────────────────────
@@ -444,171 +380,42 @@ def scan_portfolio_risk() -> dict:
 
 
 def scan_loss_plus_undervalued() -> dict:
-    """扫描持仓中"亏损严重 + 对应指数低估"的标的，生成补仓窗口预警。
-
-    触发条件（同时满足）：
-    1. 持仓盈亏率 ≤ loss_threshold（默认 -15%）
-    2. 该基金对应指数估值分位 < valuation_threshold（默认 30%）
-
-    输出 alert_type = "loss_plus_undervalued"，severity = "info"（补仓机会，非风险）。
-    债券基金无指数估值，保守不触发（与 smart_add_planner 一致）。
-
-    Returns:
-        {"alerts_created": int, "holdings_scanned": int}
-    """
-    if not _is_enabled("alerts.loss_plus_undervalued_enabled", True):
-        return {"alerts_created": 0, "skipped": "disabled"}
-
+    """严重亏损与低估并列展示；不承诺回本，不把风险事实变成买点。"""
+    if not _is_enabled('alerts.loss_plus_undervalued_enabled',True):
+        return {'alerts_created':0,'skipped':'disabled'}
     from db.config import get_config_float
-
-    loss_threshold = get_config_float("alerts.loss_plus_undervalued_loss_threshold", -15.0)
-    valuation_threshold = get_config_float("alerts.loss_plus_undervalued_valuation_threshold", 30.0)
-
-    holdings = list_holdings()
-    if not holdings:
-        return {"alerts_created": 0, "holdings_scanned": 0}
-
-    # 计算总市值（用于持仓占比）
-    total_value = 0.0
+    loss=get_config_float('alerts.loss_plus_undervalued_loss_threshold',-15.0)
+    threshold=get_config_float('alerts.loss_plus_undervalued_valuation_threshold',30.0)
+    holdings=[h for h in list_holdings() if (_number(h.get('shares')) or 0)>0]
+    coverage=_coverage(['loss_plus_undervalued'],len(holdings)); observed=[]; created=0
     for h in holdings:
+        code=h.get('fund_code') or ''; name=h.get('fund_name') or code; kind='loss_plus_undervalued'
         try:
-            shares = float(h.get("shares") or 0)
-            if shares <= 0:
-                continue
-            current_price = float(h.get("current_price") or 0)
-            total_value += shares * current_price
-        except (TypeError, ValueError):
-            continue
-
-    alerts_created = 0
-    suppressed_loss_warning = 0  # 抑制的 loss_warning 计数（避免重复打扰）
-
-    for h in holdings:
-        try:
-            shares = float(h.get("shares") or 0)
-            if shares <= 0:
-                continue
-            current_price = float(h.get("current_price") or 0)
-            cost_price = float(h.get("cost_price") or 0)
-            if cost_price <= 0:
-                continue  # 无成本价无法算盈亏
-
-            fund_code = h.get("fund_code") or ""
-            fund_name = h.get("fund_name") or ""
-            index_code = h.get("index_code") or ""
-            current_value = shares * current_price
-            profit_rate = (current_price - cost_price) / cost_price * 100
-
-            # 条件1：亏损达到阈值
-            if profit_rate > loss_threshold:
-                continue
-
-            # 条件2：债券基金跳过（无指数估值，债券回本逻辑与权益不同）
-            fund_type = h.get("fund_type") or ""
-            if not index_code or "债" in fund_name or "债" in fund_type:
-                continue
-
-            # 条件3：对应指数估值分位 < 阈值
-            # 2026-07-30 修复：原 enable_online=True 在部分指数（如882011.WI）会超时抛异常被 except 吞掉，
-            # 导致所有标的都跳过。改为先查本地（enable_online=False），本地无数据再在线兜底。
-            preferred_metric = _get_preferred_metric_type(index_code)
-            val = get_best_valuation(
-                index_code,
-                metric_type=preferred_metric,
-                query_source="alert_scanner_loss_plus_undervalued",
-                enable_online=False,
-                allow_metric_fallback=True,
-            )
-            if not val:
-                # 本地无数据，尝试在线兜底（受 valuation.online_fallback_enabled 开关控制）
-                try:
-                    val = get_best_valuation(
-                        index_code,
-                        metric_type=preferred_metric,
-                        query_source="alert_scanner_loss_plus_undervalued_online",
-                        enable_online=True,
-                        allow_metric_fallback=True,
-                    )
-                except Exception:
-                    pass
-            if not val:
-                continue
-            percentile_raw = val.get("percentile")
-            if percentile_raw is None:
-                continue
-            try:
-                percentile = float(percentile_raw)
-            except (TypeError, ValueError):
-                continue
-
-            if percentile >= valuation_threshold:
-                continue  # 估值不够低
-
-            # 命中：亏损+低估联合预警
-            index_name = val.get("index_name") or h.get("index_name") or index_code
-            weight = current_value / total_value * 100 if total_value > 0 else 0
-            zscore = val.get("zscore")
-
-            # 估值等级判定
-            if percentile < 10:
-                level = "极度低估"
-            elif percentile < 20:
-                level = "低估"
-            else:
-                level = "偏低估"
-
-            title = (
-                f"{fund_name} 亏损{abs(profit_rate):.1f}%+估值分位{percentile:.1f}%，补仓窗口开启"
-            )
-            content = (
-                f"【补仓窗口预警】{fund_name}（{fund_code}）当前亏损 {abs(profit_rate):.1f}%，"
-                f"对应指数 {index_name}（{index_code}）估值分位 {percentile:.1f}%（{level}）。\n"
-                f"- 当前持仓市值：¥{current_value:,.0f}（占组合 {weight:.1f}%）\n"
-                f"- 平均成本：{cost_price:.4f}，当前价：{current_price:.4f}\n"
-                f"- 估值 z-score：{zscore:.2f}\n"
-                f"\n"
-                f"💡 亏损严重 + 估值低估 = 补仓窗口开启。此时补仓可摊薄平均成本，"
-                f"历史同分位回撤通常能在中期修复。若等待估值回升再补仓，回本难度显著增大。\n"
-                f"建议查看智能补仓计划（信号A 金字塔补仓）获取具体补仓金额和档位。"
-            )
-
-            # 24h 去重检查
-            if _is_alert_recently_created("loss_plus_undervalued", fund_code, hours=24):
-                continue
-
-            create_alert(
-                alert_type="loss_plus_undervalued",
-                title=title,
-                content=content,
-                severity="info",  # 补仓机会，非风险
-                related_fund_code=fund_code,
-                related_fund_name=fund_name,
-                source="alert_scanner",
-            )
-            _auto_candidate(
-                fund_code, fund_name, "loss_plus_undervalued", title, content,
-                "info",
-                {
-                    "profit_rate": profit_rate,
-                    "percentile": percentile,
-                    "index_code": index_code,
-                    "weight": weight,
-                },
-            )
-            alerts_created += 1
-
-            # 抑制同标的 24h 内的 loss_warning（避免重复打扰）
-            # 通过标记实现：在 _is_recent_alert 检查中 loss_warning 也查 loss_plus_undervalued
-            suppressed_loss_warning += 1
-
-        except Exception as e:
-            logger.debug(f"[alert_scanner] 亏损+低估扫描失败 {h.get('fund_code')}: {e}")
-
-    logger.info(
-        f"[alert_scanner] 亏损+低估联合扫描：生成 {alerts_created} 个补仓窗口预警"
-        f"（抑制 {suppressed_loss_warning} 个重复 loss_warning）"
-    )
-    return {"alerts_created": alerts_created, "holdings_scanned": len(holdings)}
+            price=_number(h.get('current_price')); cost=_number(h.get('cost_price'))
+            if not price or not cost or cost<=0 or not _price_fact_is_current(h.get('price_updated_at')):
+                raise ValueError('价格/成本缺失或价格过期')
+            rate=(price-cost)/cost*100; index=h.get('index_code')
+            if rate>loss or not index or '债' in (h.get('fund_type') or '') or '债' in name:
+                coverage[kind]['checked']+=1; continue
+            val=get_best_valuation(index,metric_type=_get_preferred_metric_type(index),query_source='alert_scanner_loss_plus_undervalued',
+                                   enable_online=False,allow_metric_fallback=True)
+            if not _valuation_current(val) or _number(val.get('percentile')) is None:
+                raise ValueError('估值缺失、过期或日期未知，等待补齐数据')
+            pct=float(val['percentile']); coverage[kind]['checked']+=1
+            if pct>=threshold: continue
+            z=_number(val.get('zscore')); ztext=f'{z:.2f}' if z is not None else '未提供（可选证据）'
+            title=f'{name} 浮亏{abs(rate):.1f}%、估值分位{pct:.1f}%：待复核'
+            content=(f"{name}（{code}）当前浮亏 {abs(rate):.1f}%，对应指数 {index} 估值分位 {pct:.1f}%。"
+                     f"净值日期 {h.get('price_updated_at')}；估值日期 {val.get('snapshot_date')}；z-score：{ztext}。"
+                     '低估与亏损可以同时持续，不保证未来回本。先核对集中度、现金和家庭资金用途，再决定观察、减仓或评估新增投资。')
+            _emit_alert(alert_type=kind,title=title,content=content,severity='warning',related_fund_code=code,
+                        related_fund_name=name,source='alert_scanner',fact_date=str(h['price_updated_at'])[:10],
+                        recovery_condition=f'浮亏小于 {abs(loss)}% 或新鲜估值分位回到 {threshold}% 以上',
+                        evidence={'risk_value':abs(rate),'percentile':pct,'valuation_date':val.get('snapshot_date')})
+            observed.append((kind,code)); created+=1
+            _auto_candidate(code,name,kind,title,content,'warning',{'profit_rate':rate,'valuation':val})
+        except Exception as exc: _gap(coverage,kind,f'{code}: {exc}')
+    return _finish_risk_scan(coverage,observed,created)
 
 
 # ── P0-1 大盘指数当日跌幅监控 ──────────────────────────────
@@ -727,7 +534,7 @@ def scan_market_index_drop() -> dict:
             content_lines.append("建议：1) 检查持仓是否触及止损线；2) 评估是否需要减仓；3) 关注资金流向；4) 查阅重大新闻。")
         content = "\n".join(content_lines)
 
-        create_alert(
+        _emit_alert(
             alert_type="market_index_drop",
             title=title,
             content=content,
@@ -807,7 +614,7 @@ def scan_capital_flow_anomaly() -> dict:
             f"近 20 日净额：{recent_20d:.2f} 亿\n"
             f"建议：港股持仓注意减仓风险，A 股关注资金面共振下行风险。"
         )
-        create_alert(
+        _emit_alert(
             alert_type="capital_outflow",
             title=title,
             content=content,
@@ -945,82 +752,33 @@ def _is_alert_recently_created(alert_type: str, related_fund_code: str, hours: i
 
 
 def _auto_candidate(fund_code: str, fund_name: str, alert_type: str, title: str,
-                    content: str, severity: str = "info", source_snapshot: dict = None) -> int | None:
-    """将高优先级预警自动转为决策候选（去重：同 alert_type + fund_code 14天内不重复）。
-
-    开关：alerts.auto_candidate_enabled（默认 false，遵循项目规范）。
-
-    2026-07-30 conv#194 修复：
-    - loss_warning 原本无脑 → add，现增加估值检查：
-      * 估值高估(>60%) → 降级为 watch（高估时加仓会扩大亏损）
-      * 估值低估(<30%) → 已被 scan_loss_plus_undervalued 覆盖，此处不重复
-      * 无估值数据 → 保持 watch（保守）
-    - 新增 loss_plus_undervalued → add（补仓窗口，估值已确认低估）
-    """
-    if not _is_enabled("alerts.auto_candidate_enabled", False):
-        return None
-    action_map = {
-        "valuation_low": "add",
-        "valuation_high": "reduce",
-        "concentration_high": "rebalance",
-        "loss_warning": "add",  # 见下方估值检查，高估时降级
-        "loss_plus_undervalued": "add",  # 2026-07-30 新增：亏损+低估联合，已确认低估
-    }
-    action_type = action_map.get(alert_type, "watch")
-
-    # 2026-07-30 conv#194 修复：loss_warning 的估值前置检查
-    if alert_type == "loss_warning":
+                    content: str, severity: str = 'info', source_snapshot: dict = None) -> int | None:
+    """观察为默认结果；任何有明确请求金额的新增候选必须通过最终组合风控。"""
+    if not _is_enabled('alerts.auto_candidate_enabled',False): return None
+    snapshot=source_snapshot or {}
+    action={'valuation_high':'reduce','concentration_high':'rebalance'}.get(alert_type,'watch')
+    requested=_number(snapshot.get('requested_amount')) or 0
+    if alert_type in ('valuation_low','loss_plus_undervalued') and requested>0:
         try:
-            from db.portfolio import list_holdings as _lh
-            holdings = _lh()
-            holding = next((h for h in holdings if h.get("fund_code") == fund_code), None)
-            index_code = holding.get("index_code") if holding else None
-            if index_code:
-                preferred_metric = _get_preferred_metric_type(index_code)
-                val = get_best_valuation(
-                    index_code,
-                    metric_type=preferred_metric,
-                    query_source="alert_scanner_auto_candidate",
-                    enable_online=False,  # 候选生成不走在线兜底，避免延迟
-                    allow_metric_fallback=True,
-                )
-                if val and val.get("percentile") is not None:
-                    try:
-                        pct = float(val["percentile"])
-                        if pct > 60:
-                            action_type = "watch"  # 高估时降级为观察，不加仓
-                        # pct < 30% 的情况已被 scan_loss_plus_undervalued 覆盖
-                    except (TypeError, ValueError):
-                        pass
-                else:
-                    # 无估值数据 → 保守观察
-                    action_type = "watch"
-            else:
-                # 无 index_code（如债券基金）→ 保守观察
-                action_type = "watch"
-        except Exception as e:
-            logger.debug(f"[alert_scanner] _auto_candidate 估值检查失败 {fund_code}: {e}")
-            # 检查失败时保持原 action_type（add），不阻断原有逻辑
+            from services.portfolio.decision_guardrails import build_decision_snapshot, evaluate_add_decision
+            context=build_decision_snapshot()
+            guard=evaluate_add_decision(fund_code,requested,context=context)
+            snapshot={**snapshot,'decision_guardrails':guard}
+            if guard['status']=='allowed' and guard.get('executable_amount',0)>0:
+                action='add'
+        except Exception as exc:
+            snapshot={**snapshot,'decision_guardrails':{'status':'wait_for_data','reasons':[str(exc)],'executable_amount':0}}
     try:
         from db.decisions import create_candidate_from_structured_recommendation
-        candidate_id = create_candidate_from_structured_recommendation({
-            "source_type": "alert",
-            "scenario_type": alert_type,
-            "action_type": action_type,
-            "target_type": "fund",
-            "target_code": fund_code,
-            "target_name": fund_name,
-            "summary": title[:120],
-            "rationale": content,
-            "confidence": "medium",
-            "dedupe_key": f"alert_{alert_type}_{fund_code}",
-            "priority": 2 if severity == "warning" else 3,
-            "source_snapshot": source_snapshot or {},
+        return create_candidate_from_structured_recommendation({
+            'source_type':'alert','scenario_type':alert_type,'action_type':action,'target_type':'fund',
+            'target_code':fund_code,'target_name':fund_name,'summary':title[:120],'rationale':content,
+            'confidence':'medium','dedupe_key':f'alert_{alert_type}_{fund_code}',
+            'priority':5 if severity=='danger' else 3,'source_snapshot':snapshot,
+            'suggested_amount':snapshot.get('decision_guardrails',{}).get('executable_amount',0) if action=='add' else None,
         })
-        logger.info(f"[alert_scanner] 自动创建决策候选 #{candidate_id}：{title[:60]}")
-        return candidate_id
-    except Exception as e:
-        logger.debug(f"[alert_scanner] 自动创建决策候选失败 {fund_code}: {e}")
+    except Exception as exc:
+        logger.warning('预警候选保存失败 %s: %s',fund_code,exc)
         return None
 
 
@@ -1089,7 +847,7 @@ def scan_watchlist_signals() -> dict:
                     f"{fund_name}（{fund_code}）当前净值 {current_nav:.4f}，"
                     f"已跌破目标价 {float(target_price):.4f}，可关注上车机会。"
                 )
-                create_alert(
+                _emit_alert(
                     alert_type="watchlist_target_price",
                     title=title,
                     content=content,
@@ -1125,7 +883,7 @@ def scan_watchlist_signals() -> dict:
                                     f"当前估值分位 {pct:.1f}%，低于目标分位 "
                                     f"{float(target_percentile):.1f}%，可关注上车机会。"
                                 )
-                                create_alert(
+                                _emit_alert(
                                     alert_type="watchlist_target_percentile",
                                     title=title,
                                     content=content,
@@ -1151,7 +909,7 @@ def scan_watchlist_signals() -> dict:
                         f"单日下跌 {abs(change_pct):.1f}%，超过 -{drop_threshold}% 阈值，"
                         f"可能迎来上车机会，请结合估值和趋势判断。"
                     )
-                    create_alert(
+                    _emit_alert(
                         alert_type="watchlist_big_drop",
                         title=title,
                         content=content,
@@ -1244,7 +1002,7 @@ def scan_watchlist_exit_signals() -> dict:
                     f"买入价 {entry_price:.4f}，已涨 {pnl_pct:.1f}%，"
                     f"达到止盈目标 {float(target_profit):.1f}%，可考虑获利了结。"
                 )
-                create_alert(
+                _emit_alert(
                     alert_type="watchlist_profit_target",
                     title=title,
                     content=content,
@@ -1270,7 +1028,7 @@ def scan_watchlist_exit_signals() -> dict:
                     f"买入价 {entry_price:.4f}，已跌 {abs(pnl_pct):.1f}%，"
                     f"触发止损线 -{float(stop_loss):.1f}%，建议止损离场或重新评估。"
                 )
-                create_alert(
+                _emit_alert(
                     alert_type="watchlist_stop_loss",
                     title=title,
                     content=content,
@@ -1356,7 +1114,7 @@ def scan_health_score() -> dict:
             f"各维度：{dim_str}\n"
             f"建议查看健康分页面了解详细诊断。"
         )
-        create_alert(
+        _emit_alert(
             alert_type="health_score_low",
             title=title,
             content=content,
@@ -1440,81 +1198,166 @@ def scan_valuation_failures() -> dict:
 
 
 def run_periodic_scan() -> dict:
-    """定时扫描主入口，依次执行 8 个扫描函数。
-
-    新增（2026-07-17）：
-    - market_index_drop: 大盘指数当日跌幅监控（P0-1）
-    - capital_flow: 南向资金异常流出监控（P0-3）
-    """
-    if not _is_enabled("alerts.proactive_scan_enabled", True):
-        return {"skipped": "disabled"}
-
-    results = {
-        "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "verification": {},
-        "valuation": {},
-        "portfolio": {},
-        "loss_plus_undervalued": {},
-        "watchlist": {},
-        "health_score": {},
-        "valuation_failures": {},
-        "market_index_drop": {},
-        "capital_flow": {},
-        "watchlist_exit": {},
+    """统一扫描契约；失败和未覆盖不会被解释为已排除风险。"""
+    from db.alert_lifecycle import record_scan
+    stamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    result={'generated':0,'updated':0,'resolved':0,'failed':0,'skipped':0,
+            'coverage':{},'last_scan':stamp,'scanned_at':stamp,'status':'complete'}
+    if not _is_enabled('alerts.proactive_scan_enabled',True):
+        result.update(skipped=1,status='skipped'); record_scan(result); return result
+    scans={
+        'verification':scan_and_verify_recommendations,'valuation':scan_valuation_thresholds,
+        'portfolio':scan_portfolio_risk,'loss_plus_undervalued':scan_loss_plus_undervalued,
+        'watchlist':scan_watchlist_signals,'health_score':scan_health_score,
+        'valuation_failures':scan_valuation_failures,'market_index_drop':scan_market_index_drop,
+        'capital_flow':scan_capital_flow_anomaly,'watchlist_exit':scan_watchlist_exit_signals,
+        'detailed':scan_detailed_risks,
     }
+    for name,scan in scans.items():
+        counts={'generated':0,'updated':0}; token=_SCAN_COUNTS.set(counts)
+        try:
+            data=scan() or {}
+            if data.get('error'):
+                status='failed'; failed=max(1,data.get('failed',0))
+            elif data.get('failed') or data.get('status')=='incomplete':
+                status='incomplete'; failed=max(1,data.get('failed',0))
+            elif data.get('skipped') or data.get('score','present') is None:
+                status='skipped'; failed=0
+            else:
+                # 未提供完整覆盖证明的旧扫描器保留明确边界，不自动恢复。
+                status='complete' if data.get('coverage') else 'limited'; failed=0
+            data.update(generated=counts['generated'],updated=counts['updated'])
+            result[name]=data
+            result['generated']+=counts['generated']; result['updated']+=counts['updated']
+            result['resolved']+=int(data.get('resolved',0)); result['failed']+=failed
+            result['skipped']+=1 if status in ('skipped','limited') else 0
+            result['coverage'][name]={'status':status,'details':data.get('coverage') or {},
+                                      'reason':data.get('error') or data.get('reason') or data.get('skipped')}
+        except Exception as exc:
+            logger.warning('风险扫描 %s 失败: %s',name,exc)
+            result[name]={'error':str(exc)}; result['failed']+=1
+            result['coverage'][name]={'status':'failed','reason':str(exc)}
+        finally:
+            _SCAN_COUNTS.reset(token)
+    if result['failed'] or result['skipped']: result['status']='incomplete'
+    record_scan(result)
+    return result
+
+
+def scan_detailed_risks(*, holdings=None, nav_history_loader=None, valuation_loader=None, cash_loader=None):
+    """细粒度扫描，按类别记录覆盖；错误不会解除旧风险，也不会生成补仓信号。"""
+    from db.alert_lifecycle import record_scan
+    if holdings is None: holdings=list_holdings()
+    if nav_history_loader is None:
+        from db.portfolio import get_fund_nav_history
+        nav_history_loader=get_fund_nav_history
+    if valuation_loader is None: valuation_loader=get_latest_valuation
+    if cash_loader is None:
+        from db.portfolio import get_cash_balance
+        cash_loader=get_cash_balance
+    rows=[h for h in holdings if (_number(h.get('shares')) or 0)>0]
+    by_code={}
+    for h in rows: by_code.setdefault(h.get('fund_code') or '',[]).append(h)
+    kinds=('drawdown_alert','buy_drop_alert','valuation_alert','valuation_opportunity','concentration_alert')
+    coverage=_coverage(kinds,len(by_code))
+    coverage.update(_coverage(('stale_data','cash_idle'),1))
+    observed=[]; created=0
+    counts=_SCAN_COUNTS.get()
+    if counts is None: counts={'generated':0,'updated':0}
+    token=_SCAN_COUNTS.set(counts)
+    threshold=_get_int('alert.drawdown_pct',10); buy_threshold=_get_int('alert.buy_drop_pct',4)
+    concentration=_get_int('alert.concentration_pct',30); low=_get_int('alert.valuation_low',20); high=_get_int('alert.valuation_high',80)
+    stale_days=_get_int('alert.stale_days',5); cash_high=_get_int('alert.cash_high_pct',15)
+    def emit(kind,code,name,title,content,severity='warning',fact_date=None,value=None,recovery=None):
+        nonlocal created
+        _emit_alert(alert_type=kind,title=title,content=content,severity=severity,related_fund_code=code or None,
+                    related_fund_name=name,source='system_scan',fact_date=fact_date,recovery_condition=recovery,
+                    evidence={'risk_value':value,'fact_date':fact_date})
+        observed.append((kind,code)); created+=1
+    prices_complete=all((_number(h.get('current_price')) or 0)>0 and _price_fact_is_current(h.get('price_updated_at')) for h in rows)
+    total=sum(float(h['shares'])*(_number(h.get('current_price')) or 0) for h in rows)
     try:
-        results["verification"] = scan_and_verify_recommendations()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 建议验证扫描失败: {e}")
-        results["verification"] = {"error": str(e)}
-    try:
-        results["valuation"] = scan_valuation_thresholds()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 估值阈值扫描失败: {e}")
-        results["valuation"] = {"error": str(e)}
-    try:
-        results["portfolio"] = scan_portfolio_risk()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 持仓风险扫描失败: {e}")
-        results["portfolio"] = {"error": str(e)}
-    # 2026-07-30 conv#194 新增：亏损+低估联合预警（在 portfolio_risk 之后，
-    # 命中时抑制同标的 loss_warning 重复）
-    try:
-        results["loss_plus_undervalued"] = scan_loss_plus_undervalued()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 亏损+低估联合扫描失败: {e}")
-        results["loss_plus_undervalued"] = {"error": str(e)}
-    try:
-        results["watchlist"] = scan_watchlist_signals()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 关注列表扫描失败: {e}")
-        results["watchlist"] = {"error": str(e)}
-    try:
-        results["health_score"] = scan_health_score()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 健康分扫描失败: {e}")
-        results["health_score"] = {"error": str(e)}
-    try:
-        results["valuation_failures"] = scan_valuation_failures()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 估值失败扫描失败: {e}")
-        results["valuation_failures"] = {"error": str(e)}
-    # P0-1: 大盘指数当日跌幅监控（新增）
-    try:
-        results["market_index_drop"] = scan_market_index_drop()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 大盘指数跌幅扫描失败: {e}")
-        results["market_index_drop"] = {"error": str(e)}
-    # P0-3: 资金流向异常监控（新增）
-    try:
-        results["capital_flow"] = scan_capital_flow_anomaly()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 资金流向扫描失败: {e}")
-        results["capital_flow"] = {"error": str(e)}
-    # P0-2: 关注列表退出信号扫描（2026-07-21 新增）
-    try:
-        results["watchlist_exit"] = scan_watchlist_exit_signals()
-    except Exception as e:
-        logger.warning(f"[alert_scanner] 关注列表退出信号扫描失败: {e}")
-        results["watchlist_exit"] = {"error": str(e)}
-    return results
+        for code,group in by_code.items():
+            h=group[0]; name=h.get('fund_name') or code
+            # 回撤历史按实际 dict 协议解包，并按所属日期排序。
+            try:
+                facts=_drawdown_facts(nav_history_loader(code,days=60))
+                if not facts or not _price_fact_is_current(facts['fact_date']):
+                    raise ValueError('历史样本不足或最新净值已过期')
+                coverage['drawdown_alert']['checked']+=1
+                if facts['drawdown_pct']>=threshold:
+                    value=facts['drawdown_pct']
+                    emit('drawdown_alert',code,name,f'{name} 近期回撤 {value:.1f}%',
+                         f"近30个有效净值样本高点 {facts['peak']:.4f}，最新 {facts['current']:.4f}，回撤 {value:.1f}%。先评估损失承受能力，回撤不等于买点。",
+                         'danger' if value>=threshold*1.5 else 'warning',facts['fact_date'],value,f'有效历史净值回撤小于 {threshold}%')
+            except Exception as exc: _gap(coverage,'drawdown_alert',f'{code}: {exc}')
+            # 估值以持仓关联指数为代码，缺乏新鲜估值只能等待。
+            try:
+                index=h.get('index_code')
+                if not index: raise ValueError('未关联指数，无法判断估值')
+                val=valuation_loader(index)
+                if not _valuation_current(val) or _number(val.get('percentile')) is None:
+                    raise ValueError('估值缺失、日期未知或过期')
+                pct=float(val['percentile']); coverage['valuation_alert']['checked']+=1; coverage['valuation_opportunity']['checked']+=1
+                kind='valuation_alert' if pct>=high else 'valuation_opportunity' if pct<=low else None
+                if kind:
+                    emit(kind,code,name,f'{name} 估值分位 {pct:.1f}%（事实参考）',
+                         f'对应指数 {index}，估值分位 {pct:.1f}%。低估不代表买点，新增投资需先经过组合风控。',
+                         'warning' if kind=='valuation_alert' else 'info',val.get('snapshot_date'),pct if kind=='valuation_alert' else 100-pct,
+                         f'新鲜估值分位回到 {low}%–{high}% 内')
+            except Exception as exc:
+                for kind in ('valuation_alert','valuation_opportunity'): _gap(coverage,kind,f'{code}: {exc}')
+            # 家庭同代码合并集中度。
+            if prices_complete and total>0:
+                coverage['concentration_alert']['checked']+=1
+                weight=sum(float(x['shares'])*float(x['current_price']) for x in group)/total*100
+                if weight>=concentration:
+                    emit('concentration_alert',code,name,f'{name} 家庭合计占比 {weight:.1f}%',
+                         f'同代码跨账户占投资持仓市值 {weight:.1f}%，阈值 {concentration}%。请复核分散配置与交易成本。',
+                         'danger' if weight>=concentration*1.5 else 'warning',str(h.get('price_updated_at'))[:10],weight,
+                         f'家庭合计占投资持仓市值低于 {concentration}%')
+            else: _gap(coverage,'concentration_alert',f'{code}: 行情覆盖不足，集中度分母未知')
+            # 各账户最近买入价独立比较，聚合同代码最严重一项。
+            try:
+                drops=[]
+                for x in group:
+                    buy=_number(x.get('last_buy_price')); price=_number(x.get('current_price'))
+                    if buy is None or buy<=0:
+                        # 缺少买入证据不等于该风险已恢复；明确等待补齐。
+                        raise ValueError('最近买入价格缺失，无法复核买后跌幅')
+                    if not price or not _price_fact_is_current(x.get('price_updated_at')):
+                        raise ValueError('买入后价格缺失或过期')
+                    drops.append(((buy-price)/buy*100,x))
+                coverage['buy_drop_alert']['checked']+=1
+                if drops:
+                    value,x=max(drops,key=lambda pair:pair[0])
+                    if value>=buy_threshold:
+                        emit('buy_drop_alert',code,name,f'{name} 买入后下跌 {value:.1f}%',
+                             f"最近买入日期 {x.get('last_buy_date') or '未提供'}，成交价 {x['last_buy_price']:.4f}，当前净值 {x['current_price']:.4f}。跌幅仅用于损失复核，不构成补仓依据。",
+                             'danger' if value>=buy_threshold*1.5 else 'warning',str(x.get('price_updated_at'))[:10],value,
+                             f'最新净值相对买入价跌幅小于 {buy_threshold}%')
+            except Exception as exc: _gap(coverage,'buy_drop_alert',f'{code}: {exc}')
+        # 过期事实本身可被可靠检查，不代表价格风险已覆盖。
+        stale=[h for h in rows if not h.get('price_updated_at') or str(h['price_updated_at'])[:10]<(date.today()-timedelta(days=stale_days)).isoformat()]
+        coverage['stale_data']['checked']=1
+        if stale:
+            emit('stale_data','','家庭组合',f'{len(stale)} 条持仓净值日期缺失或过期',
+                 '、'.join(h.get('fund_name') or h.get('fund_code') or '未知基金' for h in stale)+'；请先补齐行情，再判断风险与新增投资。',
+                 'warning',date.today().isoformat(),len(stale),'所有持仓净值日期已补齐且不再过期')
+        try:
+            cash=_number(cash_loader())
+            if cash is None or cash<0 or not prices_complete: raise ValueError('现金或组合价格覆盖不完整')
+            coverage['cash_idle']['checked']=1
+            if total+cash>0 and cash/(total+cash)*100>=cash_high:
+                pct=cash/(total+cash)*100
+                emit('cash_idle','','家庭组合',f'现金占总资产 {pct:.1f}%：核对用途',
+                     f'登记现金 {cash:,.0f} 元。先保留家庭必要开支、应急金与近期目标资金，再评估可投资余额。现金占比高不构成买入指令。',
+                     'info',date.today().isoformat(),pct,f'已核对现金用途；现金占比低于 {cash_high}% 后自动恢复')
+        except Exception as exc: _gap(coverage,'cash_idle',exc)
+        result=_finish_risk_scan(coverage,observed,created,source='system_scan')
+        result.update(generated=counts['generated'],updated=counts['updated'],last_scan=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        result['ok']=result['status']=='complete'
+        record_scan(result,source='detailed')
+        return result
+    finally:
+        _SCAN_COUNTS.reset(token)

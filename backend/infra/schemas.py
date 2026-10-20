@@ -116,6 +116,11 @@ class PromptVersionCreate(BaseModel):
 
 class QuickEntryRequest(BaseModel):
     """快速录入请求"""
+    funding_source: Optional[str] = Field(None, pattern=r"^(internal|external)$", description="明确买入资金来源")
+    cash_account: Optional[str] = Field(None, max_length=50, description="所属现金账户")
+    shares: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="卖出或转换提交份额")
+    fund_name: Optional[str] = Field(None, max_length=200)
+
     fund_code: str = Field(..., min_length=6, max_length=20, description="基金代码")
     amount: float = Field(..., gt=0, description="金额")
     transaction_type: str = Field("buy", pattern=r"^(buy|sell|convert|dividend)$", description="交易类型")

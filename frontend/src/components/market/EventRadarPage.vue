@@ -31,7 +31,7 @@ import {
   LEADING_TYPE_LABELS, LEADING_LEVEL_LABELS, LEADING_LEVEL_COLORS,
   sectorAccuracyColor, scoreColorClass, scoreRatingLabel, ratingColorClass, ratingLabel,
   masterActionColor, masterActionLabel, masterRatingColor, masterAccentColor, masterIcon,
-  formatMetricValue, formatMetrics, consensusClass, sharpeColorClass, volatilityColorClass,
+  formatMetricValue, formatMetrics, consensusClass, sharpeColorClass, volatilityColorClass, formatRiskRatio,
   winRateColor, verifyResultMeta,
   effectiveSignal, signalMeta, confidenceClass, hasMultidimSignal, multidimBadgeClass, multidimLabel,
   opportunityLabel, opportunityValue, opportunityIsLow, analysisMethodLabel,
@@ -1910,7 +1910,7 @@ watch(scrollToFundCode, async (code) => {
 
         <template v-else-if="portfolioData">
           <!-- 数据降级提示 -->
-          <div v-if="portfolioData.data_status === 'degraded'" class="pi-degraded">
+          <div v-if="portfolioData.data_status !== 'ok' || (portfolioRisk && portfolioRisk.data_status !== 'ok')" class="pi-degraded">
             <Icon name="alert-triangle" size="12" />
             <span>数据降级：持仓数据不足，部分指标可能不准确</span>
           </div>
@@ -1925,13 +1925,13 @@ watch(scrollToFundCode, async (code) => {
               <div class="pi-risk-card">
                 <div class="pi-risk-label">年化波动率</div>
                 <div class="pi-risk-value" :class="volatilityColorClass(portfolioRisk.portfolio_volatility)">
-                  {{ portfolioRisk.portfolio_volatility != null ? Number(portfolioRisk.portfolio_volatility).toFixed(2) + '%' : '—' }}
+                  {{ formatRiskRatio(portfolioRisk.portfolio_volatility) }}
                 </div>
               </div>
               <div class="pi-risk-card">
                 <div class="pi-risk-label">VaR 95% (1日)</div>
                 <div class="pi-risk-value risk-bad">
-                  {{ portfolioRisk.var_95_daily != null ? Number(portfolioRisk.var_95_daily).toFixed(2) + '%' : '—' }}
+                  {{ formatRiskRatio(portfolioRisk.var_95_daily) }}
                 </div>
                 <div v-if="portfolioRisk.var_95_amount != null" class="pi-risk-sub">
                   ≈ ¥{{ Number(portfolioRisk.var_95_amount).toLocaleString() }}
@@ -1940,7 +1940,7 @@ watch(scrollToFundCode, async (code) => {
               <div class="pi-risk-card">
                 <div class="pi-risk-label">CVaR 95%</div>
                 <div class="pi-risk-value risk-bad">
-                  {{ portfolioRisk.cvar_95_daily != null ? Number(portfolioRisk.cvar_95_daily).toFixed(2) + '%' : '—' }}
+                  {{ formatRiskRatio(portfolioRisk.cvar_95_daily) }}
                 </div>
                 <div v-if="portfolioRisk.cvar_95_amount != null" class="pi-risk-sub">
                   ≈ ¥{{ Number(portfolioRisk.cvar_95_amount).toLocaleString() }}
@@ -1949,10 +1949,10 @@ watch(scrollToFundCode, async (code) => {
               <div class="pi-risk-card">
                 <div class="pi-risk-label">最大回撤</div>
                 <div class="pi-risk-value risk-bad">
-                  {{ portfolioRisk.max_drawdown != null ? Number(portfolioRisk.max_drawdown).toFixed(2) + '%' : '—' }}
+                  {{ formatRiskRatio(portfolioRisk.max_drawdown) }}
                 </div>
-                <div v-if="portfolioRisk.recovery_days != null" class="pi-risk-sub">
-                  恢复 {{ portfolioRisk.recovery_days }} 天
+                <div v-if="portfolioRisk.max_drawdown_recovery_days != null" class="pi-risk-sub">
+                  {{ portfolioRisk.max_drawdown_recovery_days < 0 ? '尚未恢复前高' : `恢复耗时 ${portfolioRisk.max_drawdown_recovery_days} 个观测日` }}
                 </div>
               </div>
               <div class="pi-risk-card">

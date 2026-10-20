@@ -1,0 +1,17 @@
+import { shallowMount, flushPromises } from '@vue/test-utils'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import Overview from '../components/portfolio/PortfolioRiskOverview.vue'
+vi.mock('../api', () => ({ portfolioRiskAPI: { snapshot: vi.fn(), reviews: vi.fn(), preview: vi.fn(), savePolicy: vi.fn(), saveReview: vi.fn(), linkExecution: vi.fn(), reviewOutcome: vi.fn() } }))
+import { portfolioRiskAPI as api } from '../api'
+const wrappers=[]
+const ctx={ snapshot_id:'s', as_of:'2026-10-20T10:00:00', expires_at:'2026-10-20T11:00:00',status:'wait_for_data',issues:['净值已过期'],funds:[{fund_code:'E',fund_name:'权益'}],policy:{version:1,confirmed:false,max_single_position_pct:25}, cash:{available_now:100,protected:600,frozen:20,receivable:30,near_term_reserved:0,future_monthly_surplus:200},total_assets:1000,overview:{equity_pct:40,scenarios:[{key:'market_drop_30',label:'市场下跌30%',loss_amount:120}]},unassessed_factors:['未穿透信用风险'] }
+beforeEach(()=>{ vi.clearAllMocks();api.snapshot.mockResolvedValue(structuredClone(ctx));api.reviews.mockResolvedValue({reviews:[]}) })
+afterEach(()=>wrappers.splice(0).forEach(w=>w.unmount()))
+async function mount(){const w=shallowMount(Overview);wrappers.push(w);await flushPromises();return w}
+it('exposes missing evidence and separates spendable cash from future income',async()=>{const w=await mount();expect(w.text()).toContain('净值已过期');expect(w.text()).toContain('未来月结余');expect(w.text()).toContain('今日可执行');expect(w.text()).toContain('未穿透信用风险')})
+it('does not create a saved plan merely by viewing',async()=>{await mount();expect(api.saveReview).not.toHaveBeenCalled();expect(api.linkExecution).not.toHaveBeenCalled()})
+it('shows read errors instead of claiming low risk',async()=>{api.snapshot.mockRejectedValue(new Error('offline'));const w=await mount();expect(w.text()).toContain('offline');expect(w.text()).not.toContain('风险可控')})
+it('policy saving requires confirmation and includes the current version',async()=>{const w=await mount();const s=w.vm.$.setupState;s.draft={max_single_position_pct:20};s.pendingAction='policy';api.savePolicy.mockResolvedValue({});await s.confirmAction();expect(api.savePolicy).toHaveBeenCalledWith({max_single_position_pct:20},1)})
+it('a preview shows all scenarios and cannot link a real trade automatically',async()=>{const w=await mount();const s=w.vm.$.setupState;s.selectedFund='E';s.amount=1000;api.preview.mockResolvedValue({status:'blocked',executable_amount:0,reasons:['现金不足'],comparisons:[]});await s.preview();expect(w.text()).toContain('现金不足');expect(api.linkExecution).not.toHaveBeenCalled()})
+it('discards a preview response after the fund or amount changes',async()=>{const w=await mount();const s=w.vm.$.setupState;let resolve;api.preview.mockImplementation(()=>new Promise(r=>resolve=r));s.selectedFund='E';await flushPromises();const request=s.preview();s.selectedFund='B';await flushPromises();resolve({fund_code:'E',status:'allowed',executable_amount:1000});await request;expect(s.decision).toBe(null)})
+it('keeps the newest risk snapshot when requests complete out of order',async()=>{let oldResolve;api.snapshot.mockImplementationOnce(()=>new Promise(r=>oldResolve=r));const w=shallowMount(Overview);wrappers.push(w);await flushPromises();api.snapshot.mockResolvedValue({...ctx,snapshot_id:'new'});await w.vm.refresh();oldResolve({...ctx,snapshot_id:'old'});await flushPromises();expect(w.vm.$.setupState.snapshot.snapshot_id).toBe('new')})

@@ -49,10 +49,12 @@ def test_create_snapshot_creates_hypothetical_tx(tmp_db):
     assert tx["amount"] == 5000
     assert tx["is_hypothetical"] == 1
     assert tx["transaction_type"] == "buy"
+    assert tx["status"] == "pending"
+    assert tx["price"] == 0 and tx["shares"] == 0  # 建议不是成交
 
 
 def test_create_snapshot_dedup_same_day(tmp_db):
-    """同标的同日去重：旧的假设交易和快照被删除。"""
+    """同标的同日幂等：保留首次建议时点，不改写原记录。"""
     from db.smart_add_snapshots import create_snapshot_with_hypothetical, list_snapshots
 
     # 第一条
@@ -74,7 +76,8 @@ def test_create_snapshot_dedup_same_day(tmp_db):
     # 只剩一条快照
     snapshots = list_snapshots(fund_code="000001")
     assert len(snapshots) == 1
-    assert snapshots[0]["suggested_amount"] == 4000  # 最新的
+    assert snapshots[0]["suggested_amount"] == 3000  # 首次保存不可改写
+    assert r2 == r1
     assert snapshots[0]["id"] == r2["snapshot_id"]
 
 
@@ -158,10 +161,10 @@ def test_verify_hypothetical_tx_with_nav_history(tmp_db):
         suggested_tier=None, profit_rate_at_snapshot=-0.1,
         valuation_zscore=None, current_price_at_snapshot=1.0,
     )
-    # 快照默认记录今天；本用例验证 30 天前买入，交易日期需与净值 fixture 一致。
+    # 建议在净值可知日之前登记，执行使用建议后首个净值，不能用建议当日旧价。
     conn = _get_conn()
     conn.execute("UPDATE portfolio_transactions SET transaction_date=? WHERE fund_code=? AND is_hypothetical=1",
-                 (buy_date, "000055"))
+                 ((datetime.strptime(buy_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d"), "000055"))
     conn.commit()
     conn.close()
 
@@ -183,7 +186,7 @@ def test_verify_hypothetical_tx_with_nav_history(tmp_db):
 
 
 def test_verify_hypothetical_tx_no_nav_data(tmp_db):
-    """无净值历史时返回 no_nav_data 状态。"""
+    """无建议之后净值时保持待评估，不采用快照价。"""
     from db.smart_add_snapshots import create_snapshot_with_hypothetical, list_hypothetical_txs
     from services.counterfactual_verifier import verify_hypothetical_tx
 
@@ -198,8 +201,9 @@ def test_verify_hypothetical_tx_no_nav_data(tmp_db):
     tx = [t for t in txs if t["fund_code"] == "000077"][0]
 
     result = verify_hypothetical_tx(tx)
-    # 没有净值历史但有快照价 → 会用快照价作为买入价，但当前净值取不到 → no_nav_data
-    assert result["status"] == "no_nav_data"
+    # 快照价不作为可成交价格的替代。
+    assert result["status"] == "pending_evaluation"
+    assert "profit_loss" not in result
 
 
 def test_verify_all_hypothetical_summary(tmp_db):
@@ -226,7 +230,12 @@ def test_verify_all_hypothetical_summary(tmp_db):
         fund_code="000066", fund_name="汇总基金", suggested_amount=2000,
         suggested_tier=None, profit_rate_at_snapshot=-0.05,
         valuation_zscore=None, current_price_at_snapshot=1.0,
+        notes=__import__('json').dumps(dict(mode='suggestion_tracking', shadow_cash_budget=3000, event_key='E1')),
     )
+    conn = _get_conn()
+    recommendation_day = (datetime.strptime(buy_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    conn.execute("UPDATE portfolio_transactions SET transaction_date=? WHERE fund_code='000066' AND is_hypothetical=1", (recommendation_day,))
+    conn.commit(); conn.close()
 
     result = verify_all_hypothetical()
     assert "hypothetical_txs" in result
@@ -234,9 +243,13 @@ def test_verify_all_hypothetical_summary(tmp_db):
     assert "comparison" in result
 
     summary = result["summary"]
-    assert summary["total_count"] >= 1
-    assert summary["total_hypothetical_invested"] >= 2000
-    assert summary["breakeven_count"] >= 1
+    assert summary['total_count'] == 1
+    assert summary['total_hypothetical_invested'] == 2000
+    assert summary['remaining_shadow_cash'] == 1000
+    assert summary['total_shadow_wealth'] == 3200
+    assert summary['total_profit_loss'] == 200
+    assert summary['breakeven_count'] == 1
+    assert result['comparison']['improvement'] is None
 
 
 # ── 删除假设交易 ───────────────────────────────────

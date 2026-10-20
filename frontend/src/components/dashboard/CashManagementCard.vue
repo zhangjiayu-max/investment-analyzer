@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { _cmpTemp } from '../../composables/useDashboardHelpers'
 import Icon from '../ui/Icon.vue'
 
@@ -24,6 +25,7 @@ const emit = defineEmits(['bond-recommend'])
         <span class="title editorial-title">零钱配置</span>
       </div>
       <div class="card-header-actions">
+        <MarkdownActions v-if="bondResult && !bondLoading && !bondResult.error" :content="bondResult" title="债券配置顾问-配置建议" :created-at="bondResult.created_at" :record-id="bondResult.record_id" />
         <span v-if="cashManagement" class="card-data-time meta terminal-label">{{ cashUpdatedAt || '' }}</span>
       </div>
     </div>
@@ -186,6 +188,7 @@ const emit = defineEmits(['bond-recommend'])
 }
 .card-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
@@ -207,6 +210,7 @@ const emit = defineEmits(['bond-recommend'])
 }
 .card-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }

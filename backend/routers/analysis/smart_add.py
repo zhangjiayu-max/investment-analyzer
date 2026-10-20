@@ -1,6 +1,6 @@
 """智能补仓计划器 API。"""
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Query, HTTPException
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
@@ -10,6 +10,13 @@ async def get_smart_add_plan():
     """生成全持仓补仓计划表。"""
     from services.smart_add_planner import generate_smart_add_plan
     return generate_smart_add_plan()
+
+
+@router.post("/api/smart-add/plan/save")
+async def save_plan():
+    """显式重算并保存当前通过风控的建议；保存建议不代表确认真实成交。"""
+    from services.smart_add_planner import generate_smart_add_plan
+    return generate_smart_add_plan(persist=True)
 
 
 @router.get("/api/smart-add/plan/{fund_code}")
@@ -34,32 +41,33 @@ async def get_config():
 @router.post("/api/smart-add/config")
 async def update_config(config: dict):
     """更新配置。"""
-    from db.config import update_config
-    allowed_keys = [
-        "smart_add.enabled", "smart_add.base_dca_pct", "smart_add.pyramid_enabled",
-        "smart_add.pool_pct", "smart_add.pyramid_tiers", "smart_add.loss_threshold",
-        "smart_add.max_single_position_pct", "smart_add.valuation_pause_pct", "smart_add.stale_days",
-        "smart_add.max_add_vs_position_mult", "smart_add.cooldown_days", "smart_add.max_buys_in_cooldown",
-        "smart_add.trend_signal_enabled", "smart_add.trend_base_ratio", "smart_add.trend_position_pct",
-        "smart_add.dip_signal_enabled", "smart_add.dip_base_ratio", "smart_add.dca_drop_step_pct",
-        "smart_add.dca_tiers",
-        # 退出信号（2026-07-17 新增）
-        "smart_add.exit_signal_enabled",
-        # 价值平均法 + 网格交易 + 基本面健康（2026-07-17 新增）
-        "smart_add.va_enabled", "smart_add.grid_enabled", "smart_add.fund_health_enabled",
-    ]
-    updated = []
-    for k, v in config.items():
-        if k in allowed_keys:
-            update_config(k, str(v))
-            updated.append(k)
-    return {"ok": True, "updated": updated}
+    from services.advisor.smart_add_governance import validate_config_patch
+    from db._conn import _get_conn
+    from db.config import _CONFIG_CACHE
+    try:
+        validated = validate_config_patch(config)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # 全部验证完成后在单事务内写入，避免半套风险配置。
+    conn = _get_conn()
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT INTO system_config(key,value,description,category,updated_at) VALUES (?,?,'智能补仓配置','smart_add',datetime('now','localtime')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                list(validated.items()),
+            )
+    finally:
+        conn.close()
+    for key in validated:
+        _CONFIG_CACHE.pop(key, None)
+    return {"ok": True, "updated": list(validated)}
 
 
 class PreviewRequest(BaseModel):
     fund_code: str
-    additional_drop_pct: float
-    add_amount: float
+    additional_drop_pct: float = Field(ge=-99.99, le=100, allow_inf_nan=False)
+    add_amount: float = Field(ge=0, le=1e12, allow_inf_nan=False)
 
 
 @router.post("/api/smart-add/preview")
@@ -71,15 +79,20 @@ async def preview_scenario(req: PreviewRequest):
 
 class SimulateRequest(BaseModel):
     fund_code: str
-    monthly_drop_pct: float = -5.0
-    months: int = 6
+    monthly_drop_pct: float = Field(default=-5.0, ge=-99.99, le=100, allow_inf_nan=False)
+    months: int = Field(default=6, ge=1, le=120, strict=True)
+    cash_budget: float | None = Field(default=None, ge=0, le=1e12, allow_inf_nan=False)
+    fee_rate: float = Field(default=0, ge=0, le=.1, allow_inf_nan=False)
 
 
 @router.post("/api/smart-add/simulate")
 async def simulate_strategies_api(req: SimulateRequest):
     """策略对比模拟器：对比不补仓/DCA/金字塔/VA在持续下跌场景下的效果。"""
     from services.smart_add_planner import simulate_strategies
-    return simulate_strategies(req.fund_code, req.monthly_drop_pct, req.months)
+    try:
+        return simulate_strategies(req.fund_code, req.monthly_drop_pct, req.months, cash_budget=req.cash_budget, fee_rate=req.fee_rate)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ── 反事实决策验证：假设操作跟踪 ──
@@ -102,7 +115,7 @@ async def list_snapshots(
 async def track_hypothetical():
     """反事实跟踪验证：所有假设补仓操作的当前盈亏 + 假设vs真实组合对比。
 
-    假设操作由系统自动生成（每次生成补仓建议时自动创建），用户无需手动操作。
+    建议仅在用户显式保存后登记，使用固定期初虚拟现金跟踪，与真实成交分离。
     """
     from services.counterfactual_verifier import verify_all_hypothetical
     return verify_all_hypothetical()

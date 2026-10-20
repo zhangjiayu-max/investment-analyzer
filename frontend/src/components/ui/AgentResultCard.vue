@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import MarkdownActions from './MarkdownActions.vue'
 import Icon from './Icon.vue'
 import QualityFeedback from './QualityFeedback.vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
@@ -26,8 +27,6 @@ const props = defineProps({
 const emit = defineEmits(['retry', 'copied', 'feedback-submitted', 'toggle-expanded'])
 
 const expanded = ref(props.defaultExpanded)
-const copied = ref(false)
-let copiedTimer = null
 
 watch(() => props.defaultExpanded, (value) => {
   expanded.value = value
@@ -42,7 +41,6 @@ const statusConfig = computed(() => {
 
 const renderedContent = computed(() => renderMarkdown(props.content || ''))
 const hasFeedbackTarget = computed(() => props.showFeedback && props.targetType && props.targetId !== null && props.status === 'done')
-const canCopy = computed(() => props.showCopy && props.status === 'done' && Boolean(props.content))
 const showBody = computed(() => !props.collapsible || expanded.value)
 
 function toggleExpanded() {
@@ -50,14 +48,6 @@ function toggleExpanded() {
   emit('toggle-expanded', expanded.value)
 }
 
-async function copyContent() {
-  if (!props.content) return
-  await navigator.clipboard.writeText(props.content)
-  copied.value = true
-  emit('copied', props.content)
-  if (copiedTimer) clearTimeout(copiedTimer)
-  copiedTimer = setTimeout(() => { copied.value = false }, 1200)
-}
 </script>
 
 <template>
@@ -78,14 +68,15 @@ async function copyContent() {
         <span v-if="recordId" class="agent-result-card__id font-jet">#{{ recordId }}</span>
         <span v-if="updatedAt" class="agent-result-card__time font-jet">{{ updatedAt }}</span>
         <span v-if="source" class="agent-result-card__source terminal-label">{{ source }}</span>
-        <button
-          v-if="canCopy"
-          type="button"
-          class="agent-result-card__copy"
-          @click="copyContent"
-        >
-          {{ copied ? '已复制' : '复制' }}
-        </button>
+        <MarkdownActions
+          v-if="status === 'done'"
+          :content="content"
+          :title="agent || title"
+          :created-at="updatedAt"
+          :record-id="recordId"
+          :show-copy="showCopy"
+          @copied="emit('copied', $event)"
+        />
         <button
           v-if="collapsible"
           type="button"
@@ -132,6 +123,7 @@ async function copyContent() {
 
 .agent-result-card__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;

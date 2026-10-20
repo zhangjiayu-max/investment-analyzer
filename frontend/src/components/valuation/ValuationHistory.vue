@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, watch, onMounted, onUnmounted, onActivated, computed } from 'vue'
 let echartsModule = null
 async function getEcharts() {
@@ -1381,6 +1382,7 @@ defineExpose({ loadHistory: refreshValuationData })
             · {{ news.published_at || '新闻日期缺失' }} · {{ news.source }}
           </span>
         </div>
+        <MarkdownActions v-if="!analysisResult.error && (!analysisResult.status || analysisResult.status === 'done')" :content="analysisResult.result" :title="`${analysisResult.agent_name || '指数深度分析'}-${analysisResult.index_name || selectedCode}`" :created-at="analysisResult.created_at" :record-id="analysisResult.id || analysisResult.history_id" />
         <div class="analysis-content markdown-body" v-html="renderMarkdown(analysisResult.result)"></div>
       </div>
 
@@ -1418,6 +1420,13 @@ defineExpose({ loadHistory: refreshValuationData })
             </div>
             <div class="history-item-actions">
               <span v-if="item.token_usage" class="history-tokens font-jet">{{ item.token_usage }} tokens</span>
+              <MarkdownActions
+                v-if="!item.error && (!item.status || item.status === 'done')"
+                :content="item.result"
+                :title="`${item.agent_name || '指数深度分析'}-${item.index_name || item.index_code || selectedCode}`"
+                :created-at="item.created_at"
+                :record-id="item.id"
+              />
               <button class="btn-icon btn-icon-danger" @click.stop="handleDeleteHistory(item.id)" title="删除">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -1442,6 +1451,7 @@ defineExpose({ loadHistory: refreshValuationData })
               <span v-if="viewingHistory.token_usage" class="font-jet">{{ viewingHistory.token_usage }} tokens</span>
               <span class="font-jet">{{ formatAnalysisTime(viewingHistory.created_at) }}</span>
             </div>
+            <MarkdownActions v-if="!viewingHistory.status || viewingHistory.status === 'done'" :content="viewingHistory.result" :title="`${viewingHistory.agent_name || '指数深度分析'}-${viewingHistory.index_name || viewingHistory.index_code}`" :created-at="viewingHistory.created_at" :record-id="viewingHistory.id" />
             <div class="modal-body markdown-body" v-html="renderMarkdown(viewingHistory.result)"></div>
           </div>
         </div>
@@ -1740,6 +1750,7 @@ defineExpose({ loadHistory: refreshValuationData })
           <div v-if="superValueData.coverage?.length" class="sv-agent-meta">
             <span v-for="source in superValueData.coverage" :key="source.source">{{ source.source }}：{{ source.status }}，{{ source.records }}条；可比序列 {{ source.usable_series || 0 }}<span v-if="source.reference_only_records">，仅交叉参考 {{ source.reference_only_records }}条</span></span>
           </div>
+          <MarkdownActions v-if="superValueDeepData?.deep_analysis?.length && !superValueDeepLoading" :content="superValueDeepData" title="估值机会深度解读" :created-at="superValueDeepData.created_at" :record-id="superValueDeepData.record_id" />
           <!-- Agent 元信息 -->
           <div v-if="superValueDeepData?.agent_meta && !superValueDeepData?.error" class="sv-agent-meta">
             <span class="terminal-label">估值机会筛选官</span>
@@ -1810,6 +1821,7 @@ defineExpose({ loadHistory: refreshValuationData })
                   </div>
                   <!-- LLM 解读 -->
                   <template v-if="getDeepAnalysis(item.index_code)">
+                    <MarkdownActions :content="getDeepAnalysis(item.index_code)" :title="`${item.index_name}-深度解读`" />
                     <div class="sv-deep-row sv-deep-llm">
                       <span class="sv-deep-tag" :class="'sv-tag-' + (getDeepAnalysis(item.index_code).opportunity_type === '真低估' ? 'real' : getDeepAnalysis(item.index_code).opportunity_type === '价值陷阱' ? 'trap' : 'trend')">
                         {{ getDeepAnalysis(item.index_code).opportunity_type }}
@@ -1861,6 +1873,7 @@ defineExpose({ loadHistory: refreshValuationData })
                 <span v-if="strategyData.agent_name" class="terminal-label">{{ strategyData.agent_name }}</span>
                 <span v-if="strategyData.token_usage" class="terminal-label">· <span class="font-jet">{{ strategyData.token_usage }}</span> tokens</span>
               </div>
+              <MarkdownActions v-if="!strategyData.error && strategyData.enabled !== false && (strategyData.overall_summary || strategyData.strategies?.length)" :content="strategyData" title="增强策略分析师-增强策略分析" :created-at="strategyData.created_at" :record-id="strategyData.record_id" />
               <div v-if="strategyData.overall_summary" class="sv-strategy-summary">
                 {{ strategyData.overall_summary }}
               </div>
@@ -1875,6 +1888,7 @@ defineExpose({ loadHistory: refreshValuationData })
                       {{ s.opportunity_type }}
                     </span>
                   </div>
+                  <MarkdownActions :content="s" :title="`增强策略分析师-${s.index_name}`" />
                   <!-- 估值风险预警 -->
                   <div v-if="s.valuation_warnings?.length || s.recommended_metric || s.history_years" class="sv-warnings">
                     <div v-for="w in s.valuation_warnings" :key="w.type" :class="['sv-warning-item', 'sv-warning-' + w.level]">

@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase, runEvalBatch,
@@ -800,7 +801,7 @@ onUnmounted(() => {
           <div v-if="runDetail.result_data" class="detail-section">
             <div class="detail-section-head">
               <h5 class="terminal-label">完整结果</h5>
-              <button class="copy-btn" @click="copyToClipboard(extractResult(runDetail.result_data), '完整结果')">📋 复制</button>
+              <MarkdownActions :content="runDetail.result_data" title="分析评测-完整结果" :record-id="runDetail.id" :created-at="runDetail.created_at" />
             </div>
             <div v-if="isMarkdown(extractResult(runDetail.result_data))" class="result-content markdown-body" v-html="renderMarkdown(extractResult(runDetail.result_data))"></div>
             <pre v-else class="code-block result-block">{{ extractResult(runDetail.result_data) }}</pre>

@@ -300,9 +300,14 @@ export function sharpeColorClass(v) {
 /** 波动率颜色：<15%绿 / 15-25%黄 / >25%红 */
 export function volatilityColorClass(v) {
   if (v == null) return ''
-  if (v < 15) return 'risk-good'
-  if (v <= 25) return 'risk-warn'
+  if (v < .15) return 'risk-good'
+  if (v <= .25) return 'risk-warn'
   return 'risk-bad'
+}
+
+/** 后端组合风险均返回比例；缺数据不伪装成0%。 */
+export function formatRiskRatio(v) {
+  return v == null || !Number.isFinite(Number(v)) ? '—' : `${(Number(v) * 100).toFixed(2)}%`
 }
 
 /** 胜率颜色：≥60%绿 / 40-60%黄 / <40%红 / 无数据灰 */

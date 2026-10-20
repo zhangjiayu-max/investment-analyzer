@@ -35,13 +35,48 @@ def prices_to_returns(prices: list[float]) -> list[float]:
 
 
 def align_returns(returns: dict[str, list[float]]) -> dict[str, list[float]]:
-    """按最短序列长度对齐各资产收益率（取尾部对齐，保证同期可比）。"""
+    """纯数值序列长度兼容；生产评估先用日期交集对齐。"""
     if not returns:
         return {}
     min_len = min(len(v) for v in returns.values())
     if min_len < 2:
         return {}
     return {k: v[-min_len:] for k, v in returns.items() if len(v) >= min_len}
+
+
+def align_dated_returns(history: dict[str, list[dict]], min_observations: int = 29) -> dict:
+    """按共同交易日先对齐价格，再计算同区间收益，不前填不同交易日。"""
+    prices = {}
+    for code, rows in history.items():
+        mapping = {}
+        for row in rows:
+            day = row.get("trade_date") or row.get("date") or row.get("nav_date")
+            try:
+                value = float(row.get("close", row.get("nav")))
+            except (TypeError, ValueError):
+                continue
+            if day and value > 0 and math.isfinite(value):
+                mapping[str(day)] = value
+        prices[code] = mapping
+    if not prices:
+        return {"dates": [], "returns": {}}
+    dates = sorted(set.intersection(*(set(v) for v in prices.values())))
+    if len(dates) - 1 < min_observations:
+        return {"dates": [], "returns": {}}
+    return {"dates": dates[1:], "returns": {
+        code: prices_to_returns([mapping[d] for d in dates]) for code, mapping in prices.items()
+    }}
+
+
+def _fetch_dated_closes(index_code: str, days: int) -> list[dict]:
+    """历史接口保留交易日期，相关性不能由等长数组猜测同期。"""
+    try:
+        from services.index.index_history_fetcher import get_index_price_history
+        history = get_index_price_history(index_code, days=days * 2)
+        return history[-days:]
+    except Exception as exc:
+        logger.warning("[portfolio_risk] 日期价格读取失败 %s: %s", index_code, exc)
+        return []
 
 
 def pearson_corr(a: list[float], b: list[float]) -> float | None:
@@ -268,36 +303,47 @@ def assess_add_position_risk(target_index_code: str,
     if not target_index_code:
         return result
 
+    same_index = target_index_code in (holding_index_codes or [])
+    result["same_index_exposure"] = same_index
+    if same_index:
+        result.update(max_correlation=1.0, avg_correlation=1.0,
+                      highly_correlated=[target_index_code], corr_downweight=downweight_factor,
+                      correlation={target_index_code: 1.0}, data_quality="known_duplicate")
+        result["flags"].append("已有同指数持仓，新增资金增加相同底层暴露，不能视为分散")
+
     # 去重持仓指数（排除与目标相同的）
     holding_codes = [c for c in dict.fromkeys(holding_index_codes or []) if c and c != target_index_code]
 
     # 拉取价格 → 收益率
-    returns: dict[str, list[float]] = {}
-    target_closes = _fetch_closes(target_index_code, lookback_days)
-    if len(target_closes) >= 30:
-        returns[target_index_code] = prices_to_returns(target_closes)
-    for code in holding_codes:
-        closes = _fetch_closes(code, lookback_days)
-        if len(closes) >= 30:
-            returns[code] = prices_to_returns(closes)
+    history = {code: _fetch_dated_closes(code, lookback_days)
+               for code in [target_index_code] + holding_codes}
+    eligible = {code: rows for code, rows in history.items() if len(rows) >= 30}
+    aligned_history = align_dated_returns(eligible)
+    returns = aligned_history["returns"]
+    result["data_days"] = len(aligned_history["dates"])
+    result["excluded_index_codes"] = [code for code in history if code not in returns]
 
     if target_index_code not in returns:
-        result["data_quality"] = "unavailable"
-        result["flags"].append("目标标的价格数据不足，相关性评估跳过（不惩罚）")
+        if not same_index:
+            result["data_quality"] = "unavailable"
+        result["flags"].append("共同交易日价格不足，部分相关性未知")
         return result
     if not holding_codes or len(returns) < 2:
-        result["data_quality"] = "no_holdings"
-        result["flags"].append("无可比持仓或持仓数据不足，按独立资产处理")
+        if not same_index:
+            result["data_quality"] = "unavailable" if holding_codes else "no_holdings"
+        result["flags"].append("缺少可比历史，不能据此声称已有持仓相互独立")
         # 仍可基于目标自身波动给出凯利参考
         _attach_kelly(result, returns, target_index_code, kelly_fraction, kelly_cap, shrink_enabled)
         return result
 
-    result["data_quality"] = "ok"
+    result["data_quality"] = "partial" if result["excluded_index_codes"] else "ok"
 
     # 相关性矩阵
     corr_matrix = correlation_matrix(returns)
     target_corr = corr_matrix.get(target_index_code, {})
     holding_corrs = {c: target_corr[c] for c in holding_codes if c in target_corr}
+    if same_index:
+        holding_corrs[target_index_code] = 1.0
     result["correlation"] = holding_corrs
 
     if holding_corrs:

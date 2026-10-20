@@ -29,6 +29,7 @@ function mountCard(props = {}) {
 
 describe('AgentResultCard', () => {
   beforeEach(() => {
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
     Object.assign(navigator, {
       clipboard: {
         writeText: vi.fn().mockResolvedValue(undefined),
@@ -78,7 +79,7 @@ describe('AgentResultCard', () => {
   it('copies content to clipboard and emits copied event', async () => {
     const wrapper = mountCard({ content: '可复制的分析内容' })
 
-    await wrapper.find('.agent-result-card__copy').trigger('click')
+    await wrapper.find('.markdown-actions__copy').trigger('click')
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('可复制的分析内容')
     expect(wrapper.emitted('copied')).toHaveLength(1)

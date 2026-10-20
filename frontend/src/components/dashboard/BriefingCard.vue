@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref } from 'vue'
 import DOMPurify from 'dompurify'
 import { formatBriefingTime, renderBriefing } from '../../composables/useDashboardHelpers'
@@ -36,6 +37,7 @@ function submitFeedbackWithComment() {
         </svg>
         <span class="briefing-label title editorial-title">每日市场简报</span>
         <span class="briefing-time meta terminal-label">{{ formatBriefingTime(dailyReport.created_at) }}</span>
+        <MarkdownActions :content="dailyReport.result" title="市场日报分析师-每日市场简报" :created-at="dailyReport.created_at" :record-id="dailyReport.id" />
         <AIActionButton
           label="重新生成"
           agent="市场日报分析师"
@@ -145,6 +147,7 @@ function submitFeedbackWithComment() {
 }
 .briefing-title-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.6rem;
 }

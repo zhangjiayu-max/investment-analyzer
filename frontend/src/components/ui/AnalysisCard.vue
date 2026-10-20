@@ -1,10 +1,12 @@
 <!-- AI 分析结果卡片：结构化展示分析内容 -->
 <script setup>
 import { computed } from 'vue'
+import MarkdownActions from './MarkdownActions.vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
 
 const props = defineProps({
   result: { type: String, default: '' },
+  status: { type: String, default: 'done' },
   agentName: { type: String, default: '' },
   tokenUsage: { type: Number, default: 0 },
   createdAt: { type: String, default: '' },
@@ -29,18 +31,6 @@ function copyRecordId() {
   }
 }
 
-function copyContent() {
-  const text = props.result || ''
-  if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.activeElement
-    if (btn) {
-      const orig = btn.innerHTML
-      btn.innerHTML = '<svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>'
-      setTimeout(() => { btn.innerHTML = orig }, 1500)
-    }
-  }).catch(() => {})
-}
 </script>
 
 <template>
@@ -57,11 +47,7 @@ function copyContent() {
         <span v-if="recordId" class="analysis-record-id font-jet" title="点击复制记录 ID" @click="copyRecordId">ID:{{ recordId }}</span>
       </div>
       <div class="analysis-actions">
-        <button class="rec-feedback-btn" @click="copyContent" title="复制内容">
-          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
-          </svg>
-        </button>
+        <MarkdownActions v-if="status === 'done'" :content="result" :title="agentName || 'AI 分析报告'" :created-at="createdAt" :record-id="recordId" />
         <button
           class="rec-feedback-btn helpful"
           :class="{ active: feedback === 'helpful' }"
@@ -99,6 +85,8 @@ function copyContent() {
 .analysis-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   justify-content: space-between;
   padding: 0.5rem 0.875rem;
   border-bottom: 1px solid var(--color-border);
@@ -107,6 +95,7 @@ function copyContent() {
 
 .analysis-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   font-size: 0.8125rem;
@@ -149,6 +138,7 @@ function copyContent() {
 
 .analysis-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.35rem;
 }
 

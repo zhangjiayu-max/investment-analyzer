@@ -50,6 +50,8 @@ class CreateTransactionRequest(BaseModel):
     transaction_time: str | None = None    # HH:MM 格式，如 14:30
     fund_name: str | None = None           # 新建买入时基金名称
     account: str | None = None             # 账户：花无缺/小鱼儿
+    funding_source: Literal['internal', 'external'] | None = None
+    cash_account: str | None = None        # 明确资金归属，历史交易不追扣
 
 
 class ConfirmTransactionRequest(BaseModel):
@@ -64,7 +66,7 @@ class ConfirmTransactionRequest(BaseModel):
 
 
 class SellPreviewRequest(BaseModel):
-    shares: float  # 拟卖出份额
+    shares: float = Field(gt=0, allow_inf_nan=False)  # 拟卖出份额
 
 
 class CreateAlertRequest(BaseModel):
@@ -86,8 +88,8 @@ class TagRequest(BaseModel):
 
 
 class AdjustCashRequest(BaseModel):
-    amount: float
-    mode: str = "add"  # "add" 存入/支出, "set" 直接设置
+    amount: float = Field(allow_inf_nan=False)
+    mode: Literal['add', 'set'] = "add"  # "add" 存入/支出, "set" 直接设置
     user_id: str = "default"
 
 

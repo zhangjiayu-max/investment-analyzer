@@ -1769,8 +1769,8 @@ export function listBondRecommendRecords(limit = 5) {
 // ── 风险预警 API ──────────────────────────────────────
 
 /** 获取预警列表 */
-export function listAlerts(unreadOnly = false, limit = 50) {
-  return api.get('/portfolio/alerts', { params: { unread_only: unreadOnly, limit }, timeout: 15000 })
+export function listAlerts(unreadOnly = false, limit = 50, query = {}) {
+  return api.get('/portfolio/alerts', { params: { unread_only: unreadOnly, limit, ...query }, timeout: 15000 })
 }
 
 /** 获取未读预警数量 */
@@ -1789,8 +1789,8 @@ export function deleteAlert(alertId) {
 }
 
 /** 更新预警业务确认状态（已采纳/已忽略） */
-export function acknowledgeAlert(alertId, status) {
-  return api.post(`/portfolio/alerts/${alertId}/acknowledge`, { status }, { timeout: 15000 })
+export function acknowledgeAlert(alertId, status, details = {}) {
+  return api.post(`/portfolio/alerts/${alertId}/acknowledge`, { status, ...details }, { timeout: 15000 })
 }
 
 // ── 前瞻性事件雷达 ─────────────────────────────────────
@@ -2760,6 +2760,7 @@ export function debugTool(toolName, args, confirmWrite = false) {
 
 /** 智能补仓计划器 API（估值 z-score 加权定投 + 金字塔补仓双引擎） */
 export const smartAddAPI = {
+  savePlan: () => api.post('/smart-add/plan/save').then(r => r.data),
   /** 全持仓补仓计划表 */
   getPlan: () => api.get('/smart-add/plan').then(r => r.data),
   /** 单标的补仓计划 */
@@ -3009,3 +3010,17 @@ export const toggleShadowConfig = (id, isActive) => api.post(`/shadow/configs/${
 export const deleteShadowConfig = id => api.delete(`/shadow/configs/${id}`)
 export const getShadowRuns = configId => api.get('/shadow/runs', { params: { config_id: configId || undefined, limit: 50 } })
 export const getShadowStats = configId => api.get('/shadow/stats', { params: { config_id: configId || undefined } })
+
+/** 查看净值不会确认成交。 */
+export const previewTransactionNav = (id) => api.get(`/portfolio/transactions/${id}/nav-preview`)
+
+/** 家庭级统一风险政策与显式复查档案。 */
+export const portfolioRiskAPI = {
+  snapshot: () => api.get('/portfolio/decision-risk/snapshot').then(r => r.data),
+  savePolicy: (policy, expectedVersion) => api.put('/portfolio/decision-risk/policy', { policy, expected_version: expectedVersion }).then(r => r.data),
+  preview: (fundCode, amount) => api.post('/portfolio/decision-risk/preview', { fund_code: fundCode, amount }).then(r => r.data),
+  saveReview: (fundCode, amount, snapshotId, horizonDays = 30) => api.post('/portfolio/decision-risk/reviews', { fund_code: fundCode, amount, snapshot_id: snapshotId, horizon_days: horizonDays }).then(r => r.data),
+  reviews: () => api.get('/portfolio/decision-risk/reviews').then(r => r.data),
+  linkExecution: (id, transactionId) => api.post(`/portfolio/decision-risk/reviews/${id}/execution`, { transaction_id: transactionId }).then(r => r.data),
+  reviewOutcome: (id) => api.post(`/portfolio/decision-risk/reviews/${id}/outcome`).then(r => r.data),
+}

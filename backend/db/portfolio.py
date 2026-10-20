@@ -9,6 +9,10 @@ from datetime import datetime, date
 
 from db._conn import _get_conn, _row_to_dict
 from db.config import get_config
+from db.portfolio_accounting import (
+    resolve_cash_account, cash_event, frozen_for_account, available_for_account,
+    get_portfolio_performance, list_cash_ledger,
+)
 
 # G-akshare-stats（2026-07-24）：统一 akshare 调用入口，记录统计 + 超时保护
 from services.market.leading_indicators.akshare_utils import call_akshare_with_timeout
@@ -250,26 +254,30 @@ def preview_sell(holding_id: int, shares_to_sell: float) -> dict:
         return {"error": "持仓不存在"}
 
     current_shares = holding.get("shares", 0) or 0
+    if not math.isfinite(shares_to_sell) or shares_to_sell <= 0:
+        return {'error': '卖出份额必须是大于0的有效数值'}
     if shares_to_sell > current_shares:
         return {"error": f"卖出份额 {shares_to_sell} 超过持有份额 {current_shares}"}
 
     current_price = holding.get("current_price") or 0
+    if not math.isfinite(current_price) or current_price <= 0:
+        return {'error': '持仓缺少有效净值，无法预览卖出'}
     cost_price = holding.get("cost_price") or 0
     fund_code = holding["fund_code"]
     fund_name = holding.get("fund_name", fund_code)
 
     expected_proceeds = shares_to_sell * current_price
-    cost_basis = cost_price
+    cost_basis = cost_price * shares_to_sell
     expected_profit_loss = (current_price - cost_price) * shares_to_sell
     expected_profit_rate = (expected_profit_loss / (cost_price * shares_to_sell)) if (cost_price > 0 and shares_to_sell > 0) else 0
     remaining_shares = current_shares - shares_to_sell
     remaining_value = remaining_shares * current_price
 
-    summary = get_portfolio_summary()
+    summary = get_portfolio_snapshot(holding.get('user_id') or 'default')
     total_assets = summary.get("total_assets", 0) or 0
-    total_value_before = summary.get("total_value", 0) or 0
-    total_value_after = total_value_before - expected_proceeds
-    concentration_after = (remaining_value / total_value_after) if total_value_after > 0 else 0
+    household_fund_value = next((f['current_value'] for f in summary['funds'] if f['fund_code'] == fund_code), 0)
+    household_remaining_value = max(0, household_fund_value - expected_proceeds)
+    concentration_after = household_remaining_value / total_assets if total_assets > 0 else 0
 
     warnings = []
 
@@ -315,7 +323,11 @@ def preview_sell(holding_id: int, shares_to_sell: float) -> dict:
         "expected_profit_rate": round(expected_profit_rate, 4),
         "remaining_shares": remaining_shares,
         "remaining_value": round(remaining_value, 2),
-        "total_assets_after": round(total_assets - expected_proceeds, 2),
+        "total_assets_after": round(total_assets, 2),
+        'receivable_after': round(summary.get('receivable_cash',0) + expected_proceeds,2),
+        'valuation_complete': summary['valuation_complete'],
+        'concentration_denominator': 'total_assets',
+        'estimate_only': True,
         "concentration_after": round(concentration_after, 4),
         "warnings": warnings,
     }
@@ -390,6 +402,7 @@ def update_holding(holding_id: int, **fields):
     # 如果更新了 shares 或 cost_price，重算 total_cost
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
         current = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
         if not current:
             conn.close()
@@ -406,6 +419,18 @@ def update_holding(holding_id: int, **fields):
             fields["profit_loss"] = fields["current_value"] - fields["total_cost"]
             fields["profit_rate"] = fields["profit_loss"] / fields["total_cost"] if fields["total_cost"] > 0 else 0
 
+        if current_price is None or current_price <= 0:
+            fields.update(current_value=None, profit_loss=None, profit_rate=None)
+        if any(k in fields for k in ("shares", "cost_price")):
+            confirmed_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM portfolio_transactions WHERE holding_id=? AND (status IN ('confirmed','settled') OR status IS NULL) AND COALESCE(is_hypothetical,0)=0",
+                (holding_id,))]
+            conn.execute("""INSERT INTO portfolio_holding_adjustments
+                (holding_id,user_id,before_json,after_json,included_tx_ids)
+                VALUES (?,?,?,?,?)""", (holding_id, current.get('user_id') or 'default',
+                json.dumps(current, ensure_ascii=False),
+                json.dumps({**current, **fields, 'shares': shares, 'total_cost': fields['total_cost']}, ensure_ascii=False),
+                json.dumps(confirmed_ids)))
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [holding_id]
         conn.execute(f"UPDATE portfolio_holdings SET {set_clause} WHERE id = ?", values)
@@ -419,11 +444,34 @@ def update_holding(holding_id: int, **fields):
         _recalculate_holding(holding_id)
 
 
+def _protect_confirmed_trade_history(conn, *, holding_id=None, user_id=None):
+    """真实成交属于长期账务事实，删除展示记录不得连带销毁。"""
+    scope, value = ('holding_id',holding_id) if holding_id is not None else ('user_id',user_id)
+    if conn.execute(f"""SELECT 1 FROM portfolio_transactions WHERE {scope}=?
+        AND (status IN ('confirmed','settled') OR status IS NULL)
+        AND COALESCE(is_system,0)=0 AND COALESCE(is_hypothetical,0)=0 LIMIT 1""",(value,)).fetchone():
+        raise ValueError('存在真实已确认或已到账交易，必须保留成交、现金及收益历史，不能删除或清空')
+
+
+def _release_pending_reservations(conn, *, holding_id=None, user_id=None):
+    scope, value = ('holding_id',holding_id) if holding_id is not None else ('user_id',user_id)
+    rows=conn.execute(f"SELECT * FROM portfolio_transactions WHERE {scope}=? AND status='pending'",(value,)).fetchall()
+    for row in rows:
+        tx=dict(row)
+        if tx.get('funding_source')=='internal' and tx.get('cash_account'):
+            cash_event(conn,tx.get('user_id') or 'default',tx['cash_account'],'reservation_release',
+                       tx.get('submitted_amount') or 0,tx_id=tx['id'],key=f"tx:{tx['id']}:release",
+                       detail={'reason':'cancel_before_portfolio_delete'})
+
+
 def delete_holding(holding_id: int) -> bool:
     """删除持仓及其交易记录。"""
     # 先查持仓信息用于审计
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        _protect_confirmed_trade_history(conn,holding_id=holding_id)
+        _release_pending_reservations(conn,holding_id=holding_id)
         h = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
         h = dict(h) if h else {}
 
@@ -468,6 +516,9 @@ def get_portfolio_cash_snapshot(user_id: str = "default", account: str | None = 
                 rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id IN (?,?) ORDER BY user_id",
                                     HOUSEHOLD_CASH_ACCOUNTS).fetchall()
             scope = "household_accounts"
+            if account is None and rows and conn.execute("SELECT 1 FROM portfolio_cash_ledger WHERE event_key='cash:default:legacy_retained'").fetchone():
+                rows = list(rows) + list(conn.execute("SELECT user_id,balance FROM portfolio_cash WHERE user_id='default'").fetchall())
+                scope = 'household_accounts_with_legacy'
             if account is None and not rows:
                 rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
                 scope = "legacy_default_cash"
@@ -475,8 +526,27 @@ def get_portfolio_cash_snapshot(user_id: str = "default", account: str | None = 
             rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
             scope = "user_cash"
         accounts = [{"account": r["user_id"], "balance": round(float(r["balance"] or 0), 2)} for r in rows]
-        return {"cash_balance": round(sum(r["balance"] for r in accounts), 2),
-                "cash_accounts": accounts, "cash_scope": scope}
+        scoped_accounts = [account] if account and user_id == 'default' else (list(HOUSEHOLD_CASH_ACCOUNTS) + (['default'] if scope in ('legacy_default_cash','household_accounts_with_legacy') else []) if user_id == 'default' else [user_id])
+        frozen = receivable = 0.0
+        for name in scoped_accounts:
+            held = frozen_for_account(conn, user_id, name)
+            row = conn.execute("""SELECT COALESCE(SUM(amount),0) AS amount
+                FROM portfolio_transactions WHERE user_id=? AND cash_account=?
+                AND transaction_type='sell' AND status='confirmed' AND cash_settlement_state='receivable'""", (user_id,name)).fetchone()
+            due = float(row['amount'])
+            frozen += held
+            receivable += due
+            entry = next((a for a in accounts if a['account'] == name), None)
+            if entry is None and (held or due):
+                entry = {'account': name, 'balance': 0.0}
+                accounts.append(entry)
+            if entry is not None:
+                entry.update(frozen_cash=round(held,2), receivable_cash=round(due,2),
+                             available_cash=round(max(0,entry['balance']-held),2))
+        balance = round(sum(r['balance'] for r in accounts),2)
+        return {"cash_balance": balance, "cash_accounts": accounts, "cash_scope": scope,
+                'available_cash': round(max(0,balance-frozen),2),
+                'frozen_cash': round(frozen,2), 'receivable_cash': round(receivable,2)}
     finally:
         if owned:
             conn.close()
@@ -505,7 +575,13 @@ def get_portfolio_snapshot(user_id: str = "default", account: str | None = None,
         total_cost = sum(float(r.get("total_cost") or 0) for r in active)
         cash = get_portfolio_cash_snapshot(user_id, account, conn=c)
         cash_balance = float(cash.get("cash_balance") or 0)
-        total_assets = total_value + cash_balance
+        receivable = float(cash.get('receivable_cash') or 0)
+        total_assets = total_value + cash_balance + receivable
+        missing = [r for r in active if r.get('current_value') is None or (r.get('current_price') or 0) <= 0]
+        coverage = {'holding_count': len(active), 'valued_count': len(active)-len(missing),
+                    'missing_count': len(missing), 'missing_holding_ids': [r['id'] for r in missing],
+                    'known_cost': round(sum(float(r.get('total_cost') or 0) for r in active if r not in missing),2),
+                    'total_cost': round(total_cost,2)}
 
         grouped = {}
         for row in active:
@@ -533,8 +609,9 @@ def get_portfolio_snapshot(user_id: str = "default", account: str | None = None,
             item["current_value"] = round(value, 2)
             item["total_cost"] = round(item["total_cost"], 2)
             item["shares"] = round(item["shares"], 8)
-            item["profit_loss"] = round(value - item["total_cost"], 2)
-            item["profit_rate"] = item["profit_loss"] / item["total_cost"] if item["total_cost"] else 0.0
+            item['valuation_complete'] = all(r.get('current_value') is not None and (r.get('current_price') or 0) > 0 for r in item['records'])
+            item["profit_loss"] = round(value - item["total_cost"], 2) if item['valuation_complete'] else None
+            item["profit_rate"] = (item["profit_loss"] / item["total_cost"] if item["total_cost"] else 0.0) if item['valuation_complete'] else None
             item["cost_price"] = item["total_cost"] / item["shares"] if item["shares"] else None
             item["invested_pct"] = round(value / total_value * 100, 2) if total_value else 0.0
             item["total_assets_pct"] = round(value / total_assets * 100, 2) if total_assets else 0.0
@@ -559,6 +636,11 @@ def get_portfolio_snapshot(user_id: str = "default", account: str | None = None,
             "total_cost": round(total_cost, 2), "cash_balance": round(cash_balance, 2),
             "cash_accounts": cash.get("cash_accounts", []), "cash_scope": cash.get("cash_scope"),
             "total_assets": round(total_assets, 2),
+            'known_total_value': round(total_value,2), 'known_total_assets': round(total_assets,2),
+            'valuation_complete': not missing, 'valuation_coverage': coverage,
+            'available_cash': cash.get('available_cash',0), 'frozen_cash': cash.get('frozen_cash',0),
+            'receivable_cash': round(receivable,2),
+            'performance': get_portfolio_performance(user_id, account, conn=c, holdings=records),
             "bond_value": round(sum(f["current_value"] for f in funds if str(f.get("fund_category", "")).lower() in {"bond", "bond_index", "bond_pure", "bond_short", "bond_hybrid", "bond_convertible", "convertible_bond"}), 2),
             "concentration_policy": policy,
             "target_equity_ratio": profile["target_equity_ratio"] if profile else None,
@@ -576,12 +658,12 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
     active = snapshot["holdings"]
     total_cost = sum(h.get("total_cost", 0) or 0 for h in active)
     total_value = sum(h.get("current_value", 0) or 0 for h in active)
-    total_profit = total_value - total_cost
-    profit_rate = total_profit / total_cost if total_cost > 0 else 0
+    total_profit = total_value - total_cost if snapshot['valuation_complete'] else None
+    profit_rate = (total_profit / total_cost if total_cost > 0 else 0) if total_profit is not None else None
 
     cash_snapshot = {"cash_balance": snapshot["cash_balance"], "cash_accounts": snapshot["cash_accounts"], "cash_scope": snapshot["cash_scope"]}
     cash_balance = cash_snapshot["cash_balance"]
-    total_assets = total_value + cash_balance
+    total_assets = total_value + cash_balance + snapshot.get('receivable_cash',0)
 
     # 按基金类型分类统计
     fund_type_breakdown = {}
@@ -598,13 +680,17 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
         "fund_count": snapshot["fund_count"],
         "total_cost": round(total_cost, 2),
         "total_value": round(total_value, 2),
-        "total_profit": round(total_profit, 2),
-        "profit_rate": round(profit_rate, 4),
+        "total_profit": round(total_profit, 2) if total_profit is not None else None,
+        "profit_rate": round(profit_rate, 4) if profit_rate is not None else None,
         "cash_balance": round(cash_balance, 2),
         "cash_accounts": cash_snapshot["cash_accounts"],
         "cash_scope": cash_snapshot["cash_scope"],
         "total_assets": round(total_assets, 2),
         "fund_type_breakdown": fund_type_breakdown,
+        'known_total_value': snapshot['known_total_value'], 'known_total_assets': snapshot['known_total_assets'],
+        'valuation_complete': snapshot['valuation_complete'], 'valuation_coverage': snapshot['valuation_coverage'],
+        'available_cash': snapshot['available_cash'], 'frozen_cash': snapshot['frozen_cash'],
+        'receivable_cash': snapshot['receivable_cash'], 'performance': snapshot['performance'],
         "holdings": holdings,
     }
 
@@ -637,36 +723,37 @@ def get_total_cash_balance() -> float:
     return row["total"] if row else 0
 
 
-def add_cash(user_id: str, amount: float) -> float:
-    """增加（或减少）零钱余额。amount 可为负数（支出）。返回新余额。"""
+def _adjust_cash_balance(user_id: str, amount: float, *, replace=False) -> float:
+    if not isinstance(amount,(float,int)) or not math.isfinite(amount):
+        raise ValueError('现金金额必须是有效数值')
+    owner = 'default' if user_id in HOUSEHOLD_CASH_ACCOUNTS else user_id
     conn = _get_conn()
-    conn.execute("""
-        INSERT INTO portfolio_cash (user_id, balance, updated_at)
-        VALUES (?, ?, datetime('now','localtime'))
-        ON CONFLICT(user_id) DO UPDATE SET
-            balance = balance + ?,
-            updated_at = datetime('now','localtime')
-    """, (user_id, amount, amount))
-    conn.commit()
-    row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["balance"] if row else 0
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT balance FROM portfolio_cash WHERE user_id=?',(user_id,)).fetchone()
+        current = float(row['balance'] if row else 0)
+        new_balance = float(amount) if replace else current + float(amount)
+        frozen = frozen_for_account(conn, owner, user_id)
+        if new_balance < -1e-8 or new_balance < frozen - 1e-8:
+            raise ValueError('余额不足或包含待确认交易冻结资金，不能支出')
+        delta = new_balance-current
+        event = 'cash_reconciliation' if replace else ('cash_deposit' if delta >= 0 else 'cash_withdrawal')
+        cash_event(conn,owner,user_id,event,delta,changes_balance=True,
+                   detail={'previous_balance':current,'new_balance':new_balance})
+        conn.commit()
+        return round(new_balance,8)
+    finally:
+        conn.close()
+
+
+def add_cash(user_id: str, amount: float) -> float:
+    """存入/支出记账；不能花费冻结资金。"""
+    return _adjust_cash_balance(user_id,amount)
 
 
 def set_cash_balance(user_id: str, balance: float) -> float:
-    """直接设置零钱余额（覆盖写入）。返回新余额。"""
-    conn = _get_conn()
-    conn.execute("""
-        INSERT INTO portfolio_cash (user_id, balance, updated_at)
-        VALUES (?, ?, datetime('now','localtime'))
-        ON CONFLICT(user_id) DO UPDATE SET
-            balance = ?,
-            updated_at = datetime('now','localtime')
-    """, (user_id, balance, balance))
-    conn.commit()
-    row = conn.execute("SELECT balance FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row["balance"] if row else 0
+    """对账调整只记录增量和前后余额，不回写历史。"""
+    return _adjust_cash_balance(user_id,balance,replace=True)
 
 
 # ── 零钱每日收益 ──────────────────────────────────────
@@ -675,6 +762,7 @@ def set_cash_balance(user_id: str, balance: float) -> float:
 def accrue_cash_interest(user_id: str = "default") -> dict:
     """计算并发放零钱每日收益。每天只会执行一次。返回今日收益信息。"""
     conn = _get_conn()
+    conn.execute('BEGIN IMMEDIATE')
     row = conn.execute("SELECT * FROM portfolio_cash WHERE user_id = ?", (user_id,)).fetchone()
     if not row:
         conn.execute("INSERT INTO portfolio_cash (user_id, balance) VALUES (?, 0)", (user_id,))
@@ -720,6 +808,8 @@ def accrue_cash_interest(user_id: str = "default") -> dict:
             updated_at = datetime('now','localtime')
         WHERE user_id = ?
     """, (new_balance, interest, today, user_id))
+    cash_event(conn,'default' if user_id in HOUSEHOLD_CASH_ACCOUNTS else user_id,user_id,
+               'cash_interest',interest,key=f'cash:{user_id}:interest:{today}')
     conn.commit()
     conn.close()
     return {"interest": interest, "balance": new_balance, "date": today, "already_accrued": False}
@@ -821,13 +911,21 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
                        submitted_amount: float = None,
                        transaction_time: str = None,
                        expected_confirm_date: str = None,
-                       fund_name: str = None, account: str = None) -> int:
+                       fund_name: str = None, account: str = None,
+                       funding_source: str = None, cash_account: str = None) -> int:
     """新增交易记录，返回 transaction_id。自动更新持仓数据。
 
     status: 'pending' | 'confirmed' | None(默认confirmed)
       - pending: 买入时 amount 存入 submitted_amount，卖出时 shares 存入 submitted_shares
       - confirmed: 直接确认，amount/shares/price 存入实际值
     """
+    # 旧版本的位置参数顺序为 amount,shares,price,status,date,holding_id。
+    if isinstance(price, str) and price in ('pending','confirmed','settled') and isinstance(holding_id, str) and isinstance(notes, int):
+        transaction_date, shares, price, status, holding_id, notes = holding_id, transaction_date, shares, price, notes, None
+    if funding_source not in (None, 'legacy', 'internal', 'external'):
+        raise ValueError('非法资金来源')
+    if any(v is not None and (not math.isfinite(v) or v < 0) for v in (amount, shares, price, submitted_shares, submitted_amount)):
+        raise ValueError('交易金额、份额和净值必须为有效非负数')
     # 确定状态
     if status is None:
         status = 'confirmed'
@@ -841,6 +939,8 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
             submitted_amount = submitted_amount or amount
         elif transaction_type in ('sell', 'convert'):
             submitted_shares = submitted_shares or shares
+        elif transaction_type == 'dividend':
+            submitted_amount = submitted_amount or amount
     else:
         actual_amount = amount
         actual_shares = shares
@@ -848,16 +948,54 @@ def create_transaction(fund_code: str, transaction_type: str, amount: float,
 
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        source_holding = conn.execute('SELECT * FROM portfolio_holdings WHERE id=? AND user_id=?', (holding_id, user_id)).fetchone() if holding_id else None
+        if holding_id and (not source_holding or source_holding['fund_code'] != fund_code):
+            raise ValueError('持仓不属于当前用户或基金不一致')
+        source_account = source_holding['account'] if source_holding else account
+        resolved_account = resolve_cash_account(user_id, source_account, cash_account) if funding_source in ('internal','external') or cash_account else None
+        if transaction_type == 'buy' and funding_source == 'internal':
+            required = submitted_amount if status == 'pending' else actual_amount
+            if not required or required > available_for_account(conn, user_id, resolved_account) + 1e-8:
+                raise ValueError('可用现金不足，不能重复使用待确认冻结资金')
+        if transaction_type == 'buy' and funding_source in ('internal','external') and status in ('confirmed','settled'):
+            if not actual_price or not actual_shares or actual_amount <= 0 or abs(actual_shares*actual_price-actual_amount) > max(.02,actual_price*.011):
+                raise ValueError('直接确认买入需要与金额一致的实际净值和份额')
+            if not holding_id:
+                holding_id = _ensure_transaction_holding(conn,fund_code,fund_name,user_id,source_account or cash_account or '花无缺',actual_price)
         cur = conn.execute("""
             INSERT INTO portfolio_transactions
                 (holding_id, user_id, fund_code, fund_name, transaction_type, amount, shares, price,
                  transaction_date, notes, status, submitted_shares, submitted_amount,
-                 transaction_time, expected_confirm_date, account)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 transaction_time, expected_confirm_date, account, funding_source, cash_account, cash_settlement_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (holding_id, user_id, fund_code, fund_name, transaction_type, actual_amount, actual_shares,
               actual_price, transaction_date, notes, status, submitted_shares, submitted_amount,
-              transaction_time, expected_confirm_date, account))
+              transaction_time, expected_confirm_date, source_account or account, funding_source or 'legacy', resolved_account,
+              'pending' if status == 'pending' else 'legacy'))
         tx_id = cur.lastrowid
+        if transaction_type == 'buy' and funding_source == 'internal' and status == 'pending':
+            cash_event(conn, user_id, resolved_account, 'reservation', -submitted_amount,
+                       tx_id=tx_id, key=f'tx:{tx_id}:reservation')
+        if transaction_type == 'buy' and funding_source in ('internal','external') and status in ('confirmed','settled'):
+            if funding_source == 'external':
+                cash_event(conn, user_id, resolved_account, 'external_contribution', actual_amount,
+                           tx_id=tx_id, key=f'tx:{tx_id}:contribution', detail={'funding_source':'external','destination':'direct_investment'})
+            cash_event(conn, user_id, resolved_account, 'buy_payment', -actual_amount,
+                       tx_id=tx_id, key=f'tx:{tx_id}:payment', changes_balance=funding_source == 'internal')
+            conn.execute("UPDATE portfolio_transactions SET cash_settlement_state='paid' WHERE id=?", (tx_id,))
+        if transaction_type == 'sell' and funding_source in ('internal','external') and status in ('confirmed','settled'):
+            cash_event(conn,user_id,resolved_account,'sale_receivable',actual_amount,
+                       tx_id=tx_id,key=f'tx:{tx_id}:receivable')
+            conn.execute("UPDATE portfolio_transactions SET cash_settlement_state='receivable' WHERE id=?",(tx_id,))
+            if status == 'settled':
+                cash_event(conn,user_id,resolved_account,'sale_settlement',actual_amount,
+                           tx_id=tx_id,key=f'tx:{tx_id}:settlement',changes_balance=True)
+                conn.execute("UPDATE portfolio_transactions SET cash_settlement_state='settled' WHERE id=?",(tx_id,))
+        if transaction_type == 'dividend' and funding_source in ('internal','external') and status in ('confirmed','settled'):
+            cash_event(conn,user_id,resolved_account,'cash_dividend',actual_amount,
+                       tx_id=tx_id,key=f'tx:{tx_id}:dividend',changes_balance=True)
+            conn.execute("UPDATE portfolio_transactions SET cash_settlement_state='paid' WHERE id=?",(tx_id,))
         if holding_id and status in ('confirmed', 'settled'):
             _recalculate_holding(holding_id, conn=conn)
         conn.commit()
@@ -970,6 +1108,13 @@ def _recalculate_holding(holding_id: int, conn=None):
             total_shares = float(base_shares)
             total_cost = float(base_total_cost)
 
+        adjustment = conn.execute("SELECT * FROM portfolio_holding_adjustments WHERE holding_id=? ORDER BY id DESC LIMIT 1", (holding_id,)).fetchone()
+        if adjustment:
+            after = json.loads(adjustment['after_json'])
+            total_shares = float(after.get('shares') or 0)
+            total_cost = float(after.get('total_cost') or 0)
+            included = set(json.loads(adjustment['included_tx_ids']))
+            txs = [tx for tx in txs if tx['id'] not in included]
         current_price = holding.get("current_price") or 0
 
         # 按时间逐笔处理，卖出只扣除当时持有份额的平均成本
@@ -1004,8 +1149,7 @@ def _recalculate_holding(holding_id: int, conn=None):
                 total_shares -= shares
                 if abs(total_shares) < 1e-6:
                     total_shares = total_cost = 0.0
-            elif tx["transaction_type"] == "dividend" and amount > 0:
-                total_cost -= amount
+            # 现金分红独立计入收益与现金，不降低剩余持仓的移动平均成本。
 
         if total_shares < 0:
             total_shares = 0
@@ -1201,6 +1345,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
             if source is None or source['fund_code'] != tx['fund_code']:
                 return False
         account = (source['account'] if source else tx.get('account')) or default_account
+        cash_account = resolve_cash_account(user_id, account, tx.get('cash_account')) if tx_type in ('sell','dividend') or (tx_type == 'buy' and tx.get('funding_source') in ('internal','external')) else None
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         actual_price = confirmed_price
         if tx_type == 'buy':
@@ -1208,9 +1353,13 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                              else tx.get('submitted_amount') or tx.get('amount') or 0)
             if actual_amount <= fee:
                 return False
+            if tx.get('funding_source') == 'internal' and actual_amount > available_for_account(conn, user_id, cash_account, tx_id) + 1e-8:
+                return False
             actual_shares = (confirmed_shares if confirmed_shares is not None
                              else round((actual_amount - fee) / confirmed_price, 2))
             if actual_shares <= 0:
+                return False
+            if abs(actual_shares * confirmed_price - (actual_amount-fee)) > max(.02,confirmed_price*.011):
                 return False
             if not holding_id:
                 holding_id = _ensure_transaction_holding(conn, tx['fund_code'], tx.get('fund_name'),
@@ -1235,7 +1384,7 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
                 if abs(converted_shares * target_price - actual_amount) > max(.02, target_price * .011):
                     return False
         else:
-            actual_amount = confirmed_amount if confirmed_amount is not None else tx.get('amount') or 0
+            actual_amount = confirmed_amount if confirmed_amount is not None else tx.get('submitted_amount') or tx.get('amount') or 0
             actual_shares = confirmed_shares
         cur = conn.execute("""
             UPDATE portfolio_transactions SET status='confirmed', amount=?, shares=?, price=?,
@@ -1245,13 +1394,24 @@ def confirm_transaction(tx_id: int, confirmed_price: float,
             return False
         if holding_id:
             _recalculate_holding(holding_id, conn=conn)
-        if tx_type == 'sell' and actual_amount > 0:
-            conn.execute("""
-                INSERT INTO portfolio_cash (user_id, balance, updated_at)
-                VALUES (?, ?, datetime('now','localtime'))
-                ON CONFLICT(user_id) DO UPDATE SET balance=balance+excluded.balance,
-                    updated_at=excluded.updated_at
-            """, (user_id, actual_amount))
+        if tx_type == 'buy' and tx.get('funding_source') in ('internal', 'external'):
+            if tx['funding_source'] == 'external':
+                cash_event(conn, user_id, cash_account, 'external_contribution', actual_amount,
+                           tx_id=tx_id, key=f'tx:{tx_id}:contribution', detail={'funding_source':'external','destination':'direct_investment'})
+            else:
+                cash_event(conn, user_id, cash_account, 'reservation_release', tx.get('submitted_amount') or 0,
+                           tx_id=tx_id, key=f'tx:{tx_id}:release')
+            cash_event(conn, user_id, cash_account, 'buy_payment', -actual_amount,
+                       tx_id=tx_id, key=f'tx:{tx_id}:payment', changes_balance=tx['funding_source'] == 'internal')
+            conn.execute("UPDATE portfolio_transactions SET cash_account=?,cash_settlement_state='paid' WHERE id=?", (cash_account,tx_id))
+        if tx_type == 'sell':
+            cash_event(conn, user_id, cash_account, 'sale_receivable', actual_amount,
+                       tx_id=tx_id, key=f'tx:{tx_id}:receivable')
+            conn.execute("UPDATE portfolio_transactions SET cash_account=?,cash_settlement_state='receivable' WHERE id=?", (cash_account,tx_id))
+        if tx_type == 'dividend':
+            cash_event(conn, user_id, cash_account, 'cash_dividend', actual_amount,
+                       tx_id=tx_id, key=f'tx:{tx_id}:dividend', changes_balance=True)
+            conn.execute("UPDATE portfolio_transactions SET cash_account=?,cash_settlement_state='paid' WHERE id=?", (cash_account,tx_id))
         if tx_type == 'convert':
             target_id = _ensure_transaction_holding(conn, target_fund_code, target_fund_name,
                                                    user_id, account, target_price)
@@ -1456,36 +1616,28 @@ def auto_confirm_due_transactions(as_of_date: str | None = None, user_id: str = 
 
 
 def settle_transaction(tx_id: int) -> bool:
-    """标记卖出交易已到账。"""
+    """应收到账才增加账户可用现金；历史已入现交易仅标记，禁止再次加款。"""
     conn = _get_conn()
     try:
-        tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
-        if not tx:
-            conn.close()
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM portfolio_transactions WHERE id=?', (tx_id,)).fetchone()
+        if not row or row['status'] != 'confirmed' or row['transaction_type'] != 'sell':
             return False
-        tx = dict(tx)
-        if tx.get("status") != "confirmed":
-            conn.close()
-            return False
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("""
-            UPDATE portfolio_transactions SET status = 'settled', settled_at = ? WHERE id = ?
-        """, (now, tx_id))
+        tx = dict(row)
+        if tx.get('cash_settlement_state') == 'receivable':
+            account = resolve_cash_account(tx.get('user_id') or 'default', tx.get('account'), tx.get('cash_account'))
+            cash_event(conn, tx.get('user_id') or 'default', account, 'sale_settlement', tx['amount'],
+                       tx_id=tx_id, key=f'tx:{tx_id}:settlement', changes_balance=True)
+        conn.execute("""UPDATE portfolio_transactions SET status='settled',
+            settled_at=datetime('now','localtime'), cash_settlement_state='settled' WHERE id=? AND status='confirmed'""", (tx_id,))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
-
-    # 审计日志
-    _log_tx_audit(
-        action="settle", tx_id=tx_id, holding_id=tx.get("holding_id"),
-        fund_code=tx.get("fund_code"), fund_name=tx.get("fund_name"),
-        before={"status": "confirmed", "shares": tx.get("shares"),
-                "amount": tx.get("amount"), "price": tx.get("price")},
-        after={"status": "settled", "shares": tx.get("shares"),
-               "amount": tx.get("amount"), "price": tx.get("price")},
-    )
-
+    _log_tx_audit(action='settle', tx_id=tx_id, holding_id=tx.get('holding_id'),
+                  fund_code=tx['fund_code'], before={'status':'confirmed'}, after={'status':'settled'})
     return True
 
 
@@ -1493,6 +1645,7 @@ def delete_transaction(tx_id: int) -> bool:
     """删除交易记录（仅允许 pending 状态）。"""
     conn = _get_conn()
     try:
+        conn.execute('BEGIN IMMEDIATE')
         tx = conn.execute("SELECT * FROM portfolio_transactions WHERE id = ?", (tx_id,)).fetchone()
         if not tx:
             conn.close()
@@ -1502,6 +1655,9 @@ def delete_transaction(tx_id: int) -> bool:
             conn.close()
             return False
 
+        if tx.get('funding_source') == 'internal' and tx.get('cash_account'):
+            cash_event(conn, tx.get('user_id') or 'default', tx['cash_account'], 'reservation_release',
+                       tx.get('submitted_amount') or 0, tx_id=tx_id, key=f'tx:{tx_id}:release', detail={'reason':'cancel'})
         conn.execute("DELETE FROM transaction_tags WHERE transaction_id = ?", (tx_id,))
         conn.execute("DELETE FROM portfolio_transactions WHERE id = ?", (tx_id,))
         conn.commit()
@@ -1765,76 +1921,54 @@ def get_fund_nav_history(fund_code: str, user_id: str = "default", days: int = 3
         return None
 
 
-def refresh_holding_price(holding_id: int) -> dict | None:
-    """
-    刷新单个持仓的最新净值并更新数据库，同时缓存到 fund_nav_history。
-
-    返回: {"nav": 0.57, "date": "2026-05-22", "change_pct": -2.1,
-           "today_profit": -12.34, "today_change_pct": -2.1} 或 None
-    """
-    from services.fund_data_service import save_latest_nav
-
+def _apply_holding_nav(holding_id: int, nav_data: dict) -> dict | None:
+    """联网结束后才取得写锁、重读份额；旧日期或无效价格不能覆盖新账。"""
+    nav, nav_date = nav_data.get('nav'), nav_data.get('date')
+    if not isinstance(nav, (float,int)) or not math.isfinite(nav) or nav <= 0 or not nav_date:
+        return {'skipped': True, 'reason': '净值无效或日期缺失'}
+    try:
+        date.fromisoformat(str(nav_date))
+    except ValueError:
+        return {'skipped': True, 'reason': '净值日期无效'}
     conn = _get_conn()
-    holding = conn.execute("SELECT * FROM portfolio_holdings WHERE id = ?", (holding_id,)).fetchone()
-    if not holding:
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM portfolio_holdings WHERE id=?', (holding_id,)).fetchone()
+        if not row or (row['shares'] or 0) <= 0:
+            return {'skipped': True, 'reason': '持仓不存在或已清仓'}
+        h = dict(row)
+        if str(h.get('price_updated_at') or h.get('last_update') or '')[:10] > str(nav_date):
+            return {'skipped': True, 'reason': '拒绝旧净值覆盖', 'date': nav_date}
+        value = float(h['shares']) * nav
+        cost = float(h.get('total_cost') or 0)
+        profit = value-cost
+        change = nav_data.get('change_pct')
+        if change is not None and (not isinstance(change,(int,float)) or not math.isfinite(change)):
+            change = None
+        today = round(value*change/(100+change),2) if change is not None and change > -100 else None
+        conn.execute("""UPDATE portfolio_holdings SET current_price=?,current_value=?,
+            profit_loss=?,profit_rate=?,today_change_pct=?,today_profit=?,price_updated_at=?,
+            updated_at=datetime('now','localtime') WHERE id=?""",
+            (round(nav,4),round(value,2),round(profit,2),round(profit/cost,4) if cost else None,
+             change,today,nav_date,holding_id))
+        conn.commit()
+    finally:
         conn.close()
+    try:
+        from services.fund_data_service import save_latest_nav
+        save_latest_nav(h['fund_code'],nav,nav_date,change)
+    except Exception as exc:
+        logger.warning('缓存最新净值失败 %s: %s',h['fund_code'],exc)
+    return {**nav_data,'today_profit':today,'today_change_pct':change}
+
+
+def refresh_holding_price(holding_id: int) -> dict | None:
+    """获取行情不持有数据库锁，提交时使用当前份额和成本。"""
+    holding = get_holding(holding_id)
+    if not holding or (holding.get('shares') or 0) <= 0:
         return None
-    holding = dict(holding)
-    fund_code = holding["fund_code"]
-
-    # 跳过已清仓持仓（份额为0），避免无意义的 API 调用
-    if (holding.get("shares") or 0) <= 0:
-        conn.close()
-        return None
-
-    nav_data = fetch_fund_nav(fund_code)
-    if not nav_data:
-        conn.close()
-        return None
-
-    nav = nav_data["nav"]
-    nav_date = nav_data["date"]
-    change_pct = nav_data.get("change_pct")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    shares = holding.get("shares", 0) or 0
-    total_cost = holding.get("total_cost", 0) or 0
-    current_value = shares * nav
-    profit_loss = current_value - total_cost
-    profit_rate = profit_loss / total_cost if total_cost > 0 else 0
-
-    # 今日盈亏 = 份额 × (当前净值 - 昨日净值)，通过涨跌幅反算昨日净值
-    if change_pct is not None and (100 + change_pct) != 0:
-        today_profit = round(current_value * change_pct / (100 + change_pct), 2)
-    else:
-        today_profit = 0
-
-    conn.execute("""
-        UPDATE portfolio_holdings SET
-            current_price = ?,
-            current_value = ?,
-            profit_loss = ?,
-            profit_rate = ?,
-            today_change_pct = ?,
-            today_profit = ?,
-            price_updated_at = ?,
-            updated_at = ?
-        WHERE id = ?
-    """, (round(nav, 4), round(current_value, 2), round(profit_loss, 2),
-          round(profit_rate, 4), change_pct, today_profit, nav_date, now, holding_id))
-    conn.commit()
-    conn.close()
-
-    # 缓存最新净值到本地
-    if nav_date:
-        try:
-            save_latest_nav(fund_code, nav, nav_date, change_pct)
-        except Exception as e:
-            logger.warning(f"缓存最新净值失败 {fund_code}: {e}")
-
-    nav_data["today_profit"] = today_profit
-    nav_data["today_change_pct"] = change_pct
-    return nav_data
+    nav_data = fetch_fund_nav(holding['fund_code'])
+    return _apply_holding_nav(holding_id, nav_data) if nav_data else None
 
 
 def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
@@ -1880,53 +2014,11 @@ def refresh_all_fund_prices(user_id: str = "default") -> list[dict]:
             })
             continue
 
-        nav = nav_data["nav"]
-        nav_date = nav_data["date"]
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        shares = h.get("shares", 0) or 0
-        total_cost = h.get("total_cost", 0) or 0
-        current_value = shares * nav
-        profit_loss = current_value - total_cost
-        profit_rate = profit_loss / total_cost if total_cost > 0 else 0
-
-        conn = _get_conn()
-        change_pct = nav_data.get("change_pct")
-        if change_pct is not None and (100 + change_pct) != 0:
-            today_profit = round(current_value * change_pct / (100 + change_pct), 2)
-        else:
-            today_profit = 0
-
-        conn.execute("""
-            UPDATE portfolio_holdings SET
-                current_price = ?,
-                current_value = ?,
-                profit_loss = ?,
-                profit_rate = ?,
-                today_change_pct = ?,
-                today_profit = ?,
-                price_updated_at = ?,
-                updated_at = ?
-            WHERE id = ?
-        """, (round(nav, 4), round(current_value, 2), round(profit_loss, 2),
-              round(profit_rate, 4), change_pct, today_profit, nav_date, now, h["id"]))
-        conn.commit()
-        conn.close()
-
-        # 缓存最新净值到本地
-        if nav_date:
-            try:
-                save_latest_nav(h["fund_code"], nav, nav_date, change_pct)
-            except Exception as e:
-                logger.warning(f"缓存最新净值失败 {h['fund_code']}: {e}")
-
-        results.append({
-            "fund_code": h["fund_code"],
-            "fund_name": h["fund_name"],
-            "nav": nav,
-            "date": nav_date,
-            "change_pct": change_pct,
-            "today_profit": today_profit,
-        })
+        applied = _apply_holding_nav(h['id'], nav_data)
+        result = {'fund_code': fund_code, 'fund_name': h['fund_name'], **(applied or {})}
+        if not applied or applied.get('skipped'):
+            failed_codes.append(fund_code)
+        results.append(result)
 
     if failed_codes:
         logger.warning(f"批量刷新净值失败基金: {failed_codes}")
@@ -2927,84 +3019,11 @@ def _save_full_snapshot_silent(fund_code: str, data: dict, data_source: str) -> 
 def create_alert(alert_type: str, title: str, content: str = None,
                  severity: str = "info", related_fund_code: str = None,
                  related_fund_name: str = None, source: str = None,
-                 user_id: str = "default", holding_id: int = None) -> int:
-    """新增风险预警，返回 alert_id。24小时内同类型+基金+severity不重复生成。
-
-    去重 key 为 alert_type + related_fund_code + severity，而非 title + severity。
-    原因：估值/跌幅/亏损预警的 title 含动态数值（如"分位 18.5%"、"跌幅 3.25%"），
-    每次扫描数值微变导致 title 不同 → 去重完全失效，同基金同类型一天可生成数十条。
-    改为 alert_type + fund_code + severity 后，同基金同类型同等级 24h 内只生成 1 条，
-    后续触发会更新已有预警的 title/content/created_at，保持数值最新。
-
-    Args:
-        holding_id: 关联持仓ID（P0-3.1 FK 强关联，可选）
-    """
-    conn = _get_conn()
-    try:
-        # P1-3.2：daily_advice_signal 同日同基金去重（更新而非新建）
-        if alert_type == "daily_advice_signal" and related_fund_code:
-            today = datetime.now().strftime("%Y-%m-%d")
-            existing_da = conn.execute("""
-                SELECT id FROM portfolio_alerts
-                WHERE user_id = ? AND alert_type = 'daily_advice_signal'
-                  AND related_fund_code = ?
-                  AND date(created_at) = ?
-                ORDER BY id DESC LIMIT 1
-            """, (user_id, related_fund_code, today)).fetchone()
-            if existing_da:
-                conn.execute("""
-                    UPDATE portfolio_alerts
-                    SET title = ?, content = ?, severity = ?, source = ?
-                    WHERE id = ?
-                """, (title, content, severity, source, existing_da['id']))
-                conn.commit()
-                return existing_da['id']
-
-        # 去重：24小时内同 alert_type + related_fund_code + severity 不重复
-        # 若已存在，更新 title/content/created_at（保留最新数值，避免历史堆积）
-        dedup_key_fund = related_fund_code if related_fund_code else ''
-        existing = conn.execute("""
-            SELECT id FROM portfolio_alerts
-            WHERE user_id = ? AND alert_type = ?
-              AND COALESCE(related_fund_code, '') = ?
-              AND severity = ?
-              AND created_at > datetime('now', '-1 day')
-            ORDER BY id DESC LIMIT 1
-        """, (user_id, alert_type, dedup_key_fund, severity)).fetchone()
-        if existing:
-            # 更新已有预警的最新数值与时间（而非丢弃，确保用户看到最新分位/跌幅）
-            conn.execute("""
-                UPDATE portfolio_alerts
-                SET title = ?, content = ?, source = ?, created_at = datetime('now','localtime')
-                WHERE id = ?
-            """, (title, content, source, existing['id']))
-            conn.commit()
-            return existing['id']
-
-        # 自动推断 holding_id：若未传入但有 related_fund_code，尝试匹配持仓
-        if holding_id is None and related_fund_code:
-            try:
-                h = conn.execute(
-                    "SELECT id FROM portfolio_holdings WHERE fund_code = ? AND user_id = ? LIMIT 1",
-                    (related_fund_code, user_id),
-                ).fetchone()
-                if h:
-                    holding_id = h["id"]
-            except Exception:
-                pass
-
-        cur = conn.execute("""
-            INSERT INTO portfolio_alerts
-                (user_id, alert_type, severity, title, content,
-                 related_fund_code, related_fund_name, source, holding_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, alert_type, severity, title, content,
-              related_fund_code, related_fund_name, source, holding_id))
-        alert_id = cur.lastrowid
-        conn.commit()
-        return alert_id
-    finally:
-        conn.close()
+                 user_id: str = "default", holding_id: int = None, **kwargs) -> int:
+    """统一委托预警生命周期，保持旧调用协议。"""
+    from db.alert_lifecycle import create_alert as create
+    return create(alert_type,title,content,severity,related_fund_code,related_fund_name,
+                  source,user_id,holding_id,**kwargs)
 
 
 def backfill_alert_holding_id() -> int:
@@ -3043,66 +3062,9 @@ def backfill_alert_holding_id() -> int:
 
 def list_alerts(user_id: str = "default", limit: int = 50,
                 unread_only: bool = False) -> list[dict]:
-    """获取预警列表（按 alert_type+fund_code+severity 跨日合并），含可靠性标注。
-
-    P0-1: 跨日合并 — 同基金同类型同 severity 的预警合并为一条，cnt 标注次数。
-          title/content/source/related_fund_name 取最新一条记录。
-    P0-2: 可靠性标注 — 基于 alert_accuracy_stats 回测数据附加 reliability 字段。
-    """
-    conn = _get_conn()
-    try:
-        if unread_only:
-            where = "WHERE user_id = ? AND is_read = 0"
-            params: list = [user_id]
-        else:
-            where = "WHERE user_id = ?"
-            params = [user_id]
-
-        rows = conn.execute(f"""
-            SELECT alert_type, related_fund_code, severity,
-                   COUNT(*) as cnt,
-                   SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread_count,
-                   MIN(is_read) as is_read,
-                   MAX(created_at) as latest_at,
-                   MAX(id) as latest_id,
-                   MIN(created_at) as first_at
-            FROM portfolio_alerts
-            {where}
-            GROUP BY alert_type, COALESCE(related_fund_code, ''), severity
-            ORDER BY latest_at DESC
-            LIMIT ?
-        """, (*params, limit)).fetchall()
-
-        if not rows:
-            return []
-
-        # 批量查最新一条的 title/content/source/related_fund_name/acknowledged_status
-        latest_ids = [r["latest_id"] for r in rows]
-        placeholders = ",".join(["?"] * len(latest_ids))
-        detail_rows = conn.execute(
-            f"SELECT id, title, content, source, related_fund_name, acknowledged_status "
-            f"FROM portfolio_alerts WHERE id IN ({placeholders})",
-            latest_ids,
-        ).fetchall()
-        detail_map = {r["id"]: dict(r) for r in detail_rows}
-
-        result = []
-        for r in rows:
-            r = dict(r)
-            r["id"] = r["latest_id"]
-            d = detail_map.get(r["latest_id"], {})
-            r["title"] = d.get("title", "")
-            r["content"] = d.get("content", "")
-            r["source"] = d.get("source", "")
-            r["related_fund_name"] = d.get("related_fund_name")
-            r["acknowledged_status"] = d.get("acknowledged_status")
-            result.append(r)
-    finally:
-        conn.close()
-
-    # P0-2: 附加可靠性（数据量小，Python 层 join）
-    _enrich_reliability(result)
-    return result
+    """统一委托预警生命周期，保持旧调用协议。"""
+    from db.alert_lifecycle import list_alerts as read
+    return read(user_id,limit,unread_only)
 
 
 def _enrich_reliability(alerts: list[dict]) -> None:
@@ -3178,65 +3140,16 @@ def _calc_reliability(alert_type: str, severity: str, stats: dict | None) -> dic
 
 
 def get_unread_alert_count(user_id: str = "default") -> int:
-    """获取未读预警数量。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) as cnt FROM portfolio_alerts WHERE user_id = ? AND is_read = 0",
-        (user_id,)
-    ).fetchone()
-    conn.close()
-    return row["cnt"] if row else 0
+    """未读计数与活动风险生命周期保持一致。"""
+    from db.alert_lifecycle import get_unread_alert_count as count
+    return count(user_id)
 
 
 def cleanup_old_alerts(user_id: str = "default", days: int = 14,
                        include_unread: bool = True, auto_ignore_info_days: int = 7) -> dict:
-    """清理过期预警，返回各类清理统计。
-
-    优化：
-    - 默认清理 14 天前所有预警（不限已读），避免表无限膨胀
-    - info 级未处理预警 7 天后自动标记为 ignored（不删除，保留回测数据）
-    - 返回 dict 而非 int，便于日志记录各类清理量
-
-    Args:
-        days: 删除 N 天前的预警（默认 14）
-        include_unread: 是否清理未读预警（默认 True，原逻辑仅清已读导致表膨胀）
-        auto_ignore_info_days: info 级未处理预警自动标记 ignored 的天数（默认 7）
-
-    Returns:
-        {"deleted": int, "auto_ignored": int}
-    """
-    conn = _get_conn()
-    try:
-        # 1. 自动忽略：info 级未处理预警超过 N 天，标记为 ignored（保留记录用于回测）
-        auto_ignored = 0
-        if auto_ignore_info_days and auto_ignore_info_days > 0:
-            cur = conn.execute("""
-                UPDATE portfolio_alerts
-                SET acknowledged_status = 'ignored'
-                WHERE user_id = ? AND severity = 'info'
-                  AND acknowledged_status IS NULL
-                  AND created_at < datetime('now', ? || ' days')
-            """, (user_id, f"-{auto_ignore_info_days}"))
-            auto_ignored = cur.rowcount
-            conn.commit()
-
-        # 2. 删除：超过 N 天的预警
-        # include_unread=True 时删除所有（含未读），False 时仅删已读（兼容旧逻辑）
-        if include_unread:
-            cur = conn.execute("""
-                DELETE FROM portfolio_alerts
-                WHERE user_id = ? AND created_at < datetime('now', ? || ' days')
-            """, (user_id, f"-{days}"))
-        else:
-            cur = conn.execute("""
-                DELETE FROM portfolio_alerts
-                WHERE user_id = ? AND is_read = 1 AND created_at < datetime('now', ? || ' days')
-            """, (user_id, f"-{days}"))
-        deleted = cur.rowcount
-        conn.commit()
-        return {"deleted": deleted, "auto_ignored": auto_ignored}
-    finally:
-        conn.close()
+    """统一委托预警生命周期，保持旧调用协议。"""
+    from db.alert_lifecycle import cleanup_old_alerts as cleanup
+    return cleanup(user_id,days,include_unread,auto_ignore_info_days)
 
 
 def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
@@ -3267,25 +3180,9 @@ def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
 
 
 def mark_alert_read(alert_id: int) -> bool:
-    """按列表相同分组标记已读；重复读取已有记录也视为成功。"""
-    conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT alert_type, related_fund_code, severity, user_id "
-            "FROM portfolio_alerts WHERE id = ?", (alert_id,)
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute(
-            "UPDATE portfolio_alerts SET is_read = 1 "
-            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
-            "AND severity = ? AND user_id = ? AND is_read = 0",
-            (row["alert_type"], row["related_fund_code"], row["severity"], row["user_id"])
-        )
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    """统一委托预警生命周期，保持旧调用协议。"""
+    from db.alert_lifecycle import mark_alert_read as mark
+    return mark(alert_id)
 
 
 def delete_alert(alert_id: int) -> bool:
@@ -3703,26 +3600,22 @@ def analyze_trade_patterns(user_id: str = "default") -> dict:
 
 
 def clear_all_portfolio_data(user_id: str = "default"):
-    """删除用户的所有持仓、交易记录、预警和标签。"""
-    # 审计日志（在删除前写入）
-    _log_tx_audit(
-        action="clear_all", operator="user",
-        detail=json.dumps({"user_id": user_id, "scope": "持仓/交易/预警/标签/分析记录/现金"},
-                          ensure_ascii=False),
-    )
-
+    """仅允许清理没有真实已确认成交的组合，历史流水保留。"""
     conn = _get_conn()
-    conn.execute("DELETE FROM portfolio_alerts WHERE user_id = ?", (user_id,))
-    conn.execute("""
-        DELETE FROM transaction_tags WHERE transaction_id IN
-        (SELECT id FROM portfolio_transactions WHERE user_id = ?)
-    """, (user_id,))
-    conn.execute("DELETE FROM portfolio_transactions WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_holdings WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_analysis_records WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM portfolio_cash WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        _protect_confirmed_trade_history(conn,user_id=user_id)
+        _release_pending_reservations(conn,user_id=user_id)
+        conn.execute("DELETE FROM portfolio_alerts WHERE user_id=?",(user_id,))
+        conn.execute("DELETE FROM transaction_tags WHERE transaction_id IN (SELECT id FROM portfolio_transactions WHERE user_id=?)",(user_id,))
+        conn.execute("DELETE FROM portfolio_transactions WHERE user_id=?",(user_id,))
+        conn.execute("DELETE FROM portfolio_holdings WHERE user_id=?",(user_id,))
+        conn.execute("DELETE FROM portfolio_analysis_records WHERE user_id=?",(user_id,))
+        conn.execute("DELETE FROM portfolio_cash WHERE user_id=?",(user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    _log_tx_audit(action='clear_all',operator='user',detail=json.dumps({'user_id':user_id,'scope':'无真实成交组合清理'},ensure_ascii=False))
 
 
 def create_portfolio_analysis_record(analysis_type: str, summary: str,
@@ -4261,19 +4154,16 @@ def get_concentration_analysis(user_id: str = "default") -> dict:
             "warning": True,                   # max_concentration > 0.20
         }
     """
-    holdings = list_holdings(user_id)
-    active = [h for h in holdings if (h.get("shares") or 0) > 0]
-    total_value = sum((h.get("current_value") or 0) for h in active)
-
+    snapshot = get_portfolio_snapshot(user_id)
+    total_value = snapshot['total_value']
     items = []
-    for h in active:
-        value = h.get("current_value") or 0
-        items.append({
-            "fund_code": h.get("fund_code"),
-            "fund_name": h.get("fund_name"),
-            "value": round(value, 2),
-            "pct": round(value / total_value, 4) if total_value > 0 else 0,
-        })
+    for h in snapshot['funds']:
+        value = h['current_value']
+        items.append({'fund_code': h['fund_code'], 'fund_name': h['fund_name'],
+                      'value': round(value,2), 'pct': round(value/snapshot['total_assets'],4) if snapshot['total_assets'] else 0,
+                      'invested_pct': round(value/total_value,4) if total_value else 0,
+                      'total_assets_pct': round(value/snapshot['total_assets'],4) if snapshot['total_assets'] else 0,
+                      'accounts': h['accounts']})
     items.sort(key=lambda x: x["pct"], reverse=True)
 
     max_conc = items[0]["pct"] if items else 0
@@ -4281,8 +4171,25 @@ def get_concentration_analysis(user_id: str = "default") -> dict:
 
     return {
         "holdings": items,
+        'denominator': 'total_assets', 'total_assets': snapshot['total_assets'],
+        'valuation_complete': snapshot['valuation_complete'],
         "max_concentration": max_conc,
         "max_fund": items[0] if items else None,
         "top3_concentration": round(top3_conc, 4),
         "warning": max_conc > 0.20,
     }
+
+
+def preview_transaction_nav(tx_id: int) -> dict:
+    """只获取实际成交T日净值；不确认交易、不变更持仓或现金。"""
+    tx = get_transaction(tx_id)
+    if not tx:
+        raise ValueError('交易不存在')
+    if tx.get('status') != 'pending':
+        raise ValueError('仅待确认交易可获取净值预览')
+    trade_date = _effective_trade_date(tx['transaction_date'], tx.get('transaction_time'))
+    nav = fetch_fund_nav_on_or_before(tx['fund_code'], trade_date)
+    if not nav or not nav.get('nav') or not math.isfinite(float(nav['nav'])) or float(nav['nav']) <= 0 or nav.get('date') != trade_date:
+        raise ValueError(f'{trade_date} 净值尚未披露')
+    return {'tx_id': tx_id, 'confirmed_price': float(nav['nav']), 'nav_date': nav['date'],
+            'trade_date': trade_date, 'nav_source': 'trade_date', 'preview_only': True}

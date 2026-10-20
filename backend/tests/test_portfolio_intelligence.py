@@ -64,8 +64,8 @@ def test_default_risk_metrics():
     result = _default_risk_metrics("测试原因")
     assert result["data_status"] == "degraded"
     assert result["degraded_reason"] == "测试原因"
-    assert result["portfolio_volatility"] == 0
-    assert result["effective_n"] == 1.0
+    assert result["portfolio_volatility"] is None
+    assert result["effective_n"] is None
 
 
 # ── 组合风险度量（模拟数据）─────────────────────────────────

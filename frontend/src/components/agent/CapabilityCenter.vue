@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { computed, onMounted, ref } from 'vue'
 import {
   getCapabilitiesOverview,
@@ -390,15 +391,6 @@ async function runDebug(confirmed = false) {
   } finally {
     debugRunning.value = false
   }
-}
-
-function copyDebugResult() {
-  if (!debugResult.value) return
-  const text = JSON.stringify(debugResult.value.raw ?? debugResult.value.result, null, 2)
-  navigator.clipboard.writeText(text).then(
-    () => showToast('已复制结果', 'success'),
-    () => showToast('复制失败', 'warning'),
-  )
 }
 
 function rerunDebug() {
@@ -937,7 +929,7 @@ onMounted(() => {
                 <Icon :name="debugResultCollapsed ? 'chevron-right' : 'chevron-down'" :size="14" />
                 {{ debugResultCollapsed ? '展开' : '折叠' }}
               </button>
-              <button class="mini-btn" @click="copyDebugResult"><Icon name="copy" :size="14" /> 复制</button>
+              <MarkdownActions v-if="debugResult.success" :content="debugResult.raw?.full_result ?? debugResult.raw?.parsed_result ?? debugResult.result" title="能力调试-分析结果" />
               <button class="mini-btn" @click="rerunDebug"><Icon name="refresh" :size="14" /> 重新运行</button>
             </div>
           </div>

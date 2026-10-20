@@ -1798,6 +1798,14 @@ def init_db():
     # 恢复长时间中断的分析任务、业务记录与日志，避免重启后永久 running。
     cleanup_stale_async_tasks(_conn=conn)
 
+    # 持仓资金账本及活动风险迁移只增结构，不重算历史资产或追扣现金。
+    from db.portfolio_accounting import init_portfolio_accounting_schema
+    from db.alert_lifecycle import init_alert_lifecycle
+    init_portfolio_accounting_schema(conn)
+    init_alert_lifecycle(conn)
+    from db.decision_risk import init_decision_risk_tables
+    init_decision_risk_tables(conn)
+
     conn.commit()
     conn.close()
 

@@ -257,6 +257,10 @@ def calc_recovery_time(index_code: str) -> dict:
         "median_recovery_months": round(median, 1),
         "scenarios": scenarios,
         "sample_count": len(scenarios),
+        "recovered_count": len(recovery_months_list),
+        "ongoing_count": sum(s.get('status') == 'ongoing' for s in scenarios),
+        "unrecovered_ratio": sum(s.get('status') == 'ongoing' for s in scenarios) / len(scenarios),
+        "note": "修复中位数仅来自已恢复周期，不代表未来回本期限；未恢复周期另列",
         "data_source": "index_price_history",
     }
 
@@ -342,155 +346,55 @@ def _find_drawdown_recovery_cycles(closes: list) -> list:
 
 # ── L5：估值分位历史胜率 ──────────────────────
 
-def calc_valuation_win_rate(index_code: str, current_percentile: Optional[float]) -> dict:
-    """估值分位历史胜率分析。
-
-    算法：
-    1. 获取指数历史 PE + 收盘点位
-    2. 计算每个历史日期的 PE 分位（0-100%）
-    3. 对当前分位所在区间，统计"买入后 6/12/24 月正收益概率"
-
-    数据来源：本地 index_price_history 表
-
-    Returns:
-        {
-            "win_rate_6m": float,    # 6个月正收益概率 (0-1)
-            "win_rate_12m": float,   # 12个月正收益概率
-            "win_rate_24m": float,   # 24个月正收益概率
-            "sample_count": int,     # 样本数
-            "current_percentile": float,
-            "data_source": str,
-        }
-    """
-    if current_percentile is None:
-        return {
-            "win_rate_6m": None,
-            "win_rate_12m": None,
-            "win_rate_24m": None,
-            "sample_count": 0,
-            "current_percentile": None,
-            "data_source": "no_percentile",
-        }
-
+def calc_valuation_win_rate(index_code: str, current_percentile: Optional[float], metric_type: str = "市盈率") -> dict:
+    """使用同类估值、当时已知分位和各期限成熟样本；重叠样本不能冒充独立证据。"""
+    from math import sqrt
     from services.index_history_fetcher import get_index_price_history
-
-    history = get_index_price_history(index_code, days=365 * 10)
-
-    if not history or len(history) < 250:
-        return {
-            "win_rate_6m": None,
-            "win_rate_12m": None,
-            "win_rate_24m": None,
-            "sample_count": 0,
-            "current_percentile": current_percentile,
-            "data_source": "insufficient",
-        }
-
-    # 构建日期 → (close, pe) 映射
-    data = []
-    for h in history:
-        if h["close"] and h["close"] > 0 and h["pe_ttm"] and h["pe_ttm"] > 0:
-            data.append({
-                "date": h["trade_date"],
-                "close": h["close"],
-                "pe": h["pe_ttm"],
-            })
-
-    if len(data) < 250:
-        return {
-            "win_rate_6m": None,
-            "win_rate_12m": None,
-            "win_rate_24m": None,
-            "sample_count": 0,
-            "current_percentile": current_percentile,
-            "data_source": "insufficient",
-        }
-
-    # 计算每个日期的 PE 分位（滚动窗口：用之前所有数据）
-    pe_values = [d["pe"] for d in data]
-    for i, d in enumerate(data):
-        if i < 30:
-            d["pe_percentile"] = None
+    metric = 'pb' if metric_type in ('市净率', 'PB', 'pb') else 'pe_ttm'
+    result = dict(sample_count=0, current_percentile=current_percentile, metric_type=metric_type,
+                  data_source='insufficient', note='相邻买入样本存在重叠；历史比例不是未来概率；不足10个成熟样本不发布胜率')
+    for horizon in (6, 12, 24):
+        result.update({f'win_rate_{horizon}m': None, f'sample_count_{horizon}m': 0,
+                       f'independent_count_{horizon}m': 0, f'confidence_interval_{horizon}m': None})
+    if current_percentile is None:
+        result['data_source'] = 'no_percentile'
+        return result
+    history = get_index_price_history(index_code, days=365 * 10) or []
+    data = sorted([h for h in history if h.get('close') and h['close'] > 0], key=lambda h: h['trade_date'])
+    metric_values, samples = [], []
+    for idx, row in enumerate(data):
+        value = row.get(metric)
+        if value is None or value <= 0:
             continue
-        # 用之前所有 PE 计算分位
-        historical_pes = pe_values[:i + 1]
-        sorted_pes = sorted(historical_pes)
-        rank = sum(1 for p in sorted_pes if p <= d["pe"])
-        d["pe_percentile"] = (rank / len(sorted_pes)) * 100
-
-    # 找到与当前分位相近的历史日期（±5%区间）
-    target_min = max(0, current_percentile - 5)
-    target_max = min(100, current_percentile + 5)
-
-    samples = [d for d in data if d.get("pe_percentile") is not None and target_min <= d["pe_percentile"] <= target_max]
-
-    if len(samples) < 10:
-        # 样本不足，扩大区间到 ±10%
-        target_min = max(0, current_percentile - 10)
-        target_max = min(100, current_percentile + 10)
-        samples = [d for d in data if d.get("pe_percentile") is not None and target_min <= d["pe_percentile"] <= target_max]
-
-    if len(samples) < 10:
-        return {
-            "win_rate_6m": None,
-            "win_rate_12m": None,
-            "win_rate_24m": None,
-            "sample_count": len(samples),
-            "current_percentile": current_percentile,
-            "data_source": "insufficient_samples",
-        }
-
-    # 构建 date → index 映射
-    date_to_idx = {d["date"]: i for i, d in enumerate(data)}
-
-    # 计算 6/12/24 月后正收益概率
-    wins_6m = 0
-    wins_12m = 0
-    wins_24m = 0
-    count_6m = 0
-    count_12m = 0
-    count_24m = 0
-
-    for sample in samples:
-        idx = date_to_idx[sample["date"]]
-        sample_close = sample["close"]
-
-        # 6个月后（约126个交易日）
-        future_idx_6m = idx + 126
-        if future_idx_6m < len(data):
-            future_close = data[future_idx_6m]["close"]
-            if future_close > sample_close:
-                wins_6m += 1
-            count_6m += 1
-
-        # 12个月后（约252个交易日）
-        future_idx_12m = idx + 252
-        if future_idx_12m < len(data):
-            future_close = data[future_idx_12m]["close"]
-            if future_close > sample_close:
-                wins_12m += 1
-            count_12m += 1
-
-        # 24个月后（约504个交易日）
-        future_idx_24m = idx + 504
-        if future_idx_24m < len(data):
-            future_close = data[future_idx_24m]["close"]
-            if future_close > sample_close:
-                wins_24m += 1
-            count_24m += 1
-
-    win_rate_6m = wins_6m / count_6m if count_6m > 0 else None
-    win_rate_12m = wins_12m / count_12m if count_12m > 0 else None
-    win_rate_24m = wins_24m / count_24m if count_24m > 0 else None
-
-    return {
-        "win_rate_6m": round(win_rate_6m, 3) if win_rate_6m is not None else None,
-        "win_rate_12m": round(win_rate_12m, 3) if win_rate_12m is not None else None,
-        "win_rate_24m": round(win_rate_24m, 3) if win_rate_24m is not None else None,
-        "sample_count": len(samples),
-        "current_percentile": current_percentile,
-        "data_source": "index_price_history",
-    }
+        metric_values.append(value)
+        if len(metric_values) < 31:
+            continue
+        percentile = sum(v <= value for v in metric_values) / len(metric_values) * 100
+        if abs(percentile - current_percentile) <= 5:
+            samples.append(idx)
+    result['sample_count'] = len(samples)
+    result['data_source'] = 'index_price_history' if samples else 'insufficient_metric_samples'
+    for horizon, delay in ((6, 126), (12, 252), (24, 504)):
+        mature = [idx for idx in samples if idx + delay < len(data)]
+        wins = sum(data[idx + delay]['close'] > data[idx]['close'] for idx in mature)
+        n = len(mature)
+        independent, last = 0, -delay
+        for idx in mature:
+            if idx >= last + delay:
+                independent += 1
+                last = idx
+        result[f'sample_count_{horizon}m'] = n
+        result[f'independent_count_{horizon}m'] = independent
+        if n:
+            # Wilson区间仅描述观测比例；重叠意味着有效独立信息更少。
+            ratio, z = wins / n, 1.96
+            denom = 1 + z * z / n
+            center = (ratio + z * z / (2 * n)) / denom
+            radius = z * sqrt(ratio * (1 - ratio) / n + z * z / (4 * n * n)) / denom
+            result[f'confidence_interval_{horizon}m'] = [round(max(0, center - radius), 4), round(min(1, center + radius), 4)]
+            if n >= 10:
+                result[f'win_rate_{horizon}m'] = round(ratio, 3)
+    return result
 
 
 # ── L2：基金类型分类 ──────────────────────────
