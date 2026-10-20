@@ -1,8 +1,11 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, computed, onMounted } from 'vue'
 import { listAnalysisLogs, getAnalysisLogDetail, evaluateAnalysisLog, listAgentRuns, getAgentRunDetail, listAnalysisAgents } from '../../api'
 
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import { renderMarkdown } from '../../composables/useMarkdown'
+import { toMarkdown } from '../../utils/markdownExport'
 import { useAsyncTask } from '../../composables/useAsyncTask'
 const confirm = ref({visible:false,title:'',message:'',onConfirm:null})
 const analysisAgents = ref([])
@@ -502,7 +505,8 @@ onMounted(async () => {
               </div>
               <div class="detail-section">
                 <h4>分析结果</h4>
-                <div v-if="detailResult" class="detail-result" v-html="detailResult"></div>
+                <MarkdownActions v-if="detailData.status === 'done'" :content="detailResult" :title="detailData.agent_name || '分析报告'" :created-at="detailData.created_at" :record-id="detailData.id" />
+                <div v-if="detailResult" class="detail-result markdown-body" v-html="renderMarkdown(toMarkdown(detailResult))"></div>
                 <p v-else>{{ detailData.status === 'error' ? '本次任务失败，未生成分析结果。' : '暂无分析结果。' }}</p>
               </div>
               <div class="detail-section" v-if="evalFeedback">
@@ -579,6 +583,7 @@ onMounted(async () => {
               </div>
               <div class="detail-section">
                 <h4>专家分析产出</h4>
+                <MarkdownActions v-if="['done', 'completed', 'success'].includes(runDetailData.status)" :content="runDetailData.result" :title="runDetailData.agent_name || '专家分析'" :created-at="runDetailData.created_at" :record-id="runDetailData.id" />
                 <div class="detail-result">{{ runDetailData.result || '(空)' }}</div>
               </div>
               <div class="detail-section" v-if="runDetailData.tool_calls">

@@ -6,6 +6,7 @@
         <p class="page-desc">基于新闻、时事、宏观环境，AI 推断热门板块与投资机会</p>
       </div>
       <div class="header-actions">
+        <MarkdownActions v-if="data && !loading && !data.error && (data.summary || data.sectors?.length)" :content="data" title="市场情报分析师-市场热点情报" :created-at="data.fetched_at" :record-id="data.record_id" />
         <span v-if="data?.fetched_at" class="data-time font-jet">{{ data.fetched_at }}</span>
         <button class="btn-primary btn-ai-action" :disabled="loading" @click="loadData(true)">
           <svg class="icon-refresh" :class="{ spinning: loading }" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -310,6 +311,7 @@
 </template>
 
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, computed, onMounted } from 'vue'
 import { getMarketIntelligenceOverview, triggerMarketIntelligence } from '../../api'
 import { useAsyncTask } from '../../composables/useAsyncTask'
@@ -461,6 +463,7 @@ h3 .title-icon, h4 .title-icon { margin-right: 0.3rem; vertical-align: middle; }
 
 .header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
 }

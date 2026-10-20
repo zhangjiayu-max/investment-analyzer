@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, onMounted } from 'vue'
 import { getRagStats, getRagLogs, getRagIndexStats, getAuthorArticle, runRagEval, runRagEvalSuite, getRagEvalResults } from '../../api'
 
@@ -413,6 +414,7 @@ function scoreColor(score) {
           </button>
         </div>
         <div class="detail-content">
+          <MarkdownActions v-if="selectedResult.label === '分析记录' || selectedResult.type === 'analysis'" :content="selectedResult.body" :title="`检索结果-${selectedResult.title || '分析记录'}`" :created-at="selectedResult.time" :record-id="selectedResult.reference_id" />
           <div class="content-body">{{ selectedResult.body }}</div>
         </div>
       </div>

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../composables/useMarkdown'
 import { copyToClipboard } from '../../composables/useClipboard'
 import Icon from '../ui/Icon.vue'
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import TraceDetail from '../task/TraceDetail.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 
@@ -276,94 +277,6 @@ function copyMessageContent(msg, event) {
   })
 }
 
-function copySpecialistContent(s, event) {
-  const text = s.analysis || ''
-  if (!text) return
-  copyToClipboard(text, {
-    onSuccess: () => showSpecialistCopyFeedback(event),
-  })
-}
-
-function showSpecialistCopyFeedback(event) {
-  const btn = event?.currentTarget
-  if (!btn) return
-  const orig = btn.innerHTML
-  btn.innerHTML = '✓'
-  btn.style.color = '#16a34a'
-  setTimeout(() => { btn.innerHTML = orig; btn.style.color = '' }, 1500)
-}
-
-function exportSpecialistMd(s, msg, event) {
-  const avatar = s.icon || '🤖'
-  const agentName = s.agent || '专家分析'
-  const timestamp = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-  const question = msg?.originalContent || msg?.userMessage || ''
-  const content = s.analysis || ''
-
-  const frontMatter = `---
-title: ${agentName} - 投资分析报告
-agent: ${agentName}
-icon: ${avatar}
-created_at: ${timestamp}
----
-
-`
-  const body = question
-    ? `> **用户问题**：${question}\n\n---\n\n${content}`
-    : content
-
-  const mdContent = frontMatter + body
-  const filename = `${agentName}-分析报告.md`.replace(/[\\/:*?"<>|]/g, '')
-
-  const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-
-  // 反馈提示
-  const btn = event?.currentTarget
-  if (btn) {
-    const orig = btn.innerHTML
-    btn.innerHTML = '✓ 已导出'
-    setTimeout(() => { btn.innerHTML = orig }, 1500)
-  }
-}
-
-function exportAnswerMd(msg, event) {
-  const timestamp = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-  const content = msg.content || ''
-
-  const mdContent = `---
-title: 投资分析报告
-created_at: ${timestamp}
----
-
-${content}`
-  const filename = `投资分析报告.md`.replace(/[\\/:*?"<>|]/g, '')
-
-  const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-
-  const btn = event?.currentTarget
-  if (btn) {
-    const orig = btn.innerHTML
-    btn.innerHTML = '✓ 已导出'
-    setTimeout(() => { btn.innerHTML = orig }, 1500)
-  }
-}
-
 // fallbackCopy 已移除，统一使用 composables/useClipboard.js 的 copyToClipboard
 // 修复移动端 iOS Safari/微信复制失败问题（top:-9999px → top:0, 补 fontSize:16px）
 
@@ -538,12 +451,7 @@ const tradeSuggestions = computed(() => {
               <button v-if="isSpecialistFailed(s)" class="btn-retry-specialist" @click.stop="emit('regenerate', msg)" title="重新生成">
                 <Icon name="refresh" size="12" class="inline-icon" /> 重新生成
               </button>
-              <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制分析内容">
-                <Icon name="clipboard" size="12" class="inline-icon" /> 复制
-              </button>
-              <button class="btn-export-specialist" @click.stop="exportSpecialistMd(s, msg, $event)" title="导出为 Markdown 文件">
-                <Icon name="download" size="12" class="inline-icon" /> 导出 MD
-              </button>
+              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && msg.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
             </div>
           </div>
         </div>
@@ -561,12 +469,7 @@ const tradeSuggestions = computed(() => {
           <div v-if="s.expanded" class="specialist-analysis-wrap">
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
             <div class="specialist-actions">
-              <button class="btn-copy-specialist" @click.stop="copySpecialistContent(s, $event)" title="复制审阅内容">
-                <Icon name="clipboard" size="12" class="inline-icon" /> 复制
-              </button>
-              <button class="btn-export-specialist" @click.stop="exportSpecialistMd(s, msg, $event)" title="导出为 Markdown 文件">
-                <Icon name="download" size="12" class="inline-icon" /> 导出 MD
-              </button>
+              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && msg.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
             </div>
           </div>
         </div>
@@ -776,24 +679,15 @@ const tradeSuggestions = computed(() => {
           </div>
         </div>
       </div>
+      <MarkdownActions
+        v-if="msg.role === 'assistant' && !['streaming', 'failed', 'cancelled', 'timeout'].includes(msg.execution_status) && !isErrorResponse(msg)"
+        :content="msg.content"
+        title="投资分析报告"
+        :created-at="msg.created_at"
+        :record-id="msg.id"
+      />
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
-        <button
-          v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback btn-ai-action"
-          @click="copyMessageContent(msg, $event)"
-        >
-          <Icon name="clipboard" size="14" />
-          <span class="ai-agent-tooltip">复制内容</span>
-        </button>
-        <button
-          v-if="msg.id && msg.execution_status !== 'streaming'"
-          class="btn-msg-feedback btn-ai-action"
-          @click="exportAnswerMd(msg, $event)"
-        >
-          <Icon name="download" size="14" />
-          <span class="ai-agent-tooltip">导出 MD</span>
-        </button>
         <button
           v-if="msg.id && msg.execution_status !== 'streaming'"
           class="btn-msg-feedback btn-ai-action"
@@ -1518,56 +1412,12 @@ const tradeSuggestions = computed(() => {
 .specialist-analysis-wrap {
   position: relative;
 }
-.btn-copy-specialist {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-top: 0.4rem;
-  padding: 0.2rem 0.5rem;
-  font-size: 0.68rem;
-  color: var(--color-text-muted);
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-.btn-copy-specialist:hover {
-  color: var(--color-primary);
-  border-color: var(--color-primary-border);
-  background: var(--color-primary-50);
-}
-.dark .btn-copy-specialist:hover { background: var(--color-primary-bg); }
-
 /* 专家操作按钮组 */
 .specialist-actions {
   display: flex;
   gap: 0.4rem;
   margin-top: 0.4rem;
 }
-.btn-copy-specialist,
-.btn-export-specialist {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.2rem 0.5rem;
-  font-size: 0.68rem;
-  color: var(--color-text-muted);
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-.btn-copy-specialist:hover,
-.btn-export-specialist:hover {
-  color: var(--color-primary);
-  border-color: var(--color-primary-border);
-  background: var(--color-primary-50);
-}
-.dark .btn-copy-specialist:hover,
-.dark .btn-export-specialist:hover { background: var(--color-primary-bg); }
-
 /* 消息反馈按钮 */
 .message-feedback {
   display: flex;

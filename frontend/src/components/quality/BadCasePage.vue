@@ -9,6 +9,7 @@ import { trackFeatureClick, trackFeatureComplete } from '../../composables/useTr
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import AppToast from '../layout/AppToast.vue'
 import { useToast } from '../../composables/useToast'
+import MarkdownActions from '../ui/MarkdownActions.vue'
 
 const { showToast } = useToast()
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -386,6 +387,7 @@ onMounted(async () => {
 
         <div class="detail-section">
           <h4 class="terminal-label">{{ selectedCase.source === 'analysis' ? '分析结果' : '模型输出' }}</h4>
+          <MarkdownActions v-if="selectedCase.source === 'analysis'" :content="selectedCase.output" :title="`${typeLabel(selectedCase)}-原始分析结果`" :created-at="selectedCase.created_at" :record-id="selectedCase.id" />
           <div class="result-preview font-jet">{{ selectedCase.output?.slice(0, 2000) || '无' }}</div>
         </div>
 

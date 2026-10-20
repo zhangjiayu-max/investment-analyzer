@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref, watch, onMounted, computed } from 'vue'
 import { listPanoramaRecords, listDeepDiveRecords, listTradeReviewRecords, getPortfolioAiAnalysisRecord } from '../../api'
 
@@ -218,6 +219,7 @@ onMounted(() => {
           <div class="side-header">
             <span class="side-badge side-badge-a font-jet">A</span>
             <span class="side-date font-jet terminal-label">{{ fmtDate(detailA?.created_at) }}</span>
+            <MarkdownActions :content="detailA?.result_data" :title="`分析对比-A-${typeOptions.find(t => t.value === selectedType)?.label || '分析报告'}`" :created-at="detailA?.created_at" :record-id="detailA?.id" />
           </div>
           <div class="side-section">
             <h4 class="section-title terminal-label">摘要</h4>
@@ -237,6 +239,7 @@ onMounted(() => {
           <div class="side-header">
             <span class="side-badge side-badge-b font-jet">B</span>
             <span class="side-date font-jet terminal-label">{{ fmtDate(detailB?.created_at) }}</span>
+            <MarkdownActions :content="detailB?.result_data" :title="`分析对比-B-${typeOptions.find(t => t.value === selectedType)?.label || '分析报告'}`" :created-at="detailB?.created_at" :record-id="detailB?.id" />
           </div>
           <div class="side-section">
             <h4 class="section-title terminal-label">摘要</h4>
@@ -463,6 +466,7 @@ onMounted(() => {
 
 .side-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
   padding-bottom: var(--space-3);

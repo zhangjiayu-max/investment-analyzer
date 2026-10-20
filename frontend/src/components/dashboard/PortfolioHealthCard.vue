@@ -3,6 +3,7 @@ import EmptyState from '../ui/EmptyState.vue'
 import Icon from '../ui/Icon.vue'
 import AIActionButton from '../ui/AIActionButton.vue'
 import AgentResultCard from '../ui/AgentResultCard.vue'
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { formatMoney, concentrationColor, concentrationIcon } from '../../composables/useDashboardHelpers'
 
 const props = defineProps({
@@ -128,6 +129,7 @@ function allocationValue(allocation, category) {
             <span class="market-tag font-jet">{{ rebalanceResult.market_level }} · {{ rebalanceResult.market_avg_percentile }}%</span>
           </div>
 
+          <MarkdownActions v-if="!rebalanceLoading" :content="rebalanceResult" title="持仓健康度-再平衡建议" />
           <div class="allocation-compare">
             <div class="alloc-row reveal-stagger" v-for="cat in ['equity','bond','index','hybrid','money','qdii','cash']" :key="cat"
               v-show="allocationValue(rebalanceResult.current_allocation, cat) > 0.001 || allocationValue(rebalanceResult.target_allocation, cat) > 0.001">

@@ -1,4 +1,5 @@
 <script setup>
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { computed } from 'vue'
 import { getPercentileColor } from '../../composables/useDashboardHelpers'
 import Icon from '../ui/Icon.vue'
@@ -71,6 +72,7 @@ const verdictMeta = {
       </div>
       <div class="card-header-actions">
         <span v-if="hotTopicsFetchedAt" class="card-data-time meta terminal-label">{{ hotTopicsFetchedAt }}</span>
+        <MarkdownActions v-if="hotspotsAnalysis && !hotspotLoading && !hotspotError" :content="hotspotsAnalysis" title="热点分析专家-今日热门机会" :created-at="hotspotsAnalysis.created_at || hotTopicsFetchedAt" :record-id="hotspotsAnalysis.record_id" />
         <AIActionButton
           :label="hotspotsAnalysis ? '重新分析' : 'AI 分析'"
           agent="热点分析专家"
@@ -372,6 +374,7 @@ const verdictMeta = {
 }
 .card-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
@@ -393,6 +396,7 @@ const verdictMeta = {
 }
 .card-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }

@@ -653,6 +653,7 @@ def api_capabilities_debug(body: dict):
             "tool_name": tool_name,
             "arguments": arguments,
             "result": result_display,
+            "full_result": result_str,  # Markdown 导出使用完整正文，展示仍使用预览。
             "parsed_result": parsed,
             "duration_ms": duration_ms,
             "success": success,

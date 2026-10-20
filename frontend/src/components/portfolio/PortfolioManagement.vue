@@ -1,5 +1,6 @@
 <script setup>
 import PortfolioRiskOverview from './PortfolioRiskOverview.vue'
+import MarkdownActions from '../ui/MarkdownActions.vue'
 import { whatIfScenarios, buildWhatIfRequest } from '../../utils/whatIfScenarios.js'
 import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick, onUnmounted } from 'vue'
 
@@ -1743,6 +1744,18 @@ const maxAbsProfit = computed(() => {
   return Math.max(...profitByFundData.value.map(h => Math.abs(h.profit_loss || 0)), 1)
 })
 
+const modeReportStatus = computed(() => {
+  if (modeLoading.value) return 'running'
+  if (typeof modeResult.value === 'string' && /^(分析失败|轮询失败)[：:]/.test(modeResult.value)) return 'error'
+  return 'done'
+})
+
+const modeReportCreatedAt = computed(() => {
+  const records = [...panoramaRecords.value, ...deepDiveRecords.value, ...tradeReviewRecords.value,
+    ...fundAnalysisRecords.value, ...feeRecords.value, ...correlationRecords.value]
+  return records.find(record => String(record.id) === String(modeRecordId.value))?.created_at || ''
+})
+
 const aiModes = [
   { key: 'panorama', icon: '🔍', label: '全景诊断' },
   { key: 'deepdive', icon: '🔎', label: '单基金分析' },
@@ -2367,14 +2380,6 @@ async function loadTxAnalysis() {
   } catch (e) {
     showToast('加载交易分析失败', 'error')
   }
-}
-
-function copyModeResult() {
-  const text = modeResult.value || ''
-  if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
-    showToast('已复制到剪贴板', 'success')
-  }).catch(() => {})
 }
 
 async function submitFeedback(feedback) {
@@ -3946,6 +3951,7 @@ function txDisplayAmount(tx) {
                 @click="confirmDiverAi"
               />
             </div>
+            <MarkdownActions v-if="!diverAiLoading && !diverAiResult.startsWith('AI 解读生成失败：')" :content="diverAiResult" title="分散度分析师-持仓分散度解读" :record-id="diverAiRecordId" />
             <div v-if="diverAiLoading" class="diver-ai-loading">
               <div class="spinner"></div><span>正在分析...</span>
             </div>
@@ -4120,7 +4126,7 @@ function txDisplayAmount(tx) {
             <div class="result-header">
               <span class="result-title">📊 交易复盘结果</span>
               <span class="result-time">{{ new Date().toLocaleString() }}</span>
-              <button class="btn-feedback" @click="copyModeResult" title="复制内容">📋</button>
+              <MarkdownActions v-if="modeReportStatus === 'done'" :content="modeResult" title="交易复盘分析师-交易复盘" :record-id="modeRecordId" :created-at="modeReportCreatedAt" />
             </div>
             <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
             <div class="result-feedback">
@@ -4265,9 +4271,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'panorama'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="全景诊断分析师"
                 :token-usage="aiTokenUsage"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4313,10 +4321,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'deepdive'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="基金深度分析师"
                 :token-usage="aiTokenUsage"
-                :record-id="modeRecordId"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4356,10 +4365,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'trade-review'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="交易复盘分析师"
                 :token-usage="aiTokenUsage"
-                :record-id="modeRecordId"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4400,10 +4410,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'fund-analysis'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="指定基金分析师"
                 :token-usage="aiTokenUsage"
-                :record-id="modeRecordId"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4438,9 +4449,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'fee'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="费率分析师"
                 :token-usage="aiTokenUsage"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4475,9 +4488,11 @@ function txDisplayAmount(tx) {
             <div v-if="modeResult && aiMode === 'correlation'" class="ai-mode-result">
               <AnalysisCard
                 :result="modeResult"
+                :status="modeReportStatus"
+                :record-id="modeRecordId"
                 agent-name="分散度分析师"
                 :token-usage="aiTokenUsage"
-                :created-at="new Date().toISOString()"
+                :created-at="modeReportCreatedAt"
                 :feedback="feedbackGiven"
                 @feedback="(val) => submitFeedback(val)"
               />
@@ -4571,6 +4586,7 @@ function txDisplayAmount(tx) {
                 {{ whatIfLoading ? '推演中...' : '▶ 开始推演' }}
               </button>
             </div>
+            <MarkdownActions v-if="modeResult && !whatIfLoading && aiMode === 'what-if' && !(typeof modeResult === 'string' && modeResult.startsWith('推演失败:'))" :content="modeResult" title="情景推演分析师-情景推演" :record-id="modeResult?.record_id || modeResult?.id" />
             <div v-if="modeResult && aiMode === 'what-if'" class="ai-mode-result markdown-body" v-html="modeResultHtml"></div>
           </div>
 
