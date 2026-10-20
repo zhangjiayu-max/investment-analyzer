@@ -446,18 +446,141 @@ def delete_holding(holding_id: int) -> bool:
     return deleted
 
 
+HOUSEHOLD_CASH_ACCOUNTS = ("小鱼儿", "花无缺")
+
+
+def get_portfolio_cash_snapshot(user_id: str = "default", account: str | None = None, *, conn=None) -> dict:
+    """只读现金快照；旧库将家庭分账户名称存放于 portfolio_cash.user_id。
+
+    default 是家庭持仓的归属用户，不是两个分账户现金的合计。分账户记录
+    存在时忽略旧 default 余额；其他用户仍只读取自己的现金，不能全表求和。
+    可复用现金流读事务，读取过程不结息、不创建账户。
+    """
+    owned = conn is None
+    conn = conn if conn is not None else _get_conn()
+    try:
+        if user_id == "default":
+            if account is not None:
+                # 持仓 account 是可编辑标签，不能将其当作现金账户归属证明。
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?",
+                                    (account,)).fetchall() if account in HOUSEHOLD_CASH_ACCOUNTS else []
+            else:
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id IN (?,?) ORDER BY user_id",
+                                    HOUSEHOLD_CASH_ACCOUNTS).fetchall()
+            scope = "household_accounts"
+            if account is None and not rows:
+                rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
+                scope = "legacy_default_cash"
+        else:
+            rows = conn.execute("SELECT user_id, balance FROM portfolio_cash WHERE user_id=?", (user_id,)).fetchall()
+            scope = "user_cash"
+        accounts = [{"account": r["user_id"], "balance": round(float(r["balance"] or 0), 2)} for r in rows]
+        return {"cash_balance": round(sum(r["balance"] for r in accounts), 2),
+                "cash_accounts": accounts, "cash_scope": scope}
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_portfolio_snapshot(user_id: str = "default", account: str | None = None, *, conn=None) -> dict:
+    """返回分析使用的统一只读组合快照。
+
+    现金读取沿用家庭账户规则，持仓只保留 ``shares > 0``，并按基金代码聚合
+    跨账户记录。快照同时给出 invested（持仓市值）和 total_assets（含现金）两
+    个分母，避免不同分析阶段各自计算出不同的集中度。传入连接时不会关闭它。
+    """
+    owned = conn is None
+    c = conn if conn is not None else _get_conn()
+    try:
+        if owned:
+            c.execute("BEGIN")
+        rows = c.execute(
+            "SELECT * FROM portfolio_holdings WHERE user_id = ?" +
+            (" AND account = ?" if account else "") + " ORDER BY updated_at DESC, id DESC",
+            (user_id, account) if account else (user_id,),
+        ).fetchall()
+        records = [dict(r) for r in rows]
+        active = [r for r in records if float(r.get("shares") or 0) > 0]
+        total_value = sum(float(r.get("current_value") or 0) for r in active)
+        total_cost = sum(float(r.get("total_cost") or 0) for r in active)
+        cash = get_portfolio_cash_snapshot(user_id, account, conn=c)
+        cash_balance = float(cash.get("cash_balance") or 0)
+        total_assets = total_value + cash_balance
+
+        grouped = {}
+        for row in active:
+            code = row.get("fund_code") or row.get("fund_name") or "unknown"
+            category = row.get("fund_category") or "equity"
+            if category == "index" and "债" in (row.get("fund_name") or ""):
+                category = "bond_index"
+            item = grouped.setdefault(code, {
+                **row,
+                "fund_code": row.get("fund_code", ""),
+                "fund_name": row.get("fund_name") or row.get("fund_code", ""),
+                "fund_category": category,
+                "current_value": 0.0, "total_cost": 0.0, "shares": 0.0,
+                "accounts": [], "records": [],
+            })
+            item["current_value"] += float(row.get("current_value") or 0)
+            item["total_cost"] += float(row.get("total_cost") or 0)
+            item["shares"] += float(row.get("shares") or 0)
+            item["accounts"].append({"account": row.get("account"), "current_value": round(float(row.get("current_value") or 0), 2)})
+            item["records"].append(row)
+
+        funds = []
+        for item in grouped.values():
+            value = item["current_value"]
+            item["current_value"] = round(value, 2)
+            item["total_cost"] = round(item["total_cost"], 2)
+            item["shares"] = round(item["shares"], 8)
+            item["profit_loss"] = round(value - item["total_cost"], 2)
+            item["profit_rate"] = item["profit_loss"] / item["total_cost"] if item["total_cost"] else 0.0
+            item["cost_price"] = item["total_cost"] / item["shares"] if item["shares"] else None
+            item["invested_pct"] = round(value / total_value * 100, 2) if total_value else 0.0
+            item["total_assets_pct"] = round(value / total_assets * 100, 2) if total_assets else 0.0
+            funds.append(item)
+        funds.sort(key=lambda x: x["current_value"], reverse=True)
+
+        profile = c.execute(
+            "SELECT max_single_position_pct, target_equity_ratio, monthly_expense, fund_usage, liquidity_needs FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        max_single = profile["max_single_position_pct"] if profile and profile["max_single_position_pct"] is not None else None
+        if max_single is not None and float(max_single) <= 1:
+            max_single = float(max_single) * 100
+        policy = {"max_single_position_pct": round(float(max_single), 2) if max_single is not None else None,
+                  "denominator": "total_assets", "source": "user_profiles" if max_single is not None else "unset"}
+        return {
+            "user_id": user_id, "account": account, "as_of": datetime.now().isoformat(timespec="seconds"),
+            "records": active, "record_count": len(records), "active_count": len(active), "holdings": active, "all_records": records,
+            "price_dates": {str(r.get("id")): r.get("price_updated_at") or r.get("last_update") or None for r in active},
+            "funds": funds, "fund_count": len(funds), "holding_count": len(active),
+            "total_value": round(total_value, 2), "invested_value": round(total_value, 2),
+            "total_cost": round(total_cost, 2), "cash_balance": round(cash_balance, 2),
+            "cash_accounts": cash.get("cash_accounts", []), "cash_scope": cash.get("cash_scope"),
+            "total_assets": round(total_assets, 2),
+            "bond_value": round(sum(f["current_value"] for f in funds if str(f.get("fund_category", "")).lower() in {"bond", "bond_index", "bond_pure", "bond_short", "bond_hybrid", "bond_convertible", "convertible_bond"}), 2),
+            "concentration_policy": policy,
+            "target_equity_ratio": profile["target_equity_ratio"] if profile else None,
+            "kyc_context": {key: profile[key] for key in ("monthly_expense", "fund_usage", "liquidity_needs")} if profile else {},
+        }
+    finally:
+        if owned:
+            c.close()
+
+
 def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict:
     """获取持仓汇总：总市值、总成本、总盈亏、收益率、现金余额、总资产。排除已清仓记录。可选按账号筛选。"""
-    holdings = list_holdings(user_id, account=account)
-    active = [h for h in holdings if (h.get("shares") or 0) > 0]
+    snapshot = get_portfolio_snapshot(user_id, account)
+    holdings = snapshot["all_records"]
+    active = snapshot["holdings"]
     total_cost = sum(h.get("total_cost", 0) or 0 for h in active)
     total_value = sum(h.get("current_value", 0) or 0 for h in active)
     total_profit = total_value - total_cost
     profit_rate = total_profit / total_cost if total_cost > 0 else 0
 
-    # 现金余额
-    cash_info = get_cash_balance(user_id)
-    cash_balance = cash_info.get("balance", 0) if cash_info else 0
+    cash_snapshot = {"cash_balance": snapshot["cash_balance"], "cash_accounts": snapshot["cash_accounts"], "cash_scope": snapshot["cash_scope"]}
+    cash_balance = cash_snapshot["cash_balance"]
     total_assets = total_value + cash_balance
 
     # 按基金类型分类统计
@@ -472,11 +595,14 @@ def get_portfolio_summary(user_id: str = "default", account: str = None) -> dict
 
     return {
         "holding_count": len(active),
+        "fund_count": snapshot["fund_count"],
         "total_cost": round(total_cost, 2),
         "total_value": round(total_value, 2),
         "total_profit": round(total_profit, 2),
         "profit_rate": round(profit_rate, 4),
         "cash_balance": round(cash_balance, 2),
+        "cash_accounts": cash_snapshot["cash_accounts"],
+        "cash_scope": cash_snapshot["cash_scope"],
         "total_assets": round(total_assets, 2),
         "fund_type_breakdown": fund_type_breakdown,
         "holdings": holdings,
@@ -2293,6 +2419,9 @@ def classify_fund_category(fund_name: str, fund_type: str = "", fund_code: str =
         return "convertible_bond"
 
     # 4) 债券基金 — 纯债
+    # 债券指数必须在通用“指数”及债券关键词前明确归类，避免被当作权益指数。
+    if ("指数" in name or "ETF" in name) and any(kw in name for kw in ("债", "国债", "政金", "中债")):
+        return "bond_index"
     if any(kw in name for kw in ("纯债", "短债", "长债", "中短债", "中长债", "利率债", "信用债")):
         return _refine_bond_subcategory("bond_pure", ft)
     if any(kw in name for kw in ("债券", "债基", "国债", "政金")):
@@ -2932,6 +3061,8 @@ def list_alerts(user_id: str = "default", limit: int = 50,
         rows = conn.execute(f"""
             SELECT alert_type, related_fund_code, severity,
                    COUNT(*) as cnt,
+                   SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread_count,
+                   MIN(is_read) as is_read,
                    MAX(created_at) as latest_at,
                    MAX(id) as latest_id,
                    MIN(created_at) as first_at
@@ -2958,6 +3089,7 @@ def list_alerts(user_id: str = "default", limit: int = 50,
         result = []
         for r in rows:
             r = dict(r)
+            r["id"] = r["latest_id"]
             d = detail_map.get(r["latest_id"], {})
             r["title"] = d.get("title", "")
             r["content"] = d.get("content", "")
@@ -3135,44 +3267,47 @@ def get_alert_history(alert_id: int, days: int = 30) -> list[dict]:
 
 
 def mark_alert_read(alert_id: int) -> bool:
-    """标记预警为已读（同时标记同标题+severity的所有未读预警）。"""
+    """按列表相同分组标记已读；重复读取已有记录也视为成功。"""
     conn = _get_conn()
-    # 先获取该 alert 的 title+severity
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT alert_type, related_fund_code, severity, user_id "
+            "FROM portfolio_alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE portfolio_alerts SET is_read = 1 "
+            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
+            "AND severity = ? AND user_id = ? AND is_read = 0",
+            (row["alert_type"], row["related_fund_code"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        return True
+    finally:
         conn.close()
-        return False
-    cur = conn.execute(
-        "UPDATE portfolio_alerts SET is_read = 1 WHERE title = ? AND severity = ? AND user_id = ? AND is_read = 0",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
 
 
 def delete_alert(alert_id: int) -> bool:
-    """删除预警（同时删除同标题+severity的所有预警）。"""
+    """按列表相同分组删除预警，避免同名基金提示被误删。"""
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT title, severity, user_id FROM portfolio_alerts WHERE id = ?",
-        (alert_id,)
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT alert_type, related_fund_code, severity, user_id "
+            "FROM portfolio_alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if not row:
+            return False
+        cur = conn.execute(
+            "DELETE FROM portfolio_alerts "
+            "WHERE alert_type = ? AND COALESCE(related_fund_code, '') = COALESCE(?, '') "
+            "AND severity = ? AND user_id = ?",
+            (row["alert_type"], row["related_fund_code"], row["severity"], row["user_id"])
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
         conn.close()
-        return False
-    cur = conn.execute(
-        "DELETE FROM portfolio_alerts WHERE title = ? AND severity = ? AND user_id = ?",
-        (row["title"], row["severity"], row["user_id"])
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
 
 
 def update_alert_acknowledgment(alert_id: int, status: str) -> bool:
@@ -3252,8 +3387,9 @@ def get_transaction_tags(transaction_id: int) -> list[str]:
 
 def get_portfolio_diversification(user_id: str = "default") -> dict:
     """分析持仓分散度：基金数量、指数分布、类型分布。排除已清仓记录。"""
-    holdings = list_holdings(user_id)
-    active = [h for h in holdings if (h.get("shares") or 0) > 0]
+    snapshot = get_portfolio_snapshot(user_id)
+    active = snapshot["holdings"]
+    funds = snapshot["funds"]
 
     total_value = sum(h.get("current_value", 0) or 0 for h in active)
     total_cost = sum(h.get("total_cost", 0) or 0 for h in active)
@@ -3268,35 +3404,35 @@ def get_portfolio_diversification(user_id: str = "default") -> dict:
     # 基金类型分布（通过 fund_code 前几位判断）
     # 股票型/混合型/债券型/指数型/货币型
     type_dist = {"股票型": 0, "混合型": 0, "债券型": 0, "指数型": 0, "货币型": 0, "其他": 0}
-    for h in active:
-        code = h.get("fund_code", "")
+    for h in funds:
         val = h.get("current_value", 0) or 0
-        # 简单分类：以 fund_name 或 index_name 判断
-        name = (h.get("fund_name", "") or "") + (h.get("index_name", "") or "")
-        if "指数" in name or "ETF" in name or "ETF联接" in name:
-            type_dist["指数型"] = type_dist.get("指数型", 0) + val
-        elif "债" in name or "纯债" in name or "信用债" in name:
-            type_dist["债券型"] = type_dist.get("债券型", 0) + val
-        elif "货" in name or "货币" in name:
-            type_dist["货币型"] = type_dist.get("货币型", 0) + val
-        elif "混合" in name or "灵活" in name:
-            type_dist["混合型"] = type_dist.get("混合型", 0) + val
-        elif "股" in name or "股票" in name:
-            type_dist["股票型"] = type_dist.get("股票型", 0) + val
+        cat = str(h.get("fund_category") or "equity").lower()
+        if cat in {"bond", "bond_index", "bond_pure", "bond_short", "bond_hybrid", "bond_convertible", "convertible_bond"}:
+            type_dist["债券型"] += val
+        elif cat in {"money", "money_market"}:
+            type_dist["货币型"] += val
+        elif cat in {"hybrid", "bond_hybrid"}:
+            type_dist["混合型"] += val
+        elif cat in {"index"}:
+            type_dist["指数型"] += val
+        elif cat in {"equity", "stock"}:
+            type_dist["股票型"] += val
         else:
             type_dist["其他"] = type_dist.get("其他", 0) + val
 
     # 仓位集中度：最大持仓占比
     max_holding_pct = 0
     if total_value > 0:
-        max_value = max((h.get("current_value", 0) or 0) for h in active)
+        max_value = max((h.get("current_value", 0) or 0) for h in funds)
         max_holding_pct = round(max_value / total_value * 100, 2)
 
     return {
         "holding_count": len(active),
+        "fund_count": len(funds),
         "total_cost": round(total_cost, 2),
         "total_value": round(total_value, 2),
         "max_holding_pct": max_holding_pct,
+        "max_holding_pct_denominator": "invested_value",
         "index_distribution": {k: round(v, 2) for k, v in sorted(index_dist.items(), key=lambda x: -x[1])},
         "type_distribution": {k: round(v, 2) for k, v in type_dist.items() if v > 0},
     }

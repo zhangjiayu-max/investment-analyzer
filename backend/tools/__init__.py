@@ -5,6 +5,8 @@ import logging
 import re
 import html as html_mod
 import requests as req
+from datetime import date, timedelta
+from services.index.index_history_fetcher import get_index_price_history
 
 from db import (
     list_valuation_indexes,
@@ -54,7 +56,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "query_online_valuation",
-            "description": "主动查询在线最新估值（akshare中证官方，实时数据）。当库内估值数据超过7天未更新、或用户明确要求查最新数据时调用。注意：query_valuation优先用库内数据，只有数据明显过时时才调用此工具查最新。",
+            "description": "主动补查在线估值（中证官方/天天基金）。当数据超过3天或用户明确要求最新数据时调用。必须核对每个指标的来源日期；过期或日期未知只能作历史参考。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -349,6 +351,8 @@ TOOLS = [
                         "description": "返回条数",
                         "default": 20,
                     },
+                    "start_date": {"type": "string", "description": "可选起始日期 YYYY-MM-DD；不指定表示全部历史"},
+                    "end_date": {"type": "string", "description": "可选截止日期 YYYY-MM-DD；最多统计到今天"},
                 },
                 "required": [],
             },
@@ -1085,7 +1089,19 @@ def _validate_tool_result(name: str, result_str: str) -> tuple:
 
     # 估值类工具：校验 PE/PB/分位 范围
     if name in _VALUATION_TOOLS:
-        items = data if isinstance(data, list) else [data]
+        def metric_items(value, inherited=None):
+            inherited = inherited or {}
+            if isinstance(value, list):
+                for child in value:
+                    yield from metric_items(child, inherited)
+            elif isinstance(value, dict):
+                item = {**inherited, **value}
+                yield item
+                units = {k: item[k] for k in ("percentile_unit", "percentile_scale") if k in item}
+                for key in ("metrics", "indexes", "results", "data"):
+                    if isinstance(value.get(key), (list, dict)):
+                        yield from metric_items(value[key], units)
+        items = metric_items(data)
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -1107,16 +1123,15 @@ def _validate_tool_result(name: str, result_str: str) -> tuple:
                             return False, f"PB 值 {pb_f} 超出合理范围 {_PB_RANGE}"
                     except (ValueError, TypeError):
                         return False, f"PB 值非数值: {pb_val}"
-            for pct_key in ("percentile", "pe_percentile", "pb_percentile"):
+            for pct_key in ("percentile", "pe_percentile", "pb_percentile", "ps_percentile"):
                 pct_val = item.get(pct_key)
                 if pct_val is not None:
                     try:
                         pct_f = float(pct_val)
-                        # 分位支持 0-1 和 0-100 两种格式
-                        if pct_f > 1.5:
-                            pct_f = pct_f / 100.0
-                        if not (0 <= pct_f <= 1):
-                            return False, f"分位值 {pct_val} 超出 [0,1] 范围"
+                        # 工具契约为百分数点；ratio 只在明确标注时允许。
+                        limit = 1 if item.get("percentile_scale") == 1 or item.get("percentile_unit") == "ratio" else 100
+                        if not (0 <= pct_f <= limit):
+                            return False, f"分位值 {pct_val} 超出 [0,{limit}] 范围"
                     except (ValueError, TypeError):
                         return False, f"分位值非数值: {pct_val}"
 
@@ -1237,6 +1252,25 @@ def _inject_tool_warning(name: str, arguments: dict, result_str: str) -> str:
 def execute_tool(name: str, arguments: dict, trace_id: str = "",
                  timeout: int = 30, conversation_id: int = None, message_id: int = None,
                  agent_name: str = None, user_query: str = None) -> str:
+    """同一消息内共享并发只读调用；写操作始终独立执行。"""
+    from copy import deepcopy
+    from agent.infra.tool_dedup import is_cacheable
+    from agent.infra.tool_singleflight import shared_tool_calls
+    from db._conn import DB_PATH
+    args = deepcopy(arguments or {})
+    def run():
+        return _execute_tool_cached(name, args, trace_id, timeout, conversation_id,
+                                    message_id, agent_name, user_query)
+    if not trace_id or not is_cacheable(name, args):
+        return run()
+    key = (str(DB_PATH), trace_id, conversation_id, message_id, name,
+           json.dumps(args, sort_keys=True, ensure_ascii=False, default=str))
+    return shared_tool_calls.run(key, run, _TOOL_TIMEOUT_OVERRIDES.get(name, timeout))
+
+
+def _execute_tool_cached(name: str, arguments: dict, trace_id: str = "",
+                 timeout: int = 30, conversation_id: int = None, message_id: int = None,
+                 agent_name: str = None, user_query: str = None) -> str:
     """执行工具调用，返回 JSON 字符串结果。
 
     带超时保护、结果校验、审计日志和结果缓存（仅对数据查询类工具）。
@@ -1261,6 +1295,10 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
 
     t0 = _time.time()
     error_category = "none"
+    from db._conn import DB_PATH
+    # 上下文不混入实际工具参数；检索日志和私人持仓不跨消息复用。
+    _cache_arguments = {"arguments": arguments or {},
+                        "scope": [str(DB_PATH), trace_id, conversation_id, message_id]}
 
     try:
         _ok, _err, arguments = _validate_tool_arguments(name, arguments or {})
@@ -1275,7 +1313,7 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
     try:
         from agent.tool_dedup import get_tool_call_cache
         _cache = get_tool_call_cache()
-        _cached = _cache.get(name, arguments or {})
+        _cached = _cache.get(name, _cache_arguments)
         if _cached is not None:
             _cache_hit = True
             logger.debug(f"[tool_cache] 命中 {name} (trace={trace_id})")
@@ -1377,7 +1415,7 @@ def execute_tool(name: str, arguments: dict, trace_id: str = "",
         try:
             from agent.tool_dedup import get_tool_call_cache
             _cache = get_tool_call_cache()
-            _cache.set(name, arguments or {}, result)
+            _cache.set(name, _cache_arguments, result)
         except Exception as _ce:
             logger.debug(f"工具缓存写入异常 {name}: {_ce}")
 
@@ -1395,10 +1433,8 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
         return _query_online_valuation_impl(arguments, trace_id=trace_id, conversation_id=conversation_id,
                                             message_id=message_id, agent_name=agent_name, user_query=user_query)
     elif name == "search_knowledge":
-        arguments["trace_id"] = trace_id
-        arguments["conversation_id"] = conversation_id
-        arguments["message_id"] = message_id
-        return _search_knowledge(arguments)
+        return _search_knowledge({**arguments, "trace_id": trace_id,
+                                  "conversation_id": conversation_id, "message_id": message_id})
     elif name == "get_bond_temperature":
         return _get_bond_temperature()
     elif name == "get_valuation_list":
@@ -1523,7 +1559,17 @@ def _execute_tool_impl(name: str, arguments: dict, trace_id: str = "",
     elif name == "eastmoney_macro_data":
         return _eastmoney_macro_data(arguments)
     elif name == "eastmoney_finance_data":
-        return _eastmoney_finance_data(arguments)
+        raw = _eastmoney_finance_data(arguments)
+        try:
+            from services.market.quote_evidence import extract_market_observations
+            data = json.loads(raw)
+            observations = extract_market_observations(data)
+            if observations and isinstance(data, dict):
+                # 摘要优先展示，原响应完整保留，字段含时间与来源列。
+                return json.dumps({"market_observations": observations, **data}, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+        return raw
     else:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
@@ -1783,393 +1829,98 @@ def _is_index_name_match(query: str, name: str) -> bool:
     return False
 
 
+def _matched_valuation_indexes(index_name):
+    """主表和图片来源都可发现；名称匹配沿用现有防误匹配规则。"""
+    from db.valuations import list_available_valuation_indexes
+    catalog = list_available_valuation_indexes()
+    names = dict((row['index_code'], row['index_name']) for row in catalog)
+    aliases = _INDEX_NAME_ALIASES.get(index_name, [])
+    matched = [{'code': code, 'name': name} for code, name in names.items()
+               if code == index_name or _is_index_name_match(index_name, name)
+               or any(_is_index_name_match(alias, name) for alias in aliases)]
+    if not matched:
+        matched = [{'code': row['index_code'], 'name': row['index_name']}
+                   for row in search_indexes_by_keyword(index_name)]
+    return catalog, matched[:3]
+
+
+def _valuation_result(code, name, rows, missing_types=()):
+    from services.valuation.context import metric_payload
+    result = {'index_code': code, 'index_name': name, 'metrics': [metric_payload(row) for row in rows]}
+    expired = [row for row in result['metrics'] if row['is_expired']]
+    if not rows:
+        result.update(data_status='unavailable', degraded_hint='估值数据缺失，不能编造估值或给出当前买卖结论。')
+    elif expired or missing_types:
+        result.update(data_status='historical_only' if len(expired) == len(rows) else 'partial',
+                      missing_metrics=list(missing_types),
+                      degraded_hint='部分估值缺失、过期或日期未知；对应指标仅供历史参考，降低结论置信度。')
+    else:
+        result['data_status'] = 'available'
+    return result
+
+
 def _query_valuation(args: dict, trace_id: str = "", conversation_id: int = None,
                      message_id: int = None, agent_name: str = None, user_query: str = None) -> str:
-    """查询指定指数的估值数据。"""
-    index_name = args.get("index_name", "")
-
-    # 先用关键词搜索匹配的指数
-    all_indexes = list_valuation_indexes()
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    # 匹配逻辑：使用 _is_index_name_match 修复 P0 索引名称误匹配
-    # （"恒生科技"误匹配"恒生生物科技指数"、"消费红利"误匹配"中证红利"）
-    matched = []
-    seen_codes = set()
-    for code, name in unique_indexes.items():
-        if code in seen_codes:
-            continue
-        if _is_index_name_match(index_name, name):
-            seen_codes.add(code)
-            matched.append({"code": code, "name": name})
-
+    """统一比较多来源真实估值日期；不因在线返回成功就宣称最新。"""
+    from db.valuations import _query_ttfund_valuation, _run_with_safe_timeout
+    from db.valuation_sources import mark_freshness
+    index_name = args.get('index_name', '')
+    if not index_name:
+        return json.dumps({'error': 'index_name 不能为空'}, ensure_ascii=False)
+    catalog, matched = _matched_valuation_indexes(index_name)
     if not matched:
-        # 尝试数据库关键词搜索
-        db_results = search_indexes_by_keyword(index_name)
-        for r in db_results:
-            if r["index_code"] not in seen_codes:
-                seen_codes.add(r["index_code"])
-                matched.append({"code": r["index_code"], "name": r["index_name"]})
-
-    # 别名兜底：持仓基金跟踪指数名称与库内名称不一致时（如"畜牧养殖"→"中证畜牧"）
-    if not matched:
-        aliases = _INDEX_NAME_ALIASES.get(index_name, [])
-        for alias in aliases:
-            for code, name in unique_indexes.items():
-                if code in seen_codes:
-                    continue
-                if _is_index_name_match(alias, name) or alias == name:
-                    seen_codes.add(code)
-                    matched.append({"code": code, "name": name, "via_alias": alias})
-                    break
-
-    if not matched:
-        # 兜底：尝试天天基金 API
-        try:
-            from mcp.ttfund_client import get_ttfund_client
-            client = get_ttfund_client()
-            raw = client._invoke("fund_index", {"index_id": index_name, "query_scope": "valuation"})
-            if isinstance(raw, dict) and raw.get("success"):
-                data = raw.get("data", {})
-                v = data.get("valuation", {})
-                profile = data.get("index_profile", {})
-                if v:
-                    result = {
-                        "index_name": profile.get("index_name", index_name),
-                        "index_code": profile.get("index_code", ""),
-                        "source": "天天基金",
-                        "pe_ttm": v.get("pe_ttm"),
-                        "pe_percentile_10y": v.get("pe_percentile_10y"),
-                        "pb": v.get("pb"),
-                        "pb_percentile_10y": v.get("pb_percentile_10y"),
-                        "roe": v.get("roe"),
-                        # P1 修复（指标混淆）：明确标注各字段对应的指标类型
-                        "metric_types": {
-                            "pe_ttm": "市盈率TTM", "pe_percentile_10y": "市盈率TTM十年百分位",
-                            "pb": "市净率", "pb_percentile_10y": "市净率十年百分位",
-                            "roe": "净资产收益率",
-                        },
-                    }
-                    return json.dumps({"ok": True, "indexes": [result]}, ensure_ascii=False)
-        except Exception as e:
-            logger.warning(f"天天基金估值兜底失败 {index_name}: {e}")
-
-        return json.dumps({"error": f"未找到'{index_name}'相关的指数数据"}, ensure_ascii=False)
-
-    # 查询每个匹配指数的详细估值
+        # 只有名称、没有库内代码时仍可查询，但保留来源日期与逐指标状态。
+        rows = []
+        for metric in ('市盈率', '市净率'):
+            row = _run_with_safe_timeout(_query_ttfund_valuation, index_name, metric, 5000, timeout_s=5)
+            if row:
+                row = {**row, 'source': 'ttfund_online', 'data_source': 'online'}
+                from db.valuations import _normalize_valuation_result
+                rows.append(mark_freshness(_normalize_valuation_result(row)))
+        if rows:
+            return json.dumps([_valuation_result('', rows[0].get('index_name') or index_name, rows)], ensure_ascii=False)
+        return json.dumps({'error': f"未找到'{index_name}'相关的指数数据"}, ensure_ascii=False)
     results = []
-    for m in matched[:3]:  # 最多返回 3 个指数
-        code, name = m["code"], m["name"]
-        index_metrics = [i for i in all_indexes if i["index_code"] == code]
-        metrics = []
-        missing_types = []  # 记录数据缺失的指标类型
-
-        for metric in index_metrics:
-            mt = metric["metric_type"]
-            latest = get_best_valuation(code, mt, query_source="agent", trace_id=trace_id,
-                                        conv_id=conversation_id, message_id=message_id,
-                                        agent_name=agent_name, user_query=user_query)
-            if not latest:
-                missing_types.append(mt)
-                continue
-
-            entry = {
-                "metric_type": mt,
-                "current_value": latest.get("current_value"),
-                "percentile": latest.get("percentile"),
-                "danger_value": latest.get("danger_value"),
-                "opportunity_value": latest.get("opportunity_value"),
-                "zscore": latest.get("zscore"),
-                "date": latest.get("snapshot_date"),
-                "days_old": latest.get("days_old", 0),
-                "is_expired": latest.get("is_expired", False),
-            }
-
-            # P1 修复（指标混淆）：按 metric_type 命名 percentile 字段，
-            # 避免专家将 PB 百分位误读为 PE 百分位
-            _pct_key = {
-                "市盈率": "pe_percentile", "市盈率TTM": "pe_percentile",
-                "市净率": "pb_percentile",
-                "市销率": "ps_percentile", "市销率TTM": "ps_percentile",
-                "股息率": "dividend_percentile",
-            }.get(mt, "percentile")
-            entry[_pct_key] = latest.get("percentile")
-
-            # 判断估值水平
-            pct = latest.get("percentile")
-            if pct is not None:
-                if pct < 30:
-                    entry["level"] = "低估"
-                elif pct < 70:
-                    entry["level"] = "合理"
-                else:
-                    entry["level"] = "高估"
-
-            # 近 5 日趋势
-            history = get_valuation_history(code, 5, mt)
-            if history:
-                entry["trend"] = [h["current_value"] for h in reversed(history)]
-
-            # 库内数据超 3 天 → 自动补充查在线最新（用户要求：估值一定要新）
-            days_old = latest.get("days_old", 0) or 0
-            if days_old > 3 or latest.get("is_expired"):
-                try:
-                    from db.valuations import fetch_online_valuation, normalize_index_code
-                    online = fetch_online_valuation(normalize_index_code(code), mt)
-                    if online and online.get("current_value") is not None:
-                        entry["online_latest"] = {
-                            "current_value": online.get("current_value"),
-                            "percentile": online.get("percentile"),
-                            "snapshot_date": online.get("snapshot_date"),
-                            "source": online.get("source"),
-                        }
-                        # 在线数据有百分位时补充 level
-                        online_pct = online.get("percentile")
-                        if online_pct is not None:
-                            entry["online_latest"]["level"] = (
-                                "低估" if online_pct < 30 else ("合理" if online_pct < 70 else "高估")
-                            )
-                        entry["data_freshness_hint"] = (
-                            f"⚠️ 库内数据已 {days_old} 天未更新，已自动补充在线最新数据。"
-                            "分析时请以 online_latest 字段为准（数据更新）。"
-                        )
-                        logger.info(f"[valuation] {code} {mt} 库内{days_old}天旧, 自动补充在线数据: {online.get('current_value')}")
-                except Exception as e:
-                    logger.debug(f"[valuation] 自动补充在线数据失败 {code} {mt}: {e}")
-
-            metrics.append(entry)
-
-        # P1 估值降级提示：当指标数据缺失时，明确告知专家数据不可用
-        entry_result = {"index_code": code, "index_name": name, "metrics": metrics}
-        if not metrics:
-            # 修复：matched 非空但所有指标都查不到时，用 ttfund 名称兜底
-            try:
-                from mcp.ttfund_client import get_ttfund_client
-                tc = get_ttfund_client()
-                raw = tc._invoke("fund_index", {"index_id": name, "query_scope": "valuation"})
-                if isinstance(raw, dict) and raw.get("success"):
-                    data = raw.get("data", {}) or {}
-                    v = data.get("valuation", {}) or {}
-                    profile = data.get("index_profile", {}) or {}
-                    if v:
-                        fallback_result = {
-                            "index_name": profile.get("index_name", name),
-                            "index_code": profile.get("index_code", code),
-                            "source": "天天基金",
-                            "pe_ttm": v.get("pe_ttm"),
-                            "pe_percentile_10y": v.get("pe_percentile_10y"),
-                            "pb": v.get("pb"),
-                            "pb_percentile_10y": v.get("pb_percentile_10y"),
-                            "roe": v.get("roe"),
-                            # P1 修复（指标混淆）：明确标注各字段对应的指标类型
-                            "metric_types": {
-                                "pe_ttm": "市盈率TTM", "pe_percentile_10y": "市盈率TTM十年百分位",
-                                "pb": "市净率", "pb_percentile_10y": "市净率十年百分位",
-                                "roe": "净资产收益率",
-                            },
-                        }
-                        return json.dumps({"ok": True, "indexes": [fallback_result]}, ensure_ascii=False)
-            except Exception as e:
-                logger.debug(f"[valuation] ttfund 名称兜底失败 {name}: {e}")
-
-            # 所有指标都查不到
-            entry_result["data_status"] = "unavailable"
-            entry_result["degraded_hint"] = (
-                f"⚠️ 指数「{name}（{code}」的估值数据当前无法获取"
-                "（本地表无记录且在线渠道未启用或失败）。"
-                "请基于其他信息（持仓、行情、宏观）进行分析，"
-                "不要编造估值数据，并在结论中明确标注「估值数据缺失」以降低置信度。"
-            )
-        elif missing_types:
-            # 部分指标缺失
-            entry_result["data_status"] = "partial"
-            entry_result["missing_metrics"] = missing_types
-            entry_result["degraded_hint"] = (
-                f"⚠️ 指数「{name}（{code}」部分估值指标缺失：{', '.join(missing_types)}。"
-                "请基于现有指标谨慎分析，缺失指标不要推测，"
-                "并在结论中标注数据完整性。"
-            )
-        results.append(entry_result)
-
+    for item in matched:
+        metrics = list(dict.fromkeys(row['metric_type'] for row in catalog if row['index_code'] == item['code']))
+        rows, missing = [], []
+        for metric in metrics or ('市盈率', '市净率'):
+            row = get_best_valuation(item['code'], metric, query_source='agent', trace_id=trace_id,
+                conv_id=conversation_id, message_id=message_id, agent_name=agent_name, user_query=user_query)
+            if row:
+                rows.append(row)
+            else:
+                missing.append(metric)
+        results.append(_valuation_result(item['code'], item['name'], rows, missing))
     return json.dumps(results, ensure_ascii=False)
 
 
 def _query_online_valuation_impl(args: dict, trace_id: str = "", conversation_id: int = None,
                                   message_id: int = None, agent_name: str = None,
                                   user_query: str = None) -> str:
-    """主动查询在线最新估值（akshare 中证官方，实时数据）。
-
-    与 _query_valuation 的区别：
-    - _query_valuation 优先用库内数据（雷牛牛7天→螺丝钉30天→过期）
-    - 本函数直接查 akshare 在线最新，不受 valuation.online_fallback_enabled 控制
-    - 受 tool.online_valuation_query_enabled 开关控制（默认 true）
-    - 带内存缓存（1小时TTL），重复查询秒返
-
-    触发场景：库内数据超过7天未更新 / 用户明确要求查最新
-    """
-    from db.valuations import fetch_online_valuation, normalize_index_code
-
-    index_name = args.get("index_name", "")
+    """主动在线补查，每个指标独立比较本地来源日期并保留真实提供者。"""
+    from db.valuations import fetch_online_valuation
+    from db.valuation_sources import newest_valuation
+    index_name = args.get('index_name', '')
     if not index_name:
-        return json.dumps({"error": "index_name 不能为空"}, ensure_ascii=False)
-
-    # 1. 按名称匹配指数代码（复用 _is_index_name_match，修复 P0 索引名称误匹配）
-    all_indexes = list_valuation_indexes()
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    matched = []
-    seen_codes = set()
-    for code, name in unique_indexes.items():
-        if code in seen_codes:
-            continue
-        if _is_index_name_match(index_name, name):
-            seen_codes.add(code)
-            matched.append({"code": code, "name": name})
-
+        return json.dumps({'error': 'index_name 不能为空'}, ensure_ascii=False)
+    _, matched = _matched_valuation_indexes(index_name)
     if not matched:
-        db_results = search_indexes_by_keyword(index_name)
-        for r in db_results:
-            if r["index_code"] not in seen_codes:
-                seen_codes.add(r["index_code"])
-                matched.append({"code": r["index_code"], "name": r["index_name"]})
-
-    if not matched:
-        return json.dumps({
-            "error": f"未找到'{index_name}'相关的指数，无法查在线估值",
-            "hint": "请尝试更通用的名称，如'沪深300'、'中证500'、'白酒'",
-        }, ensure_ascii=False)
-
-    # 同名指数去重：保留主代码（优先 000/399 开头的无后缀代码）
-    _dedup = {}
-    for m in matched:
-        name = m["name"]
-        code = m["code"]
-        if name not in _dedup:
-            _dedup[name] = code
-        else:
-            # 已有同名的，优先保留无后缀的主代码
-            old_code = _dedup[name]
-            if "." not in code and "." in old_code:
-                _dedup[name] = code
-            elif code.startswith("000") and not old_code.startswith("000"):
-                _dedup[name] = code
-    matched = [{"code": c, "name": n} for n, c in _dedup.items()]
-
-    # 2. 对每个匹配指数查在线最新估值（最多3个，避免过多在线请求）
-    # 在线查不到时回退库内表数据兜底（用户要求：查不到就用库内表数据）
-    from db.valuations import get_best_valuation
+        return _query_valuation(args, trace_id, conversation_id, message_id, agent_name, user_query)
     results = []
-    for m in matched[:3]:
-        code, name = m["code"], m["name"]
-        normalized_code = normalize_index_code(code)
-
-        # 查市盈率
-        pe_data = fetch_online_valuation(normalized_code, "市盈率")
-        # 查市净率
-        pb_data = fetch_online_valuation(normalized_code, "市净率")
-
-        # 在线数据有效性检查
-        pe_valid = pe_data and pe_data.get("current_value") is not None
-        pb_valid = pb_data and pb_data.get("current_value") is not None
-
-        # 在线都查不到 → 回退库内表数据兜底
-        if not pe_valid and not pb_valid:
-            local_pe = get_best_valuation(code, "市盈率", query_source="agent", enable_online=False,
-                                          trace_id=trace_id, conv_id=conversation_id, message_id=message_id,
-                                          agent_name=agent_name, user_query=user_query)
-            local_pb = get_best_valuation(code, "市净率", query_source="agent", enable_online=False,
-                                          trace_id=trace_id, conv_id=conversation_id, message_id=message_id,
-                                          agent_name=agent_name, user_query=user_query)
-            local_pe_valid = local_pe and local_pe.get("current_value") is not None
-            local_pb_valid = local_pb and local_pb.get("current_value") is not None
-            if not local_pe_valid and not local_pb_valid:
-                results.append({
-                    "index_code": code,
-                    "index_name": name,
-                    "data_status": "all_failed",
-                    "hint": f"'{name}'在线和库内均无有效估值数据",
-                })
-                continue
-            # 用库内数据兜底
-            entry = {
-                "index_code": code,
-                "index_name": name,
-                "data_source": "local_fallback",
-                "source": "库内表(在线查询失败回退)",
-                "snapshot_date": (local_pe or local_pb or {}).get("snapshot_date"),
-                "metrics": [],
-            }
-            if local_pe_valid:
-                pe_entry = {
-                    "metric_type": "市盈率",
-                    "current_value": local_pe.get("current_value"),
-                    "percentile": local_pe.get("percentile"),
-                    "source": "local_fallback",
-                    "days_old": local_pe.get("days_old", 0),
-                    "is_expired": local_pe.get("is_expired", False),
-                }
-                pct = local_pe.get("percentile")
-                if pct is not None:
-                    pe_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
-                entry["metrics"].append(pe_entry)
-            if local_pb_valid:
-                pb_entry = {
-                    "metric_type": "市净率",
-                    "current_value": local_pb.get("current_value"),
-                    "percentile": local_pb.get("percentile"),
-                    "source": "local_fallback",
-                    "days_old": local_pb.get("days_old", 0),
-                    "is_expired": local_pb.get("is_expired", False),
-                }
-                pct = local_pb.get("percentile")
-                if pct is not None:
-                    pb_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
-                entry["metrics"].append(pb_entry)
-            results.append(entry)
-            continue
-
-        # 在线数据有效
-        entry = {
-            "index_code": code,
-            "index_name": name,
-            "data_source": "online_latest",
-            "source": "akshare",
-            "snapshot_date": (pe_data or pb_data or {}).get("snapshot_date"),
-            "metrics": [],
-        }
-        if pe_valid:
-            pe_entry = {
-                "metric_type": "市盈率",
-                "current_value": pe_data.get("current_value"),
-                "percentile": pe_data.get("percentile"),
-                "source": pe_data.get("source"),
-            }
-            pct = pe_data.get("percentile")
-            if pct is not None:
-                pe_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
-            entry["metrics"].append(pe_entry)
-        if pb_valid:
-            pb_entry = {
-                "metric_type": "市净率",
-                "current_value": pb_data.get("current_value"),
-                "percentile": pb_data.get("percentile"),
-                "source": pb_data.get("source"),
-            }
-            pct = pb_data.get("percentile")
-            if pct is not None:
-                pb_entry["level"] = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
-            entry["metrics"].append(pb_entry)
-
-        results.append(entry)
-
+    for item in matched:
+        rows, missing = [], []
+        for metric in ('市盈率', '市净率'):
+            online = fetch_online_valuation(item['code'], metric)
+            local = get_best_valuation(item['code'], metric, query_source='agent', enable_online=False,
+                trace_id=trace_id, conv_id=conversation_id, message_id=message_id,
+                agent_name=agent_name, user_query=user_query)
+            best = newest_valuation([local, online], metric)
+            if best:
+                rows.append(best)
+            else:
+                missing.append(metric)
+        results.append(_valuation_result(item['code'], item['name'], rows, missing))
     return json.dumps(results, ensure_ascii=False)
 
 
@@ -2186,63 +1937,51 @@ def _search_knowledge(args: dict) -> str:
 
     result = build_rag_context_with_details(query, content_types=content_types, limit=limit)
 
+    # 唯一 ID 连接原始证据；出版来源与检索通道分别保留。
+    from db._conn import _get_conn as _get_evidence_conn
+    from services.rag.evidence_quality import hydrate_evidence
+    evidence_results = result.get("results", [])
+    try:
+        hydrate_evidence(evidence_results, _get_evidence_conn)
+    except Exception as exc:
+        logger.warning("知识检索原文回查失败: %s", exc)
+        result["rag_low_quality"] = True
+        result.setdefault("quality_reasons", []).append("original_source_unavailable")
+
     log_rag_search(
         conversation_id=conversation_id or 0,
         message_id=message_id or 0,
         query=query,
         keywords=result.get("keywords", []),
-        results=result.get("results", []),
+        results=evidence_results,
         content_types=content_types or [],
         fts_count=result.get("fts_count", 0),
         chroma_count=result.get("chroma_count", 0),
         freshness_filtered=result.get("freshness_filtered", 0),
         trace_id=trace_id,
-        rag_low_quality=result.get("rag_low_quality", False),
+        rag_low_quality=result.get("rag_low_quality", True),
     )
-
     slim_results = []
-    # P0 修复（2026-08-02）：body_preview 回查原表 content，避免显示 FTS 分词空格串
-    # 原逻辑：body_preview = r.get("body", "")[:300]
-    # 问题：FTS5 表存的是 jieba 分词后的空格串（如 "8 月 走势 ..."），非原始正文
-    #       且原 body 为空时 body_preview 也为空，LLM 无法利用正文内容
-    # 修复：按 content_type+reference_id 回查 knowledge_base 原表 content 字段
-    _kb_content_map = {}
-    try:
-        from db._conn import _get_conn as _get_kb_conn
-        _kb_conn = _get_kb_conn()
-        for r in result.get("results", []):
-            ref_id = r.get("reference_id", "")
-            ct = r.get("content_type", "")
-            if not ref_id or not ct:
-                continue
-            # knowledge_base 表用 title 关联回原始 content（reference_id 不直接对应 id）
-            title = r.get("title", "")
-            if title and title not in _kb_content_map:
-                row = _kb_conn.execute(
-                    "SELECT content FROM knowledge_base WHERE title = ? LIMIT 1", (title,)
-                ).fetchone()
-                if row and row[0]:
-                    _kb_content_map[title] = row[0][:300]
-        _kb_conn.close()
-    except Exception:
-        pass
-
-    for r in result.get("results", []):
-        body_raw = r.get("body", "") or ""
-        title = r.get("title", "")
-        # 优先用原表 content，其次用 FTS body（分词串），兜底空串
-        body_preview = _kb_content_map.get(title, "") or body_raw[:300]
-        slim_results.append({
-            "content_type": r.get("content_type"),
-            "title": title,
-            "body_preview": body_preview,
-            "score": round(r.get("_score", 0), 3),
-        })
+    for r in evidence_results:
+        item = {key: r.get(key) for key in (
+            "content_type", "reference_id", "evidence_id", "title", "source", "source_url",
+            "retrieval_source", "time", "limitations", "counterpoints", "evidence_level",
+            "as_of_date", "valid_until", "quality_status", "quality_reason", "validation_status",
+            "validation_issues", "content_origin", "rerank_score", "usage_scope", "date_verified",
+        )}
+        body = r.get("body", "") or ""
+        item.update({"content": body, "body_preview": body[:600],
+                     "preview_truncated": len(body) > 600, "score": round(r.get("_score", 0), 3)})
+        slim_results.append(item)
 
     return json.dumps({
         "results": slim_results,
         "total": len(slim_results),
         "keywords": result.get("keywords", []),
+        "rag_low_quality": result.get("rag_low_quality", True),
+        "quality_reasons": result.get("quality_reasons", []),
+        "quality_filtered": result.get("quality_filtered", 0),
+        "validation_scope": "仅相关性、适用场景和部分明确加权收益示例；未全面核验事实",
     }, ensure_ascii=False)
 
 
@@ -2308,52 +2047,28 @@ def _get_bond_temperature() -> str:
 
 
 def _get_valuation_list(args: dict) -> str:
-    """获取所有指数估值概览。"""
-    filter_type = args.get("filter", "all")
-
-    all_indexes = list_valuation_indexes()
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
+    """概览只读本地多来源，过期估值不进入当前低估/高估候选。"""
+    from db.valuations import list_available_valuation_indexes
+    from db.valuation_sources import newest_valuation
+    from services.valuation.context import metric_payload
+    filter_type = args.get('filter', 'all')
+    grouped = {}
+    for item in list_available_valuation_indexes():
+        row = get_best_valuation(item['index_code'], item['metric_type'],
+                                 query_source='agent_overview', enable_online=False)
+        if row and row.get('percentile') is not None:
+            grouped.setdefault(item['index_code'], []).append(row)
     results = []
-    for code, name in unique_indexes.items():
-        # 取 PE 或第一个指标的最新数据
-        latest = get_latest_valuation(code, "pe") or get_latest_valuation(code)
-        if not latest:
+    for code, rows in grouped.items():
+        best = newest_valuation(rows)
+        entry = metric_payload(best)
+        if filter_type == 'undervalued' and entry.get('level') != '低估':
             continue
-
-        pct = latest.get("percentile")
-        if pct is None:
+        if filter_type == 'overvalued' and entry.get('level') != '高估':
             continue
-
-        level = "低估" if pct < 30 else ("合理" if pct < 70 else "高估")
-
-        if filter_type == "undervalued" and pct >= 30:
-            continue
-        if filter_type == "overvalued" and pct <= 70:
-            continue
-
-        results.append({
-            "index_code": code,
-            "index_name": name,
-            "current_value": latest.get("current_value"),
-            "percentile": pct,
-            "level": level,
-            "metric_type": latest.get("metric_type"),
-            "date": latest.get("snapshot_date"),
-        })
-
-    # 按百分位排序（低估的排前面）
-    results.sort(key=lambda x: x.get("percentile", 50))
-
-    return json.dumps({
-        "count": len(results),
-        "filter": filter_type,
-        "indexes": results,
-    }, ensure_ascii=False)
+        results.append({**entry, 'index_code': code, 'index_name': best.get('index_name')})
+    results.sort(key=lambda row: row['percentile'])
+    return json.dumps({'count': len(results), 'filter': filter_type, 'indexes': results}, ensure_ascii=False)
 
 
 def _scan_super_value_tool(args: dict, trace_id: str = "", conversation_id: int = None,
@@ -2451,26 +2166,22 @@ def _get_author_opinions(args: dict) -> str:
 
 
 def _calculate_metrics(args: dict) -> str:
-    """计算投资指标（基于估值历史数据的简化计算）。"""
-    metric_type = args.get("metric_type", "")
-    index_name = args.get("index_name", "")
-    period = args.get("period", "3年")
+    """基于真实指数收盘价计算价格收益指标，禁止以 PE/PB 代替行情。"""
+    import math
+    import statistics
 
+    metric_type = args.get("metric_type", "")
+    index_name = args.get("index_name", "").strip()
+    period = args.get("period", "3年")
     if not index_name:
         return json.dumps({"error": "请指定指数名称"}, ensure_ascii=False)
+    if metric_type not in {"max_drawdown", "annualized_return", "dca_return", "risk_level"}:
+        return json.dumps({"error": "不支持的指标类型", "metric_status": "unknown"}, ensure_ascii=False)
 
-    # 匹配指数
-    all_indexes = list_valuation_indexes()
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    matched_code = None
-    matched_name = None
-    for code, name in unique_indexes.items():
-        if name in index_name or index_name in name:
+    matched_code = matched_name = None
+    for idx in list_valuation_indexes():
+        code, name = idx["index_code"], idx["index_name"]
+        if index_name == code or name in index_name or index_name in name:
             matched_code, matched_name = code, name
             break
         for prefix in ("中证", "国证", "沪", "深"):
@@ -2480,114 +2191,76 @@ def _calculate_metrics(args: dict) -> str:
                 break
         if matched_code:
             break
-
     if not matched_code:
         return json.dumps({"error": f"未找到'{index_name}'相关指数"}, ensure_ascii=False)
 
-    # 获取历史数据
-    days_map = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825}
-    days = days_map.get(period, 1095)
-    history = get_valuation_history(matched_code, days)
-
-    if not history or len(history) < 10:
-        return json.dumps({
-            "error": f"{matched_name}历史数据不足（{len(history) if history else 0}条），无法计算",
-        }, ensure_ascii=False)
-
-    values = [h["current_value"] for h in history if h.get("current_value") is not None]
-    if len(values) < 10:
-        return json.dumps({"error": "有效数据点不足"}, ensure_ascii=False)
-
-    result = {"index_name": matched_name, "period": period, "data_points": len(values)}
-
+    days = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825}.get(period, 1095)
+    result = {"index_code": matched_code, "index_name": matched_name, "period": period,
+              "data_source": "index_price_history", "series_type": "index_close_price",
+              "return_basis": "指数价格收益，不含分红、费用和跟踪误差", "unit": "%"}
+    try:
+        history = get_index_price_history(matched_code, days=days)
+    except Exception as exc:
+        logger.warning("指数价格序列不可用 %s: %s", matched_code, exc)
+        history = []
+    # 不依赖上游排序；拒绝未来、重复日期和无效数值。
+    pairs = {}
+    for row in history:
+        try:
+            d = date.fromisoformat(str(row.get("trade_date", ""))[:10])
+            v = float(row.get("close"))
+            if date.today()-timedelta(days=days) <= d <= date.today() and math.isfinite(v) and v > 0:
+                pairs[d] = v
+        except (ValueError, TypeError):
+            continue
+    ordered = sorted(pairs.items())
+    result["data_points"] = len(ordered)
+    if len(ordered) < 2:
+        result.update(metric_status="unknown", reason="真实收盘价数据不足；估值 PE/PB 不能用于计算收益或回撤")
+        return json.dumps(result, ensure_ascii=False)
+    dates, values = zip(*ordered)
+    result.update(date_range={"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
+                  as_of=dates[-1].isoformat(), stale_days=(date.today()-dates[-1]).days,
+                  metric_status="ok")
+    peak = values[0]
+    max_dd = 0.0
+    for value in values:
+        peak = max(peak, value)
+        max_dd = max(max_dd, (peak-value)/peak)
     if metric_type == "max_drawdown":
-        # 最大回撤
-        peak = values[0]
-        max_dd = 0
-        for v in values:
-            if v > peak:
-                peak = v
-            dd = (peak - v) / peak if peak > 0 else 0
-            if dd > max_dd:
-                max_dd = dd
         result["max_drawdown"] = round(max_dd * 100, 2)
-        result["unit"] = "%"
-        result["description"] = f"{matched_name}近{period}最大回撤为 {result['max_drawdown']}%"
-
+        result["description"] = f"{matched_name}实际数据窗口内价格最大回撤为 {result['max_drawdown']}%"
     elif metric_type == "annualized_return":
-        # 年化收益率（基于估值变化）
-        first_val = values[0]
-        last_val = values[-1]
-        years = len(values) / 250  # 约 250 个交易日/年
-        if first_val > 0 and years > 0:
-            total_return = (last_val / first_val) - 1
-            annualized = (1 + total_return) ** (1 / years) - 1
-            result["total_return"] = round(total_return * 100, 2)
-            result["annualized_return"] = round(annualized * 100, 2)
-            result["unit"] = "%"
-            result["description"] = (
-                f"{matched_name}近{period}总收益 {result['total_return']}%，"
-                f"年化 {result['annualized_return']}%"
-            )
+        elapsed_days = (dates[-1]-dates[0]).days
+        total_return = values[-1]/values[0]-1
+        result["total_return"] = round(total_return*100, 2)
+        if elapsed_days < 30:
+            result.update(metric_status="unknown", reason="实际日期跨度不足 30 天，不外推年化收益")
         else:
-            result["error"] = "数据异常，无法计算"
-
+            annualized = math.expm1(math.log(values[-1]/values[0])*365.25/elapsed_days)
+            result["annualized_return"] = round(annualized*100, 2)
     elif metric_type == "dca_return":
-        # 定投收益率模拟（等额定投）
-        n = len(values)
-        monthly_interval = max(1, n // (int(period[0]) * 12)) if period[0].isdigit() else n // 36
-        total_invested = 0
-        total_shares = 0
-        for i in range(0, n, monthly_interval):
-            total_invested += 1000  # 每期定投 1000
-            total_shares += 1000 / values[i] if values[i] > 0 else 0
-
-        if total_shares > 0:
-            current_value = total_shares * values[-1]
-            dca_return = (current_value - total_invested) / total_invested * 100
-            result["total_invested"] = total_invested
-            result["current_value"] = round(current_value, 2)
-            result["dca_return"] = round(dca_return, 2)
-            result["unit"] = "%"
-            result["description"] = (
-                f"{matched_name}近{period}定投模拟：投入¥{total_invested}，"
-                f"当前市值¥{result['current_value']}，收益率 {result['dca_return']}%"
-            )
-
-    elif metric_type == "risk_level":
-        # 风险等级评估
-        import statistics
-        mean_val = statistics.mean(values)
-        std_val = statistics.stdev(values) if len(values) > 1 else 0
-        cv = std_val / mean_val if mean_val > 0 else 0  # 变异系数
-
-        latest_val = values[-1]
-        pct_from_mean = (latest_val - mean_val) / mean_val * 100 if mean_val > 0 else 0
-
-        # 获取百分位
-        latest_pct = None
-        for mt in ["pe", "pb"]:
-            lv = get_latest_valuation(matched_code, mt)
-            if lv and lv.get("percentile") is not None:
-                latest_pct = lv["percentile"]
-                break
-
-        if cv < 0.15:
-            risk = "低风险"
-        elif cv < 0.30:
-            risk = "中等风险"
+        # 每个自然月首个可用交易日投入，不把稀疏观测点假设为交易日。
+        monthly = {}
+        for d, value in ordered:
+            monthly.setdefault((d.year, d.month), value)
+        invested = 1000*len(monthly)
+        current = sum(1000/value for value in monthly.values())*values[-1]
+        result.update(total_invested=invested, current_value=round(current, 2),
+                      dca_return=round((current/invested-1)*100, 2),
+                      simulation={"frequency":"monthly", "amount":1000, "fees_included":False})
+    else:
+        # 风险等级不能由估值水平推导，也不能将稀疏月度点当成日收益波动。
+        returns = [values[i]/values[i-1]-1 for i in range(1, len(values))]
+        gaps = [(dates[i]-dates[i-1]).days for i in range(1, len(dates))]
+        result["max_drawdown"] = round(max_dd*100, 2)
+        if len(returns) < 20 or max(gaps) > 7:
+            result.update(metric_status="unknown", risk_level="unknown", reason="连续交易日价格样本不足，不能评定波动风险")
         else:
-            risk = "高风险"
-
-        result["risk_level"] = risk
-        result["coefficient_of_variation"] = round(cv, 4)
-        result["current_vs_mean"] = round(pct_from_mean, 2)
-        result["percentile"] = latest_pct
-        result["description"] = (
-            f"{matched_name}风险等级：{risk}（变异系数{cv:.3f}），"
-            f"当前值偏离均值 {pct_from_mean:+.1f}%"
-        )
-
+            volatility = statistics.stdev(returns)*math.sqrt(252)*100
+            result["annualized_volatility"] = round(volatility, 2)
+            result["risk_level"] = "低波动" if volatility < 10 else "中波动" if volatility < 25 else "高波动"
+            result["description"] = "仅为历史价格波动分档，不代表未来风险等级或本金安全"
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -2951,7 +2624,7 @@ def _query_fund_info(args: dict) -> str:
     # 原逻辑只对"非数字 fund_code"做名称匹配，纯数字直接放行，导致 LLM 猜测的错误代码绕过防幻觉。
     if fund_code and fund_code.isdigit() and fund_name_hint:
         try:
-            holdings = list_holdings()
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
             in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
             if not in_holdings:
                 # 数字代码不在持仓表 → 可能是 LLM 猜的，用 fund_name_hint 重新匹配
@@ -3104,7 +2777,7 @@ def _query_transaction_history(args: dict) -> str:
     fund_code = args.get("fund_code", "").strip() or None
     fund_name_hint = args.get("fund_name", "").strip()
     tx_type = args.get("transaction_type", "") or None
-    limit = args.get("limit", 50)
+    limit = max(1, min(int(args.get("limit", 50)), 500))
 
     # L1.5 防幻觉校验（2026-07-30 conv#194 修复）：
     # 场景：行为金融学专家凭记忆猜 008928，但持仓实际是 008929（宏利消费红利指数C），
@@ -3112,7 +2785,7 @@ def _query_transaction_history(args: dict) -> str:
     _match_note = ""
     if fund_code and fund_name_hint:
         try:
-            holdings = list_holdings()
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
             in_holdings = any(h.get("fund_code") == fund_code for h in holdings)
             if not in_holdings:
                 matched_code = _match_fund_code_by_name(fund_name_hint)
@@ -3131,10 +2804,14 @@ def _query_transaction_history(args: dict) -> str:
         except Exception:
             pass  # 持仓查询失败时不阻断
 
-    txs = list_transactions(fund_code=fund_code, limit=limit)
-
-    if tx_type:
-        txs = [t for t in txs if t["transaction_type"] == tx_type]
+    # 先限定用户、状态和日期，再 LIMIT；待确认交易不能作为已实施的行为证据。
+    from db.analysis_evidence import query_trade_evidence
+    evidence = query_trade_evidence(
+        user_id=args.get("user_id", "default"), fund_code=fund_code,
+        transaction_type=tx_type, limit=limit,
+        start_date=args.get("start_date"), end_date=args.get("end_date"),
+    )
+    txs = evidence.pop("transactions")
 
     for t in txs:
         tags = get_transaction_tags(t["id"])
@@ -3152,6 +2829,7 @@ def _query_transaction_history(args: dict) -> str:
         "buy_total": round(buy_total, 2),
         "sell_total": round(sell_total, 2),
         "transactions": txs,
+        **evidence,
     }
     if _match_note:
         result["_match_note"] = _match_note
@@ -3161,8 +2839,8 @@ def _query_transaction_history(args: dict) -> str:
     # 但持仓表有完整盈亏数据。注入此摘要让专家有数据支撑，避免"交易记录不完整"的误判。
     if fund_code:
         try:
-            holdings = list_holdings()
-            matched = [h for h in holdings if h.get("fund_code") == fund_code]
+            holdings = list_holdings(user_id=args.get("user_id", "default"))
+            matched = [h for h in holdings if h.get("fund_code") == fund_code and (h.get("shares") or 0) > 0]
             if matched:
                 holding_summary = []
                 for h in matched:
@@ -3186,13 +2864,13 @@ def _query_transaction_history(args: dict) -> str:
                 # 真实交易数 vs 假设交易数说明
                 if len(txs) == 0:
                     result["_data_note"] = (
-                        f"该基金无真实交易记录（假设补仓已过滤）。"
+                        f"该基金在所选日期窗口内无已确认/已结算成交记录（待确认、假设交易未计入）。"
                         f"但持仓表显示当前持有 {len(matched)} 个账户头寸，"
                         f"盈亏数据见 holding_summary 字段，请基于此分析而非说'无数据'。"
                     )
                 elif len(txs) < 3:
                     result["_data_note"] = (
-                        f"真实交易记录仅 {len(txs)} 条（假设补仓已过滤）。"
+                        f"本次返回已确认/已结算成交记录 {len(txs)} 条（日期窗口总数见 confirmed_count）。"
                         f"持仓盈亏数据见 holding_summary 字段，请结合分析。"
                     )
         except Exception as e:

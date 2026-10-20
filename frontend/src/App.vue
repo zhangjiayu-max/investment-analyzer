@@ -16,6 +16,7 @@ const { completedTask, clearCompletedTask } = useTaskTracker()
 const { activePage, openConversation } = useAppNavigation()
 const showKyc = ref(false)
 const searchQuery = ref('')
+const searchRequestId = ref(0)
 // 首次访问引导：未标记 hasVisited 时弹出
 const showOnboarding = ref(!localStorage.getItem('hasVisited'))
 
@@ -23,6 +24,7 @@ const showOnboarding = ref(!localStorage.getItem('hasVisited'))
 
 function handleSearch(q) {
   searchQuery.value = q
+  searchRequestId.value++
   activePage.value = 'search'
 }
 
@@ -55,7 +57,7 @@ function handleViewResult(convId) {
     <div class="app-content">
       <TickerBar @open-kyc="showKyc = true" @search="handleSearch" @navigate="handleAlertNavigate" />
       <main class="app-main">
-        <Home :activePage="activePage" :searchQuery="searchQuery" @navigate="activePage = $event" />
+        <Home :activePage="activePage" :searchQuery="searchQuery" :searchRequestId="searchRequestId" @navigate="activePage = $event" />
       </main>
     </div>
   </div>

@@ -22,6 +22,7 @@ from agent.core.task_planner import (
     build_shared_evidence_keys,
     build_arbitration_mode,
 )
+from agent.core.answer_policy import get_attribution_subquery, order_attribution_specialists
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,10 @@ def generate_plan(
     """
     plan_id = f"plan-{uuid.uuid4().hex[:8]}"
 
+    # 归因证据职责已由配置确定；无规则路由时同样避免默认前三位挤掉市场角色。
+    if not routed_specialists and classify_question_type(user_query) == "attribution":
+        routed_specialists = order_attribution_specialists([s["agent_key"] for s in available_specialists])
+
     # P4: 优先使用路由结果，跳过 LLM 调用
     if routed_specialists:
         # 过滤掉不在 available_specialists 中的专家
@@ -214,6 +219,8 @@ def generate_plan(
             arbitration_mode = build_arbitration_mode(question_type, complexity, len(valid_routed))
             shared_evidence_keys = build_shared_evidence_keys(question_type, complexity)
             # 构造 plan_data，最多 3 个专家
+            if question_type == "attribution":
+                valid_routed = order_attribution_specialists(valid_routed)
             valid_routed = valid_routed[:3]
             steps_data = []
             for i, agent_key in enumerate(valid_routed):
@@ -221,12 +228,14 @@ def generate_plan(
                     (s["name"] for s in available_specialists if s["agent_key"] == agent_key),
                     agent_key,
                 )
+                sub_query = get_attribution_subquery(agent_key, user_query) if question_type == "attribution" else refined_query
+                step_query = f"{refined_query or user_query}\n\n【专家职责】\n{sub_query}" if question_type == "attribution" else refined_query
                 steps_data.append({
                     "step_id": i + 1,
                     "agent_key": agent_key,
                     "agent_name": agent_name,
-                    "query": refined_query,
-                    "sub_query": refined_query,
+                    "query": step_query,
+                    "sub_query": sub_query,
                     "allowed_tools": next(
                         (s.get("tools", []) for s in available_specialists if s["agent_key"] == agent_key),
                         [],
@@ -248,6 +257,9 @@ def generate_plan(
                     agent_key=s["agent_key"],
                     agent_name=s["agent_name"],
                     query=s.get("query", refined_query),
+                    sub_query=s.get("sub_query", ""),
+                    allowed_tools=s.get("allowed_tools", []),
+                    needs_debate=s.get("needs_debate", False),
                     depends_on=s.get("depends_on", []),
                 )
                 for s in steps_data

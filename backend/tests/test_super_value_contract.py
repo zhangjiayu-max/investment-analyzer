@@ -335,3 +335,25 @@ def test_catalysts_are_server_labeled_hypotheses():
     from services.valuation.opportunity_screener import validate_interpretations
     rows, _ = validate_interpretations([{'index_code': '000300', 'action': '观望', 'opportunity_type': '真低估', 'confidence': 'low', 'catalysts': ['未来盈利改善'], 'catalysts_status': 'confirmed'}], [{'index_code': '000300', 'score': 50}])
     assert rows[0]['catalysts_status'] == 'hypothesis'
+
+
+def test_known_valuation_test_artifacts_are_removed_on_db_init(tmp_db):
+    from db import init_db
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO index_valuations "
+        "(index_code,index_name,metric_type,snapshot_date,percentile,current_value,source_image) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ('000001', '000001', '市盈率', '2026-10-18', 10, 10, 'data/images/normal.png'),
+    )
+    conn.commit()
+    conn.close()
+
+    init_db()
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM index_valuations WHERE index_code='000001' AND source_image='data/images/normal.png'"
+    ).fetchone()
+    conn.close()
+    assert row is None

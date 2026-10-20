@@ -77,7 +77,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
     """
     try:
         from config import get_rebalance_config
-        from db import list_holdings, get_cash_balance, list_valuation_indexes
+        from db import list_holdings, get_portfolio_cash_snapshot, list_valuation_indexes
 
         # 加载配置
         cfg = get_rebalance_config()
@@ -95,8 +95,7 @@ def analyze_rebalancing_need(user_id: str = "default") -> dict:
         holdings = list_holdings(user_id)
         active = [h for h in holdings if (h.get("shares") or 0) > 0]
 
-        cash_info = get_cash_balance(user_id)
-        cash_balance = cash_info.get("balance", 0) if cash_info else 0
+        cash_balance = get_portfolio_cash_snapshot(user_id)["cash_balance"]
 
         total_value = sum(h.get("current_value", 0) or 0 for h in active)
         total_assets = total_value + cash_balance

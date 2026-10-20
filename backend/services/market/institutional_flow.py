@@ -12,6 +12,8 @@
 缓存：复用 market_data._get_cached/_set_cached 5 分钟 TTL。
 """
 import logging
+import math
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -101,7 +103,11 @@ def get_margin_balance(days: int = 30) -> dict:
         series = []
         prev_balance = None
         for _, r in df.iterrows():
-            balance = _safe_float(r.get("融资余额", 0))
+            # 缺失余额不能填成零，否则会凭空制造万亿元级净流出。
+            balance = _safe_float(r.get("融资余额"), default=float("nan"))
+            if not math.isfinite(balance) or balance <= 0:
+                logger.warning("融资余额数据缺失或无效，暂不计算资金变化")
+                return _empty_margin_balance()
             change = balance - prev_balance if prev_balance is not None else 0
             series.append({
                 "date": str(r.get("信用交易日期", "")),
@@ -174,14 +180,26 @@ def get_institutional_flow_summary() -> dict:
 
     与 get_institutional_flow_signal 共用 30 天窗口，保证 strength 一致。
 
-    Returns:
-        {"recent_5d_change_yi": float, "trend": "inflow|outflow|neutral", "strength": "strong|moderate|weak"}
+    日频沪市数据，返回交易日期；缺数据不能当作净变化为零。
     """
     data = get_margin_balance(days=30)
+    latest_date = None
+    try:
+        raw_date = str((data.get("latest") or {}).get("date", ""))
+        latest_date = datetime.strptime(raw_date.replace("-", ""), "%Y%m%d").date().isoformat()
+    except ValueError:
+        pass
+    change = data.get("recent_5d_change")
+    available = (latest_date is not None and len(data.get("series") or []) >= 6
+                 and isinstance(change, (int, float)) and math.isfinite(change))
     return {
-        "recent_5d_change_yi": data.get("recent_5d_change", 0),
-        "trend": data.get("trend", "neutral"),
-        "strength": data.get("strength", "weak"),
+        "recent_5d_change_yi": change if available else None,
+        "trend": data.get("trend", "neutral") if available else "neutral",
+        "strength": data.get("strength", "weak") if available else "weak",
+        "latest_date": latest_date,
+        "data_status": "ok" if available else "unavailable",
+        "source": "上交所融资余额",
+        "frequency": "daily",
     }
 
 

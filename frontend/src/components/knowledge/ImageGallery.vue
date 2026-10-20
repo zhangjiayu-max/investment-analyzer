@@ -1,7 +1,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-vue-next'
 import { listGalleryRecords, uploadDdImage, listDdImages, listDdImageDates, deleteDdImage, parseAndSaveValuation, parseValuationBatch, parseDDImage, parseDDImageAsync, parseDDBatchAsync, getDDParseTask, pollDDParseTask, uploadValuationImage, listValuationImages, listValuationImageDates, deleteValuationImage, uploadLiuyiImage, listLiuyiImages, listLiuyiImageDates, deleteLiuyiImage, parseLiuyiImage, parseLiuyiImageAsync, parseLiuyiBatchAsync, getLiuyiParseTask, pollLiuyiParseTask } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import { getWechatClipboardImage } from '../../api'
 
 // ── 并发限制工具函数 ──
 async function asyncPool(limit, items, fn) {
@@ -33,6 +35,10 @@ const searchQuery = ref('')
 const loading = ref(false)
 const sortBy = ref('date')
 const previewImage = ref(null)
+const previewScale = ref(1)
+const previewOffset = ref({ x: 0, y: 0 })
+const previewDragging = ref(false)
+let previewDragStart = null
 let searchTimer = null
 
 async function loadRecords() {
@@ -92,8 +98,71 @@ function metricBadgeClass(mt) {
   return 'badge-neutral'
 }
 
-function openPreview(url) { previewImage.value = url }
-function closePreview() { previewImage.value = null }
+function resetPreviewZoom() {
+  previewScale.value = 1
+  previewOffset.value = { x: 0, y: 0 }
+}
+
+function openPreview(url) {
+  resetPreviewZoom()
+  previewImage.value = url
+}
+
+function closePreview() {
+  previewImage.value = null
+  resetPreviewZoom()
+  previewDragging.value = false
+  previewDragStart = null
+}
+
+function zoomPreview(direction, point = null) {
+  const previousScale = previewScale.value
+  const nextScale = Math.max(1, Math.min(5, Math.round((previousScale + direction * 0.25) * 100) / 100))
+  if (nextScale === previousScale) return
+
+  if (nextScale === 1) {
+    previewOffset.value = { x: 0, y: 0 }
+  } else if (point) {
+    const ratio = nextScale / previousScale
+    previewOffset.value = {
+      x: point.x + (previewOffset.value.x - point.x) * ratio,
+      y: point.y + (previewOffset.value.y - point.y) * ratio,
+    }
+  }
+  previewScale.value = nextScale
+}
+
+function handlePreviewWheel(event) {
+  event.preventDefault()
+  const point = { x: event.clientX - window.innerWidth / 2, y: event.clientY - window.innerHeight / 2 }
+  zoomPreview(event.deltaY < 0 ? 1 : -1, point)
+}
+
+function handlePreviewPointerDown(event) {
+  if (event.button !== 0 || previewScale.value <= 1) return
+  event.preventDefault()
+  previewDragging.value = true
+  previewDragStart = {
+    x: event.clientX,
+    y: event.clientY,
+    offsetX: previewOffset.value.x,
+    offsetY: previewOffset.value.y,
+  }
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+}
+
+function handlePreviewPointerMove(event) {
+  if (!previewDragging.value || !previewDragStart) return
+  previewOffset.value = {
+    x: previewDragStart.offsetX + event.clientX - previewDragStart.x,
+    y: previewDragStart.offsetY + event.clientY - previewDragStart.y,
+  }
+}
+
+function handlePreviewPointerUp() {
+  previewDragging.value = false
+  previewDragStart = null
+}
 
 // ── 估值图片上传 Tab ──
 const viImages = ref([])
@@ -375,12 +444,17 @@ async function handleUpload(e) {
   if (!files || !files.length) return
   ddUploading.value = true
   try {
+    const uploadedPaths = []
     for (const file of files) {
-      await uploadDdImage(file)
+      const { data } = await uploadDdImage(file)
+      if (data?.path) uploadedPaths.push({ path: data.path, name: file.name })
     }
     await loadDdDates()
     ddSelectedDate.value = ''
     await loadDdImages()
+    if (uploadedPaths.length > 0 && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
+    }
   } catch (e) {
     console.error('Upload failed:', e)
     showToast('上传失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -423,36 +497,61 @@ function confirmParseImage(img) {
       confirm.value.visible = false
       parseResult.value = null
       try {
-        const { data } = await parseDDImageAsync(img.path)
-        const taskId = data.task_id
-        // 存储任务状态
-        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
-        // 启动轮询
-        const cancel = pollDDParseTask(taskId, (taskData) => {
-          if (isUnmounted) return
-          ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: taskData.status } }
-          if (taskData.status === 'done') {
-            const result = taskData.result_json || {}
-            parseResult.value = { ok: true, data: result, name: img.name }
-            ddImages.value = ddImages.value.filter(i => i.path !== img.path)
-            loadRecords()
-            // 清理任务追踪
-            const { [img.path]: _, ...rest } = ddParseTasks.value
-            ddParseTasks.value = rest
-            showToast(`「${img.name}」识别完成`, 'success')
-          } else if (taskData.status === 'error') {
-            parseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
-            const { [img.path]: _, ...rest } = ddParseTasks.value
-            ddParseTasks.value = rest
-            showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
-          }
-        })
-        // 存储取消函数
-        ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { ...ddParseTasks.value[img.path], pollCancel: cancel } }
+        await startDdParseTask(img)
       } catch (e) {
         showToast('提交解析任务失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
+  }
+}
+
+/** 提交螺丝钉图片解析任务并启动轮询。 */
+async function startDdParseTask(img, { auto = false } = {}) {
+  const { data } = await parseDDImageAsync(img.path)
+  const taskId = data?.task_id
+  if (!taskId) throw new Error('解析任务创建失败')
+
+  ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: data.status || 'pending' } }
+  const cancel = pollDDParseTask(taskId, (taskData) => {
+    if (isUnmounted) return
+    ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { taskId, status: taskData.status } }
+    if (taskData.status === 'done') {
+      const result = taskData.result_json || {}
+      if (!auto) parseResult.value = { ok: true, data: result, name: img.name }
+      ddImages.value = ddImages.value.filter(i => i.path !== img.path)
+      void loadRecords()
+      const { [img.path]: _, ...rest } = ddParseTasks.value
+      ddParseTasks.value = rest
+      showToast(`「${img.name}」识别完成`, 'success')
+    } else if (taskData.status === 'error') {
+      if (!auto) parseResult.value = { ok: false, message: taskData.error_msg || '解析失败', name: img.name }
+      const { [img.path]: _, ...rest } = ddParseTasks.value
+      ddParseTasks.value = rest
+      showToast(`「${img.name}」识别失败: ${taskData.error_msg || ''}`, 'error')
+    }
+  })
+  ddParseTasks.value = { ...ddParseTasks.value, [img.path]: { ...ddParseTasks.value[img.path], pollCancel: cancel } }
+  return taskId
+}
+
+/** 上传后自动提交螺丝钉图片解析，避免必须逐张点击“识别估值”。 */
+async function autoParseDdImages(uploadedPaths) {
+  showToast(`上传成功，开始自动解析 ${uploadedPaths.length} 张螺丝钉估值表...`, 'info')
+  let submitted = 0
+  let failed = 0
+  for (const img of uploadedPaths) {
+    if (isUnmounted) break
+    try {
+      await startDdParseTask(img, { auto: true })
+      submitted++
+    } catch (e) {
+      failed++
+      console.error(`提交解析失败: ${img.name}`, e)
+      showToast(`「${img.name}」提交解析失败: ${e.response?.data?.detail || e.message}`, 'error')
+    }
+  }
+  if (!isUnmounted && failed === 0 && submitted > 0) {
+    showToast(`已提交 ${submitted} 张图片解析任务`, 'info')
   }
 }
 
@@ -614,7 +713,7 @@ function confirmLiuyiParseImage(img) {
           if (taskData.status === 'done') {
             const result = taskData.result_json || {}
             liuyiParseResult.value = { ok: true, data: result, name: img.name }
-            liuyiImages.value = liuyiImages.value.filter(i => i.path !== img.path)
+            liuyiImages.value = liuyiImages.value.map(i => i.path === img.path ? { ...i, parsed: true } : i)
             loadRecords()
             const { [img.path]: _, ...rest } = liuyiParseTasks.value
             liuyiParseTasks.value = rest
@@ -835,6 +934,8 @@ async function handleDrop(e) {
       } else {
         showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
       }
+    } else if (uploadedPaths.length > 0 && !isLiuyi && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
     } else if (!isUnmounted) {
       showToast(`${files.length} 张图片上传成功`, 'success')
     }
@@ -851,10 +952,14 @@ async function handleDrop(e) {
 
 // ── 粘贴上传 ──
 async function handlePaste(e) {
-  const items = e.clipboardData?.items
-  if (!items) return
+  const clipboard = e.clipboardData
+  if (!clipboard) return
   const imageFiles = []
-  for (const item of items) {
+  // 部分浏览器/文件复制只暴露 files，不提供 image 类型的 items。
+  for (const file of clipboard.files || []) {
+    if (file.type.startsWith('image/')) imageFiles.push(file)
+  }
+  for (const item of imageFiles.length ? [] : (clipboard.items || [])) {
     if (item.type.startsWith('image/')) {
       const file = item.getAsFile()
       if (file) {
@@ -864,7 +969,16 @@ async function handlePaste(e) {
       }
     }
   }
-  if (!imageFiles.length) return
+  const htmlImages = []
+  if (!imageFiles.length && !e.target?.closest?.('input, textarea, [contenteditable="true"]')) {
+    const html = clipboard.getData?.('text/html') || ''
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    for (const img of doc.querySelectorAll('img')) {
+      const src = img.getAttribute('src') || img.getAttribute('data-src')
+      if (src && !htmlImages.includes(src)) htmlImages.push(src)
+    }
+  }
+  if (!imageFiles.length && !htmlImages.length) return
   e.preventDefault()
   if (isUnmounted) return
 
@@ -874,8 +988,14 @@ async function handlePaste(e) {
   if (uploading.value) return
 
   uploading.value = true
-  showToast(`正在粘贴上传 ${imageFiles.length} 张图片...`, 'info')
+  showToast(`正在粘贴上传 ${imageFiles.length || htmlImages.length} 张图片...`, 'info')
   try {
+    for (const url of htmlImages) {
+      const { data: blob } = await getWechatClipboardImage(url)
+      if (!blob.type?.startsWith('image/')) throw new Error('未能读取微信原图，请保存图片后上传')
+      const ext = blob.type.split('/')[1].replace('jpeg', 'jpg')
+      imageFiles.push(new File([blob], `wechat-${Date.now()}-${imageFiles.length}.${ext}`, { type: blob.type }))
+    }
     const uploadFn = isLiuyi ? uploadLiuyiImage : (isGallery ? uploadValuationImage : uploadDdImage)
     const uploadedPaths = []
     for (const file of imageFiles) {
@@ -928,6 +1048,8 @@ async function handlePaste(e) {
       } else {
         showToast(`自动解析完成：${successCount} 张图片已识别`, 'success')
       }
+    } else if (uploadedPaths.length > 0 && !isLiuyi && !isUnmounted) {
+      await autoParseDdImages(uploadedPaths)
     } else if (!isUnmounted) {
       showToast(`${imageFiles.length} 张图片粘贴上传成功`, 'success')
     }
@@ -1235,7 +1357,7 @@ watch(activeTab, (tab) => {
           </button>
           <div class="upload-hint">
             <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-            拖拽图片到页面 或 Ctrl+V 粘贴
+            拖拽图片到页面 或 Ctrl+V / ⌘V 粘贴
           </div>
           <select v-model="ddSelectedDate" @change="loadDdImages" class="date-select">
             <option value="">全部日期</option>
@@ -1313,7 +1435,7 @@ watch(activeTab, (tab) => {
           </button>
           <div class="upload-hint">
             <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-            拖拽图片到页面 或 Ctrl+V 粘贴
+            拖拽图片到页面 或 Ctrl+V / ⌘V 粘贴原图
           </div>
           <select v-model="liuyiSelectedDate" @change="loadLiuyiImages" class="date-select">
             <option value="">全部日期</option>
@@ -1321,6 +1443,15 @@ watch(activeTab, (tab) => {
           </select>
         </div>
         <span class="toolbar-count terminal-label">共 <span class="font-jet">{{ liuyiImages.length }}</span> 张</span>
+      </div>
+
+      <div v-if="liuyiParseResult" class="liuyi-result" role="status" aria-live="polite">
+        <template v-if="liuyiParseResult.ok">
+          「{{ liuyiParseResult.name }}」识别完成：{{ liuyiParseResult.data.count || 0 }} 个指数
+          <span v-if="liuyiParseResult.data.update_date"> · 数据日期 {{ liuyiParseResult.data.update_date }}</span>
+          <p>结果已保存，可在「估值数据 → 六亿图片估值」查看。</p>
+        </template>
+        <template v-else>「{{ liuyiParseResult.name }}」识别失败：{{ liuyiParseResult.message }}</template>
       </div>
 
       <div v-if="liuyiLoading" class="loading-state">
@@ -1388,11 +1519,38 @@ watch(activeTab, (tab) => {
     <!-- Lightbox -->
     <Teleport to="body">
       <Transition name="lightbox">
-        <div v-if="previewImage" class="lightbox" @click.self="closePreview">
-          <button @click="closePreview" class="lightbox-close">
+        <div
+          v-if="previewImage"
+          class="lightbox"
+          @click.self="closePreview"
+          @wheel="handlePreviewWheel"
+          @pointermove="handlePreviewPointerMove"
+          @pointerup="handlePreviewPointerUp"
+          @pointercancel="handlePreviewPointerUp"
+        >
+          <button @click="closePreview" class="lightbox-close" title="关闭图片">
             <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
-          <img :src="previewImage" />
+          <img
+            :src="previewImage"
+            :class="{ 'is-zoomed': previewScale > 1, 'is-dragging': previewDragging }"
+            :style="{ transform: `translate(${previewOffset.x}px, ${previewOffset.y}px) scale(${previewScale})` }"
+            draggable="false"
+            @pointerdown="handlePreviewPointerDown"
+          />
+          <div class="lightbox-controls" @click.stop>
+            <button @click="zoomPreview(-1)" :disabled="previewScale <= 1" title="缩小">
+              <ZoomOut :size="18" />
+            </button>
+            <span class="lightbox-scale">{{ Math.round(previewScale * 100) }}%</span>
+            <button @click="zoomPreview(1)" :disabled="previewScale >= 5" title="放大">
+              <ZoomIn :size="18" />
+            </button>
+            <span class="lightbox-control-divider"></span>
+            <button @click="resetPreviewZoom" :disabled="previewScale === 1 && previewOffset.x === 0 && previewOffset.y === 0" title="还原大小">
+              <RotateCcw :size="16" />
+            </button>
+          </div>
         </div>
       </Transition>
     </Teleport>
@@ -1754,6 +1912,19 @@ watch(activeTab, (tab) => {
   justify-content: space-between;
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+.liuyi-result {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.liuyi-result p {
+  margin: 0.4rem 0 0;
+  color: var(--color-text-secondary);
 }
 
 .liuyi-actions {
@@ -2310,6 +2481,7 @@ watch(activeTab, (tab) => {
   align-items: center;
   justify-content: center;
   padding: 2rem;
+  overflow: hidden;
 }
 
 .lightbox-close {
@@ -2336,6 +2508,72 @@ watch(activeTab, (tab) => {
   max-height: 90vh;
   object-fit: contain;
   border-radius: var(--radius-md);
+  transform-origin: center;
+  transition: transform 0.16s ease-out;
+  touch-action: none;
+  user-select: none;
+  cursor: zoom-in;
+}
+
+.lightbox img.is-zoomed {
+  cursor: grab;
+}
+
+.lightbox img.is-dragging {
+  cursor: grabbing;
+  transition: none;
+}
+
+.lightbox-controls {
+  position: absolute;
+  bottom: 1.5rem;
+  left: 50%;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  color: white;
+  background: rgba(28, 30, 34, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-md);
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+}
+
+.lightbox-controls button {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.lightbox-controls button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.lightbox-controls button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.lightbox-scale {
+  min-width: 3.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+}
+
+.lightbox-control-divider {
+  width: 1px;
+  height: 1.25rem;
+  margin: 0 0.15rem;
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .lightbox-enter-active { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }

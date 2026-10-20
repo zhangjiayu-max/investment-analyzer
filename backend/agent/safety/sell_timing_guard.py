@@ -1,358 +1,194 @@
-"""卖出操作时机守卫。
+"""卖出依据守卫：逐标的核查理由，不以买入成本强制持有或继续定投。
 
-conv#131 修复：综合报告建议卖出/减仓/清仓/止损/止盈时，必须显式包含
-估值分位和盈亏状态信息，避免"无时机判断的卖出"导致底部割肉。
-
-G-3（2026-07-23）增强：
-- 开关默认改为 true（原 false），因属安全防线非可选功能
-- 区分止盈（盈利卖出）vs 止损（亏损清仓/减仓）
-- 止损类操作必须满足额外条件（估值高位/基本面恶化），否则拦截
-- 综合报告生成器配合增加"止盈不止损硬约束"提示
-
-设计原则：
-- 不修改 LLM 原文输出，只追加警告/拦截区块（保持输出完整性）
-- 纯 Python 正则实现，不引入新 LLM 调用
-- 与 arbitration_guard 互补：仲裁守卫管方向冲突，时机守卫管时机依据
+组合持有与个别标的减持可以并存。集中度、风险预算、流动性或基本面
+理由可支持减持；估值择时需给出该标的的估值与盈亏背景。此处只核查
+报告中的依据是否齐备，事实真伪仍由上游原始工具证据校验。
 """
-
 from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-
-# ── 卖出操作关键词（触发时机守卫） ──────────────────────
-# 注意：关键词需要足够具体，避免误判"风险提示"段中的描述性文字
-_SELL_KEYWORDS = [
-    "建议卖出", "应该卖出", "可以卖出", "考虑卖出",
-    "建议减仓", "应该减仓", "可以减仓", "考虑减仓",
-    "建议止损", "应该止损", "可以止损", "考虑止损",
-    "建议止盈", "应该止盈", "可以止盈", "考虑止盈",
-    "立即卖出", "立即减仓", "立即止损", "立即止盈",
-    "全部卖出", "全部清仓", "清仓", "赎回",
-    "卖出止盈", "卖出止损", "减仓止盈",
-]
-
-# ── 估值分位识别正则 ──────────────────────────────────
-# 匹配"PE 分位 15.2%"、"估值百分位 0.45%"、"PB 历史分位 30%"等
+_SELL_ACTION = re.compile(r'卖出|减仓|减持|清仓|赎回|止损|止盈')
+_CODE = re.compile(r'(?<!\d)\d{6}(?!\d)')
+_NEGATED = re.compile(r'(?:不建议|不应|无需|不要|避免|禁止|暂不|不|勿|尚未|历史|曾经|已完成)[^，。；\n]{0,6}$')
 _PERCENTILE_PATTERNS = [
-    re.compile(
-        r'(?:百分位|分位|历史分位|估值分位|PE\s*分位|PB\s*分位|市盈率\s*分位|市净率\s*分位)'
-        r'[^。\n]{0,30}?'
-        r'(\d+(?:\.\d+)?\s*%)',
-        re.IGNORECASE
-    ),
-    re.compile(
-        r'(?:PE|PB|市盈率|市净率|pe_ttm|pb_ttm)'
-        r'[^。\n]{0,15}?'
-        r'(\d+(?:\.\d+)?)',
-        re.IGNORECASE
-    ),
+    re.compile(r'(?:百分位|分位|历史分位|估值分位|PE\s*分位|PB\s*分位)[^。\n]{0,30}?(\d+(?:\.\d+)?\s*%)', re.I),
+    re.compile(r'(?:PE|PB|市盈率|市净率|pe_ttm|pb_ttm)[^。\n]{0,15}?(\d+(?:\.\d+)?)', re.I),
+]
+_PROFIT_PATTERNS = [
+    re.compile(r'(?:盈亏率|盈亏|亏损|盈利|浮亏|浮盈|收益率|profit_rate|profit_pct)[^。\n]{0,30}?[-+]?\d+(?:\.\d+)?\s*%', re.I),
+    re.compile(r'[-+]?\d+(?:\.\d+)?\s*%[^。\n]{0,15}?(?:盈亏|亏损|盈利|浮亏|浮盈)', re.I),
+]
+_FUNDAMENTAL_DECAY_KEYWORDS = [
+    '基本面恶化', '业绩下滑', '营收下降', '营收下滑', 'ROE下降', 'ROE下滑',
+    '净资产收益率下降', '评级下调', '信用降级', '违约',
 ]
 
-# ── 盈亏状态识别正则 ──────────────────────────────────
-# 匹配"盈亏率 -19.5%"、"亏损 15%"、"盈利 8.2%"、"profit_rate: -10%"等
-_PROFIT_PATTERNS = [
-    re.compile(
-        r'(?:盈亏率|盈亏|亏损|盈利|浮亏|浮盈|收益率|profit_rate|profit_pct)'
-        r'[^。\n]{0,30}?'
-        r'(-?\d+(?:\.\d+)?\s*%)',
-        re.IGNORECASE
-    ),
-    re.compile(
-        r'(-?\d+(?:\.\d+)?)\s*%'
-        r'[^。\n]{0,15}?'
-        r'(?:盈亏|亏损|盈利|浮亏|浮盈)',
-        re.IGNORECASE
-    ),
-]
+
+def _operation_section(answer: str) -> str:
+    """优先读取操作建议及其子节，排除后续风险描述。"""
+    headers = list(re.finditer(r'^(#{1,6})\s*(.*?)\s*$', answer, re.M))
+    for index, header in enumerate(headers):
+        if re.search(r'第\s*4\s*段|(?:具体)?操作建议', header.group(2)):
+            end = next((next_header.start() for next_header in headers[index + 1:]
+                        if len(next_header.group(1)) <= len(header.group(1))), len(answer))
+            return answer[header.end():end]
+    risk = next((header.start() for header in headers
+                 if re.search(r'第\s*5\s*段|风险提示|风险与盲点', header.group(2))), len(answer))
+    return answer[:risk]
+
+
+def _positive_sell_actions(text: str) -> list[str]:
+    return [match.group(0) for match in _SELL_ACTION.finditer(text)
+            if not _NEGATED.search(text[max(0, match.start() - 12):match.start()])]
 
 
 def _detect_sell_actions(answer: str) -> list[str]:
-    """检测 answer 中出现的卖出操作关键词。
+    """只识别建议区域内的正向卖出动作，包含表格中的减持。"""
+    return list(dict.fromkeys(_positive_sell_actions(_operation_section(answer))))
 
-    Returns:
-        匹配到的关键词列表（去重）
-    """
-    if not answer:
-        return []
-    # 只检测"操作建议"段，避免误报"风险提示"段
-    op_section = answer
-    section_patterns = [
-        r'(?:^|\n)#{1,6}\s*(?:第\s*4\s*段[:：]?|操作建议|具体操作建议).*$',
-        r'(?:^|\n)#{1,6}\s*操作建议.*?(?=\n#{1,6}|\Z)',
-    ]
-    for pat in section_patterns:
-        m = re.search(pat, answer, re.MULTILINE | re.DOTALL)
-        if m:
-            op_section = m.group(0)
-            next_header = re.search(r'\n#{1,6}\s', op_section[1:])
-            if next_header:
-                op_section = op_section[:next_header.start() + 1]
+
+def _has_percentile_info(text: str) -> bool:
+    return any(pattern.search(text or '') for pattern in _PERCENTILE_PATTERNS)
+
+
+def _has_profit_info(text: str) -> bool:
+    return any(pattern.search(text or '') for pattern in _PROFIT_PATTERNS)
+
+
+def _has_high_valuation_info(text: str) -> bool:
+    if re.search(r'(?:没有|不存在|并非|并不|尚未|未见|无)[^，。；\n]{0,8}(?:高估|估值高|估值偏高)', text):
+        return False
+    if re.search(r'估值高位|高估|估值偏高|估值较贵', text, re.I):
+        return True
+    return any(float(match.group(1)) >= 60 for match in re.finditer(
+        r'分位(?:数)?\s*(?:为|是|[:：=])?\s*(\d+(?:\.\d+)?)\s*%', text))
+
+
+def _has_fundamental_decay(text: str) -> bool:
+    return any(keyword.lower() in clause.lower()
+               and not re.search(r'没有|不存在|并非|并未|尚未|未见|无.*证据', clause)
+               for clause in re.split(r'[。；\n]', text)
+               for keyword in _FUNDAMENTAL_DECAY_KEYWORDS)
+
+
+def _classify_sell_type(text: str) -> str:
+    """分类仅供描述；浮亏本身不构成止损否决权。"""
+    if not _detect_sell_actions(text):
+        return 'unknown'
+    if re.search(r'亏损|浮亏|盈亏率\s*[-：:]?\s*-\d', text):
+        return 'stop_loss'
+    if re.search(r'盈利|浮盈|止盈', text):
+        return 'take_profit'
+    return 'unknown'
+
+
+def _local_following(lines: list[str], start: int, codes: set[str]) -> str:
+    """同一标的的相邻解释可关联；其他代码/新动作/章节切断上下文。"""
+    block = [lines[start]]
+    for line in lines[start + 1:]:
+        if re.match(r'\s*#', line):
             break
+        line_codes = set(_CODE.findall(line))
+        if line_codes and (not codes or line_codes != codes):
+            break
+        basis_line = bool(re.match(r'\s*(?:[-*]\s*)?(?:理由|依据|原因)[：:]', line))
+        if _positive_sell_actions(line) and not basis_line and (not codes or line_codes != codes):
+            break
+        if line.strip() and not line_codes and not re.match(
+                r'\s*(?:[-*]\s*)?(?:理由|依据|原因|当前|目前|PE|PB|市盈率|估值|盈亏|盈利|亏损|浮盈|浮亏|风险预算|集中度|流动性)',
+                line, re.I):
+            # 没有代码的另一只基金不能仅凭相邻位置借用为本标的证据。
+            break
+        block.append(line)
+    return '\n'.join(block)
 
-    # 如果没找到"操作建议"段，使用全文但排除"风险提示"段
-    risk_pat = re.search(
-        r'(?:^|\n)#{1,6}\s*(?:第\s*5\s*段[:：]?|风险提示|风险与盲点|风险提示与盲点).*$',
-        answer, re.MULTILINE
-    )
-    if risk_pat and op_section is answer:
-        op_section = answer[:risk_pat.start()]
 
-    matched = []
-    for kw in _SELL_KEYWORDS:
-        if kw in op_section:
-            matched.append(kw)
-    return matched
+def _sell_contexts(answer: str) -> list[tuple[str, str]]:
+    """为每个卖出标的独立关联正文行，避免借用另一只基金的指标。"""
+    operation_lines = _operation_section(answer).splitlines()
+    all_lines = answer.splitlines()
+    contexts = []
+    seen = set()
+    for index, line in enumerate(operation_lines):
+        if re.match(r'\s*(?:[-*]\s*)?(?:理由|依据|原因)[：:]', line):
+            continue
+        if not _positive_sell_actions(line):
+            continue
+        codes = set(_CODE.findall(line))
+        label = '/'.join(sorted(codes)) if codes else re.sub(r'^[\s|*\d.、-]+', '', line).strip()[:40]
+        if label in seen:
+            continue
+        seen.add(label)
+        context = _local_following(operation_lines, index, codes)
+        if len(codes) == 1:
+            # 数据段与建议段分离时，仅补入明确写出同一代码的记录。
+            for data_index, data_line in enumerate(all_lines):
+                if set(_CODE.findall(data_line)) == codes:
+                    context += '\n' + _local_following(all_lines, data_index, codes)
+        elif len(codes) > 1:
+            # 一个句子多个标的无法可靠分配估值和盈亏，不声称已逐标的核对。
+            context = ''
+        contexts.append((label or '未指明标的', context))
+    return contexts
 
 
-def _has_percentile_info(answer: str) -> bool:
-    """检测 answer 是否包含估值分位/PE/PB 信息。"""
-    if not answer:
-        return False
-    for pat in _PERCENTILE_PATTERNS:
-        if pat.search(answer):
+def _has_portfolio_reason(text: str) -> bool:
+    """组合理由需给出约束、偏离或已确认用途，单个关键词不能授权卖出。"""
+    # 去除否定/缺失的理由描述，避免把“没有集中度超限证据”当作依据。
+    clauses = re.split(r'[。；\n]', text)
+    for clause in clauses:
+        if re.search(r'没有|不存在|未确认|未核实|尚未|不需要|无.*(?:证据|需求)|待确认|假设', clause):
+            continue
+        numeric = bool(re.search(r'\d+(?:\.\d+)?\s*[%元]', clause))
+        if numeric and re.search(r'集中度|单只|单一|占总资产|权重|仓位', clause) and re.search(r'超限|超过|高于|上限|回到|降至|压降', clause):
+            return True
+        if re.search(r'风险预算|风险敞口|风险承受', clause) and re.search(r'超过|超出|回到|降低|下调|收紧', clause) and (numeric or '已确认' in clause):
+            return True
+        if re.search(r'流动性|还款|用款|现金需求|医疗|支出', clause) and re.search(r'需要|需求|不足|缺口|到期', clause) and (numeric or '已确认' in clause):
             return True
     return False
 
 
-def _has_profit_info(answer: str) -> bool:
-    """检测 answer 是否包含盈亏状态信息。"""
-    if not answer:
-        return False
-    for pat in _PROFIT_PATTERNS:
-        if pat.search(answer):
-            return True
-    return False
-
-
-def enforce_sell_timing_guard(
-    answer: str,
-    trace_id: str = "",
-    arbitration_summary: dict | None = None,
-) -> tuple[str, list[str]]:
-    """卖出操作时机守卫。
-
-    检测综合报告中卖出/减仓/清仓等操作建议时，强制要求 answer 包含
-    估值分位和盈亏状态信息。缺失时在 answer 末尾追加警告区块。
-
-    G-3（2026-07-23）增强：
-    - 区分止盈（盈利卖出）vs 止损（亏损清仓/减仓）
-    - 止损类操作必须满足额外条件（估值高位/基本面恶化），否则拦截
-
-    P1 修复（conv_150/153/155）：
-    - 检查基于最终回复内容（final_content），不再受专家原始建议干扰
-    - 若仲裁裁决为 hold/watch，直接跳过止盈不止损检查：此时若综合报告
-      出现卖出关键词，属于方向冲突，由 arbitration_guard 负责；
-      sell_timing_guard 仅在已确认卖出方向时校验时机依据
-
-    Args:
-        answer: 综合报告 LLM 生成的回答（最终回复内容）
-        trace_id: 追踪 ID，用于日志
-        arbitration_summary: 仲裁模块输出的结构化裁决（含 verdict/stance），
-            为 hold/watch 时跳过检查；None 或提取失败时不影响原逻辑
-
-    Returns:
-        (修正后的 answer, warnings 列表)
-        - 若无卖出操作或开关关闭，answer 原样返回
-        - 若有卖出操作但缺少时机依据，answer 末尾追加警告
-        - 若为止损类操作且不满足额外条件，answer 末尾追加拦截区块
-        - warnings 为字符串列表，便于日志记录
-
-    开关：
-        agent.sell_timing_guard_enabled（G-3：默认改为 true）
-    """
-    warnings: list[str] = []
-
-    # 开关检查（G-3：默认改为 true）
+def enforce_sell_timing_guard(answer: str, trace_id: str = '',
+                              arbitration_summary: dict | None = None) -> tuple[str, list[str]]:
+    """逐标的检查减持理由；组合 HOLD 不跳过检查，依据不足只追加警示。"""
+    warnings = []
     try:
         from db.config import get_config_bool
-        if not get_config_bool("agent.sell_timing_guard_enabled", True):
+        if not get_config_bool('agent.sell_timing_guard_enabled', True):
             return answer, warnings
     except Exception:
-        # 配置读取失败时降级为关闭（保守策略）
         return answer, warnings
-
     if not answer:
         return answer, warnings
-
-    # P1 修复（conv_153）：仲裁裁决为 hold/watch 时直接跳过止盈不止损检查。
-    # 此时若最终回复出现卖出关键词，属于方向冲突（由 arbitration_guard 负责）；
-    # sell_timing_guard 仅在已确认卖出方向时校验时机依据，避免基于专家原始建议误判。
-    if arbitration_summary is not None:
-        try:
-            from agent.safety.arbitration_guard import _extract_arbitration_stance
-            _arb_stance, _arb_verdict = _extract_arbitration_stance(arbitration_summary)
-            if _arb_stance in ("hold", "watch"):
-                logger.info(
-                    f"[trace:{trace_id}] [sell_timing_guard] 仲裁裁决为 "
-                    f"{_arb_stance}（{_arb_verdict or _arb_stance}），跳过止盈不止损检查"
-                )
-                return answer, warnings
-        except Exception as _e:
-            logger.debug(
-                f"[trace:{trace_id}] [sell_timing_guard] 仲裁 stance 提取失败，按原逻辑继续: {_e}"
-            )
-
-    # 检测卖出操作
-    sell_kws = _detect_sell_actions(answer)
-    if not sell_kws:
+    missing = []
+    for target, context in _sell_contexts(answer):
+        if _has_portfolio_reason(context) or _has_fundamental_decay(context):
+            continue
+        has_valuation = _has_percentile_info(context)
+        has_profit = _has_profit_info(context)
+        if has_valuation and has_profit and _has_high_valuation_info(context):
+            continue
+        warnings.append('sell_without_basis:' + target)
+        details = []
+        if not has_valuation:
+            warnings.append('sell_without_percentile')
+            details.append('该标的的估值依据')
+        if not has_profit:
+            warnings.append('sell_without_profit')
+            details.append('该标的的盈亏背景')
+        details.append('明确的集中度、风险预算、用款需求、基本面变化或估值择时理由')
+        missing.append(f'- {target}：需核对' + '、'.join(details) + '。')
+    if not warnings:
         return answer, warnings
-
-    # 检测估值分位和盈亏状态
-    has_percentile = _has_percentile_info(answer)
-    has_profit = _has_profit_info(answer)
-
-    # G-3b：分类卖出类型（止盈/止损/未知）
-    sell_type = _classify_sell_type(answer)
-    logger.info(
-        f"[trace:{trace_id}] [sell_timing_guard] 卖出操作检测: "
-        f"keywords={sell_kws[:3]}, type={sell_type}, "
-        f"has_percentile={has_percentile}, has_profit={has_profit}"
-    )
-
-    # G-3b：止损类操作必须满足额外条件（估值高位 或 基本面恶化）
-    if sell_type == "stop_loss":
-        has_high_valuation = _has_high_valuation_info(answer)
-        has_fundamental_decay = _has_fundamental_decay(answer)
-
-        if not (has_high_valuation or has_fundamental_decay):
-            # 拦截：违反止盈不止损原则
-            warnings.append("stop_loss_vetoed")
-            veto_block = _build_stop_loss_veto_block(sell_kws[:3])
-            answer = answer.rstrip() + veto_block
-            logger.warning(
-                f"[trace:{trace_id}] [sell_timing_guard] 止损操作被拦截: "
-                f"keywords={sell_kws[:3]}, 缺少估值高位/基本面恶化证据"
-            )
-            return answer, warnings
-
-    # 止盈类或满足止损额外条件：检查时机依据是否完整
-    if has_percentile and has_profit:
-        logger.debug(
-            f"[trace:{trace_id}] [sell_timing_guard] 卖出操作已包含时机依据: "
-            f"keywords={sell_kws[:3]}, type={sell_type}"
-        )
-        return answer, warnings
-
-    # 构建警告区块
-    missing_parts = []
-    if not has_percentile:
-        missing_parts.append("估值分位（PE/PB 历史分位）")
-        warnings.append("sell_without_percentile")
-    if not has_profit:
-        missing_parts.append("盈亏状态（当前盈亏率）")
-        warnings.append("sell_without_profit")
-
-    warning_block = (
-        "\n\n---\n\n"
-        "⚠️ **卖出时机守卫提示**\n\n"
-        f"本回答包含卖出/减仓操作建议（{', '.join(sell_kws[:3])}），"
-        f"类型：{('止损' if sell_type == 'stop_loss' else '止盈' if sell_type == 'take_profit' else '未明确')}，"
-        f"但未提供以下时机依据：{', '.join(missing_parts)}。\n\n"
-        "**建议**：\n"
-        "- 先调用 `query_valuation` 查询标的当前估值分位，判断是否处于低位\n"
-        "- 先调用 `query_portfolio` 确认标的当前盈亏率，区分止盈/止损\n"
-        "- 若标的为亏损且估值低位，应遵循「止盈不止损」原则，禁止底部割肉\n"
-        "- 若标的为盈利且估值高位，止盈操作可执行\n\n"
-        "> 未提供时机依据的卖出建议可能导致「高买低卖」或「底部割肉」，请审慎参考。\n"
-    )
-
-    answer = answer.rstrip() + warning_block
-
-    logger.warning(
-        f"[trace:{trace_id}] [sell_timing_guard] 卖出操作缺少时机依据: "
-        f"keywords={sell_kws[:3]}, type={sell_type}, missing={missing_parts}"
-    )
-
-    return answer, warnings
-
-
-# ── G-3b（2026-07-23）：止盈/止损分类 + 止损拦截 ──────────
-
-# 亏损状态关键词（用于判定是否为止损操作）
-_LOSS_KEYWORDS = [
-    "亏损", "浮亏", "亏损中", "深套", "套牢", "被套",
-    "亏损率", "浮亏率", "跌幅",
-    "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9",
-]
-
-
-def _classify_sell_type(answer: str) -> str:
-    """区分止盈（盈利卖出）vs 止损（亏损清仓/减仓）。
-
-    Returns:
-        "take_profit" | "stop_loss" | "unknown"
-    """
-    if not answer:
-        return "unknown"
-
-    answer_lower = answer.lower()
-    has_loss = any(kw in answer_lower for kw in _LOSS_KEYWORDS)
-    has_sell = bool(_detect_sell_actions(answer))
-
-    if has_sell and has_loss:
-        return "stop_loss"
-    if has_sell:
-        return "take_profit"
-    return "unknown"
-
-
-# 估值高位关键词（PE/PB 分位 > 60%）
-_HIGH_VALUATION_PATTERNS = [
-    re.compile(r'(?:PE|PB|市盈率|市净率)\s*分位[^。\n]{0,15}?([6-9]\d(?:\.\d+)?)\s*%', re.IGNORECASE),
-    re.compile(r'分位[^。\n]{0,15}?([6-9]\d(?:\.\d+)?)\s*%', re.IGNORECASE),
-    re.compile(r'估值高位|高估|估值偏高|估值较贵', re.IGNORECASE),
-]
-
-
-def _has_high_valuation_info(answer: str) -> bool:
-    """检测 answer 是否包含估值高位证据（PE/PB 分位 > 60%）。"""
-    if not answer:
-        return False
-    for pat in _HIGH_VALUATION_PATTERNS:
-        if pat.search(answer):
-            return True
-    return False
-
-
-# 基本面恶化关键词
-_FUNDAMENTAL_DECAY_KEYWORDS = [
-    "基本面恶化", "业绩下滑", "业绩亏损", "营收下降", "营收下滑",
-    "ROE下降", "ROE下滑", "净资产收益率下降",
-    "管理费率上调", "费率上调", "费率提高",
-    "规模缩水", "规模下降", "规模萎缩",
-    "经理变更", "基金经理变更", "经理离任",
-    "评级下调", "信用降级",
-]
-
-
-def _has_fundamental_decay(answer: str) -> bool:
-    """检测 answer 是否包含基本面恶化证据。"""
-    if not answer:
-        return False
-    answer_lower = answer.lower()
-    return any(kw in answer_lower for kw in _FUNDAMENTAL_DECAY_KEYWORDS)
-
-
-def _build_stop_loss_veto_block(sell_kws: list[str]) -> str:
-    """构建止损拦截区块（违反止盈不止损原则时追加）。"""
-    return (
-        "\n\n---\n\n"
-        "> ⚠️ **止盈不止损原则拦截**\n"
-        f">\n"
-        f"> 本次建议涉及亏损标的的减仓/清仓操作（{', '.join(sell_kws)}），"
-        "但未满足以下任一额外条件：\n"
-        "> 1. 估值高位（PE/PB 分位 > 60%）\n"
-        "> 2. 基本面恶化（业绩下滑/规模缩水/经理变更/费率上调/评级下调）\n"
-        ">\n"
-        "> **项目硬约束**：亏损标的清仓需满足额外条件，不能仅因\"已亏损\"或\"功能重叠\"就割肉。\n"
-        ">\n"
-        "> **建议改为**：持有观察 + 等待估值/基本面信号明确后再决策。\n"
-        "> - 若标的估值已处高位（PE分位>60%），可补充估值数据后重新评估\n"
-        "> - 若基本面已恶化，可补充恶化证据后重新评估\n"
-        "> - 否则应坚持定投策略，避免在亏损区间割肉\n"
-    )
+    warnings = list(dict.fromkeys(warnings))
+    block = ('\n\n---\n\n**卖出时机守卫提示**\n\n'
+             '以下减持建议缺少逐标的依据，需补充核验后再评估：\n' + '\n'.join(missing) + '\n\n'
+             '盈亏和买入成本本身不能决定是否减持。减持应结合已确认的风险约束、资金用途及费用；'
+             '其他标的的盈利或估值信息不能代替上述核验。\n')
+    logger.warning('[trace:%s] [sell_timing_guard] 逐标的减持依据不足: %s', trace_id, warnings)
+    return answer.rstrip() + block, warnings

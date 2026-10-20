@@ -215,6 +215,7 @@ def get_latest_analysis_conclusions(
                       conversation_id, message_id
                FROM analysis_conclusions
                WHERE created_at >= datetime('now', 'localtime', ?)
+                 AND (expires_at IS NULL OR expires_at >= datetime('now', 'localtime'))
                ORDER BY created_at DESC
                LIMIT ?""",
             (f"-{hours} hours", limit),

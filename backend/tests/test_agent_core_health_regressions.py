@@ -128,6 +128,8 @@ def test_text_tool_call_keeps_full_result_for_code_validation(core, monkeypatch)
 
 @pytest.fixture
 def specialist_setup(core, reflection, monkeypatch):
+    # 这组用例验证专家独立反思；Pipeline 审查开启时不重复执行。
+    monkeypatch.setattr(core, "get_config_bool", lambda key, default: False if key == "pipeline.reflection_enabled" else default)
     agent = {"name": "基金分析师", "agent_key": "fund_analyst", "icon": "F",
              "tools": [], "system_prompt": "原有系统提示"}
     monkeypatch.setattr(core, "load_specialist_agents", lambda: {"fund_analyst": agent})

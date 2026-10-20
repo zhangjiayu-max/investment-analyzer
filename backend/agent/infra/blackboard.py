@@ -51,6 +51,9 @@ class BlackboardEntry:
     # {"affected_holding": "中证500ETF", "action": "加仓", "suggested_change": "10%",
     #  "current_position_pct": 15.0, "post_change_pct": 25.0, "risk_check": "未超25%上限"}
     portfolio_impact: Optional[dict] = None
+    # 结构化逐标的动作（优先于从长文本猜测）
+    asset_actions: list = field(default_factory=list)
+    portfolio_stance: str = "unknown"
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +69,8 @@ class BlackboardEntry:
             "duration_ms": self.duration_ms,
             "risk_veto": self.risk_veto,
             "portfolio_impact": self.portfolio_impact,
+            "asset_actions": self.asset_actions,
+            "portfolio_stance": self.portfolio_stance,
         }
 
 
@@ -306,15 +311,13 @@ class Blackboard:
             # P3: 只有不同专家才有冲突（同一专家同时买/卖不算）
             # 即 buy_set 和 sell_set 不能完全重合，且至少有一方来自不同专家
             if buy_set and sell_set:
-                # 去除同一专家既买又卖的情况（这通常是对不同情景的模拟）
-                pure_buy = buy_set - sell_set
-                pure_sell = sell_set - buy_set
-                # 只有存在"纯买方"和"纯卖方"时才算真冲突
-                if pure_buy and pure_sell:
+                # 同一专家同时给出相反动作也必须保留为待澄清冲突；
+                # 否则会把“条件买入/当前减仓”误折叠成无冲突。
+                if buy_set and sell_set:
                     conflicts.append({
                         "target": target,
-                        "buy_agents": list(pure_buy),
-                        "sell_agents": list(pure_sell),
+                        "buy_agents": list(buy_set),
+                        "sell_agents": list(sell_set),
                         "type": "buy_sell_conflict",
                     })
         return conflicts
@@ -396,11 +399,26 @@ def extract_entry_from_result(
     Args:
         result: run_specialist 返回的 dict，包含 analysis/tool_calls/duration_ms 等
     """
-    analysis = result.get("analysis", "") or ""
+    from agent.infra.message_protocol import normalize_specialist_result
+    structured = result.get("structured") or {}
+    inner = structured.get("structured") or structured
+    normalized = normalize_specialist_result(result)
+    analysis = result.get("analysis") or result.get("analysis_markdown") or inner.get("analysis_markdown") or ""
     conclusion = _extract_conclusion(analysis)
-    action_signals = _extract_action_signals(analysis, agent_key)
+    # 显式动作列表（包括空数组）是权威结果；拒绝后不能从全文重新激活。
+    if "asset_actions" in result:
+        structured_actions = result["asset_actions"]
+        has_structured_actions = True
+    elif "asset_actions" in inner:
+        structured_actions = inner["asset_actions"]
+        has_structured_actions = True
+    else:
+        structured_actions = result.get("action_signals") or inner.get("action_signals") or []
+        has_structured_actions = bool(structured_actions)
+    asset_actions = _normalize_asset_actions(structured_actions)
+    action_signals = asset_actions if has_structured_actions else _extract_action_signals(analysis, agent_key)
     key_data = _extract_key_data(analysis, result.get("tool_calls", []))
-    confidence = _estimate_confidence(analysis, action_signals)
+    confidence = _estimate_confidence(analysis, action_signals, result=normalized)
 
     # P0-A: 风险否决提取（仅 risk_assessor + 开关开启）
     risk_veto = None
@@ -419,7 +437,7 @@ def extract_entry_from_result(
     except Exception:
         impact_enabled = True
     if impact_enabled and action_signals:
-        portfolio_impact = _extract_portfolio_impact(analysis, action_signals)
+        portfolio_impact = _extract_portfolio_impact(analysis, action_signals, asset_actions)
 
     return BlackboardEntry(
         agent_key=agent_key,
@@ -432,6 +450,9 @@ def extract_entry_from_result(
         duration_ms=duration_ms or result.get("duration_ms", 0),
         risk_veto=risk_veto,
         portfolio_impact=portfolio_impact,
+        asset_actions=asset_actions,
+        portfolio_stance=normalized.get("portfolio_stance", "unknown"),
+        data_refs=result.get("data_references") or inner.get("data_references") or [],
     )
 
 
@@ -480,45 +501,67 @@ def _extract_conclusion(analysis: str) -> str:
 
 
 def _extract_action_signals(analysis: str, agent_key: str) -> list[dict]:
-    """从分析文本中提取动作信号。"""
+    """从短句提取动作信号。
+
+    这是兼容旧模型输出的最后回退路径。只接受带明确建议动词的句子，
+    跳过否定、历史描述和没有明确标的的动作，避免把“禁止加仓”或任意
+    六位数字（日期/指标）误认为交易动作。
+    """
     signals = []
-    text = analysis
-
-    # 买入信号
-    if re.search(r'建议买入|可以买入|加仓|定投|BUY', text, re.IGNORECASE):
-        # 尝试提取目标
-        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
-        target = target_match.group(1) if target_match else ""
-        signals.append({
-            "type": "BUY",
-            "target": target,
-            "confidence": 0.6,  # 默认置信度
-            "urgency": "medium",
-        })
-
-    # 卖出信号
-    if re.search(r'建议卖出|减仓|止盈|止损|SELL', text, re.IGNORECASE):
-        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
-        target = target_match.group(1) if target_match else ""
-        signals.append({
-            "type": "SELL",
-            "target": target,
-            "confidence": 0.6,
-            "urgency": "medium",
-        })
-
-    # 持有信号
-    if re.search(r'建议持有|继续持有|HOLD', text, re.IGNORECASE):
-        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
-        target = target_match.group(1) if target_match else ""
-        signals.append({
-            "type": "HOLD",
-            "target": target,
-            "confidence": 0.6,
-            "urgency": "low",
-        })
-
+    text = analysis or ""
+    # 按句切分，动作必须与建议/执行语义同句出现。
+    sentences = re.split(r"[。！？\n;；]", text)
+    target_re = re.compile(r"(沪深300|中证500|中证1000|创业板|科创50|(?:代码|基金)\s*[：:]?\s*(\d{6}))")
+    rules = (
+        ("BUY", re.compile(r"(?:建议|可以|考虑|执行|开始|继续)\s*(?:买入|加仓|建仓|定投|增持)")),
+        ("SELL", re.compile(r"(?:建议|可以|考虑|执行|开始)\s*(?:卖出|减仓|清仓|赎回|减持)")),
+        ("HOLD", re.compile(r"(?:建议|继续|保持)\s*持有|(?:建议|继续)\s*观望")),
+    )
+    neg_re = re.compile(r"(?:不建议|禁止|不要|无需|暂不|尚未|没有|未曾|避免)\s*(?:买入|加仓|建仓|定投|增持|卖出|减仓|清仓|赎回|持有)")
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence or neg_re.search(sentence) or re.search(r"(?:如果|若|假设|当.+时|一旦|历史|此前|曾经|已经|已于)", sentence):
+            continue
+        matched = next(((kind, rule) for kind, rule in rules if rule.search(sentence)), None)
+        if not matched:
+            continue
+        kind, _ = matched
+        target_match = target_re.search(sentence)
+        # 没有标的时不产生可执行信号；避免“首个六位数”误配。
+        if not target_match:
+            continue
+        target = target_match.group(2) or target_match.group(1)
+        signals.append({"type": kind, "target": target, "confidence": 0.45,
+                        "urgency": "low" if kind == "HOLD" else "medium",
+                        "source": "text_fallback"})
     return signals
+
+
+def _normalize_asset_actions(actions) -> list[dict]:
+    """规范化模型结构化逐标的动作，丢弃无标的/否定动作。"""
+    if not isinstance(actions, list):
+        return []
+    out = []
+    aliases = {"BUY": "BUY", "ADD": "BUY", "买入": "BUY", "加仓": "BUY", "增持": "BUY",
+               "SELL": "SELL", "卖出": "SELL", "减仓": "SELL", "清仓": "SELL",
+               "HOLD": "HOLD", "持有": "HOLD", "观望": "HOLD", "REDUCE": "SELL", "REDUCE_CONCENTRATION": "SELL"}
+    for raw in actions:
+        if not isinstance(raw, dict):
+            continue
+        target = str(raw.get("target_code") or raw.get("target") or raw.get("asset") or raw.get("code") or "").strip()
+        action = aliases.get(str(raw.get("type") or raw.get("action") or "").upper(),
+                             aliases.get(str(raw.get("type") or raw.get("action") or "")))
+        if not target or action not in {"BUY", "SELL", "HOLD"}:
+            continue
+        # 明确标记 conditional/negated/history 的动作不参与现时仲裁。
+        if (raw.get("negated") or raw.get("historical") or raw.get("condition") or raw.get("conditions")
+                or str(raw.get("status", "")).strip().lower() in {"conditional", "historical", "negated", "rejected"}):
+            continue
+        item = dict(raw)
+        item.update({"type": action, "target": target})
+        item.setdefault("source", "structured")
+        out.append(item)
+    return out
 
 
 def _extract_key_data(analysis: str, tool_calls: list) -> dict:
@@ -552,27 +595,51 @@ def _extract_key_data(analysis: str, tool_calls: list) -> dict:
     return key_data
 
 
-def _estimate_confidence(analysis: str, signals: list) -> float:
-    """根据分析质量和信号数量估计置信度。"""
-    confidence = 0.5  # 基础置信度
+def _estimate_confidence(analysis: str, signals: list, *, result: dict | None = None) -> float:
+    """基于可追溯证据估计置信度，禁止仅凭数字/“建议”把报告评为高置信。
 
-    # 有数据支撑 +0.2
-    if re.search(r'\d+\.?\d*%|\d+\.?\d*元|PE\s*\d', analysis):
-        confidence += 0.2
+    未验证的文本最多 0.6；只有工具证据、结构化置信度和完整状态同时存在时，
+    才允许超过该上限。失败/截断/缺证据会再次降低上限。
+    """
+    result = result or {}
+    analysis = analysis or ""
+    tool_calls = result.get("tool_calls") or []
+    if isinstance(tool_calls, dict):
+        tool_calls = tool_calls.get("tool_calls") or []
+    has_tool_evidence = isinstance(tool_calls, list) and any(
+        isinstance(call, dict) and (call.get("result") or call.get("result_preview") or call.get("evidence_ref"))
+        for call in tool_calls
+    )
+    structured_conf = result.get("confidence")
+    try:
+        structured_conf = float(structured_conf) if structured_conf is not None else None
+    except (TypeError, ValueError):
+        structured_conf = None
+    status = str(result.get("status") or result.get("reflection_status") or "").lower()
+    failed = status in {"failed", "error", "timeout", "truncated", "partial"} or bool(result.get("truncated"))
+    has_refs = bool(result.get("data_references") or result.get("evidence_refs") or result.get("freshness"))
 
-    # 有明确结论 +0.15
-    if re.search(r'结论[：:]|综上[，,]?|建议', analysis):
-        confidence += 0.15
-
-    # 有动作信号 +0.1
+    confidence = 0.25
+    if len(analysis) >= 200:
+        confidence += 0.08
     if signals:
-        confidence += 0.1
+        confidence += 0.03
+    if has_tool_evidence:
+        confidence += 0.18
+    if has_refs:
+        confidence += 0.08
+    if structured_conf is not None:
+        # 模型自报分只作为弱证据，不能单独抬高上限。
+        confidence += max(0.0, min(structured_conf, 1.0)) * 0.12
 
-    # 分析长度适中 +0.05（太短可能不深入，太长可能啰嗦）
-    if 200 <= len(analysis) <= 2000:
-        confidence += 0.05
-
-    return min(confidence, 0.95)  # 上限 0.95
+    fully_verified = has_tool_evidence and structured_conf is not None and has_refs and not failed
+    cap = 0.82 if fully_verified else 0.60
+    if not has_tool_evidence and structured_conf is None:
+        cap = min(cap, 0.45)
+    if failed:
+        cap = min(cap, 0.35)
+        confidence -= 0.10
+    return round(max(0.0, min(confidence, cap)), 3)
 
 
 # ── P0-A: 风险否决提取 ──────────────────────────
@@ -658,7 +725,7 @@ _IMPACT_BUY_KEYWORDS = ["加仓", "买入", "定投", "建仓", "增持"]
 _IMPACT_SELL_KEYWORDS = ["减仓", "卖出", "止盈", "止损", "减持", "清仓"]
 
 
-def _extract_portfolio_impact(analysis: str, action_signals: list) -> Optional[dict]:
+def _extract_portfolio_impact(analysis: str, action_signals: list, asset_actions: list | None = None) -> Optional[dict]:
     """从分析文本和动作信号中提取持仓影响标注。
 
     返回结构化影响 dict，无法提取时返回 None。
@@ -666,13 +733,17 @@ def _extract_portfolio_impact(analysis: str, action_signals: list) -> Optional[d
     if not analysis:
         return None
 
-    text = analysis
-
-    # 确定动作类型
+    text = analysis or ""
+    source_actions = asset_actions or []
+    # 确定动作类型；没有结构化 action 时仅输出标的方向，不读取全文数字。
     action = None
-    if any(kw in text for kw in _IMPACT_BUY_KEYWORDS):
+    if any(s.get("type") == "BUY" for s in source_actions):
         action = "加仓"
-    elif any(kw in text for kw in _IMPACT_SELL_KEYWORDS):
+    elif any(s.get("type") == "SELL" for s in source_actions):
+        action = "减仓"
+    elif any(s.get("type") == "BUY" for s in action_signals):
+        action = "加仓"
+    elif any(s.get("type") in ("SELL", "REDUCE") for s in action_signals):
         action = "减仓"
     if not action:
         # 从 action_signals 推断
@@ -683,51 +754,45 @@ def _extract_portfolio_impact(analysis: str, action_signals: list) -> Optional[d
         else:
             return None
 
-    # 提取建议变动比例
+    # 变动比例仅接受结构化字段；全文中的百分比可能是收益率/当前占比。
     suggested_change = ""
-    pct_match = re.search(r'(?:加仓|减仓|买入|卖出|止盈|止损|定投|建仓|增持|减持)[^%\d]*(\d+(?:\.\d+)?)\s*%', text)
-    if pct_match:
-        suggested_change = f"{pct_match.group(1)}%"
-    else:
-        # 尝试匹配"X 成"等中文表达
-        ch_match = re.search(r'(?:加仓|减仓|买入|卖出)\s*[一二三四五六七八九十1-9]\s*成', text)
-        if ch_match:
-            suggested_change = ch_match.group(0).split()[-1] if ch_match.group(0) else ""
+    structured_target = None
+    for sig in source_actions:
+        if sig.get("target") and sig.get("type") in {"BUY", "SELL"}:
+            structured_target = sig
+            change = sig.get("change_pct", sig.get("suggested_change_pct"))
+            if isinstance(change, (int, float)):
+                suggested_change = f"{change:g}%"
+            elif isinstance(change, str) and re.fullmatch(r"\d+(?:\.\d+)?%?", change.strip()):
+                suggested_change = change if change.strip().endswith("%") else f"{change.strip()}%"
+            break
 
     # 提取受影响持仓
     affected = ""
-    for s in action_signals:
+    for s in (source_actions or action_signals):
         if s.get("target"):
             affected = s["target"]
             break
     if not affected:
-        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|[\d]{6})', text)
+        target_match = re.search(r'(沪深300|中证500|中证1000|创业板|科创50|(?:代码|基金)\s*[：:]?\s*\d{6})', text)
         if target_match:
             affected = target_match.group(1)
     if not affected:
         return None  # 无法确定标的，不生成影响标注
 
-    # 查询当前持仓占比（复用 portfolio_context）
-    current_pct = 0.0
-    try:
-        from services.portfolio_context import build_portfolio_summary_line
-        summary_line = build_portfolio_summary_line("default")
-        if summary_line and affected:
-            # 在持仓摘要中查找该标的的占比
-            # 持仓行格式: "持仓: 名称1(25%), 名称2(10%)"
-            # 模糊匹配标的名称
-            for seg in summary_line.split("("):
-                if affected in seg or seg in affected:
-                    pct_m = re.search(r'(\d+)%', seg)
-                    if pct_m:
-                        current_pct = float(pct_m.group(1))
-                        break
-    except Exception:
-        pass
+    # 没有同一快照提供的当前占比时保持未知，绝不填 0 再计算“变动后占比”。
+    current_pct = None
+    for s in source_actions:
+        if s.get("target") == affected and isinstance(s.get("current_position_pct"), (int, float)):
+            current_pct = float(s["current_position_pct"])
+            break
 
     # 计算变动后占比
-    post_pct = current_pct
-    if suggested_change:
+    post_pct = None
+    denominator = None
+    if structured_target:
+        denominator = structured_target.get("denominator") or structured_target.get("pct_denominator")
+    if suggested_change and current_pct is not None and denominator:
         try:
             change_val = float(re.search(r'(\d+(?:\.\d+)?)', suggested_change).group(1))
             if action == "加仓":
@@ -735,21 +800,20 @@ def _extract_portfolio_impact(analysis: str, action_signals: list) -> Optional[d
             else:  # 减仓
                 post_pct = max(0, current_pct - change_val)
         except Exception:
-            post_pct = current_pct
+            post_pct = None
 
     # 风险检查
-    risk_check = "未超25%上限"
-    if post_pct > 25:
-        risk_check = f"超限: 变动后{post_pct:.0f}%>25%"
-    elif post_pct > 20:
-        risk_check = f"接近上限: 变动后{post_pct:.0f}%"
+    risk_check = "待持仓快照核验"
+    if post_pct is not None:
+        risk_check = "已根据同一持仓快照计算"
 
     return {
         "affected_holding": affected,
         "action": action,
         "suggested_change": suggested_change,
-        "current_position_pct": round(current_pct, 1),
-        "post_change_pct": round(post_pct, 1),
+        "current_position_pct": round(current_pct, 1) if current_pct is not None else None,
+        "post_change_pct": round(post_pct, 1) if post_pct is not None else None,
+        "denominator": denominator,
         "risk_check": risk_check,
     }
 

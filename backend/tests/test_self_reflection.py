@@ -274,9 +274,15 @@ def test_is_self_reflection_enabled_can_disable():
 
 
 def test_get_max_retry_configurable():
-    """可配置最大重试次数。"""
+    """允许关闭补跑，但配置不能突破一次补跑上限。"""
     from db.config import update_config
     update_config("agent.self_reflection_max_retry", "3")
-    assert get_max_retry() == 3
+    assert get_max_retry() == 1
+    update_config("agent.self_reflection_max_retry", "0")
+    assert get_max_retry() == 0
     # 恢复
     update_config("agent.self_reflection_max_retry", "1")
+
+def test_pipeline_reflection_parse_marks_invalid_as_failed(monkeypatch):
+    from agent.core import pipeline
+    assert pipeline._parse_reflection_json('{"quality_issues": ["x"') ["status"] == "failed"

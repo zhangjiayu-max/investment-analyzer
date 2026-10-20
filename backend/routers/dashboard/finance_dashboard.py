@@ -5,10 +5,9 @@
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from db import (
-    get_cash_balance,
     get_cashflow,
     get_portfolio_summary,
     get_user_profile,
@@ -26,7 +25,7 @@ router = APIRouter(tags=["finance-dashboard"])
 
 
 @router.get("/api/finance-dashboard")
-async def get_finance_dashboard(user_id: str = "default"):
+async def get_finance_dashboard(user_id: str = "default", month: str | None = None):
     """返回家庭财务统一仪表盘数据。
 
     六大模块：
@@ -39,8 +38,7 @@ async def get_finance_dashboard(user_id: str = "default"):
     """
     # ── 1. 净值总览 ──
     summary = get_portfolio_summary(user_id=user_id)
-    cash = get_cash_balance(user_id)
-    cash_balance = cash.get("balance", 0) if cash else 0
+    cash_balance = summary.get("cash_balance", 0)
     total_assets = summary.get("total_assets", 0)
     total_cost = summary.get("total_cost", 0)
     holding_value = summary["total_value"]
@@ -51,6 +49,8 @@ async def get_finance_dashboard(user_id: str = "default"):
     net_worth = {
         "total_assets": round(total_assets, 2),
         "cash_balance": round(cash_balance, 2),
+        "cash_accounts": summary.get("cash_accounts", []),
+        "cash_scope": summary.get("cash_scope", "user_cash"),
         "holding_value": round(holding_value, 2),
         "total_cost": round(total_cost, 2),
         "float_pnl": round(float_pnl, 2),
@@ -59,7 +59,10 @@ async def get_finance_dashboard(user_id: str = "default"):
 
     # ── 2. 现金流 ──
     profile = get_user_profile(user_id) or {}
-    cash_flow = get_cashflow(user_id)
+    try:
+        cash_flow = get_cashflow(user_id, month) if month else get_cashflow(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     monthly_income = cash_flow["monthly_income"]
     monthly_expense = cash_flow["monthly_expense"]
     monthly_surplus = cash_flow["monthly_surplus"]
@@ -83,6 +86,8 @@ async def get_finance_dashboard(user_id: str = "default"):
         "debt_summary": debt_summary,
         "monthly_debt_payment": round(monthly_debt_payment, 2),
         "debt_to_income": debt_to_income,
+        "recorded_debt_payment": cash_flow.get("recorded_debt_payment", 0),
+        "pending_debt_payment": cash_flow.get("pending_debt_payment", 0),
     }
 
     # ── 4. 目标进度 ──

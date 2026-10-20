@@ -57,7 +57,7 @@ describe('API URL 路径正确性', () => {
   it('listAlerts 调用 /api/portfolio/alerts', async () => {
     const { listAlerts } = await import('../api/index.js')
     await listAlerts(true, 10)
-    expect(mockGet).toHaveBeenCalledWith('/portfolio/alerts', { params: { unread_only: true, limit: 10 } })
+    expect(mockGet).toHaveBeenCalledWith('/portfolio/alerts', { params: { unread_only: true, limit: 10 }, timeout: 15000 })
   })
 
   it('runPortfolioAiAnalysis 调用 /api/portfolio/analysis/ai', async () => {

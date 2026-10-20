@@ -43,3 +43,18 @@ def test_failed_conversation_not_auto_resumed():
     finally:
         from db.conversations import delete_conversation
         delete_conversation(conv_id)
+
+def test_recovery_finalization_is_cancel_safe_and_emits_terminal_events(tmp_db):
+    from services.conv_recovery import _finalize_recovery
+    from db.stream_channels import list_events, get_latest_channel_for_message
+    conv_id = create_conversation('recovery')
+    msg_id = create_message(conv_id, 'assistant', '⏳ 分析进行中...', metadata=json.dumps({'execution_status':'streaming'}))
+    result = _finalize_recovery(msg_id, conv_id, '完整回答', {'specialist_count': 2})
+    assert result['ok'] is True
+    channel = get_latest_channel_for_message(msg_id)
+    assert channel['status'] == 'completed'
+    types = [e['event_type'] for e in list_events(channel['channel_id'])]
+    assert types == ['answer', 'recovered', 'done']
+    cancelled_id = create_message(conv_id, 'assistant', '⏳ 分析进行中...', metadata=json.dumps({'execution_status':'cancelled'}))
+    blocked = _finalize_recovery(cancelled_id, conv_id, '迟到回答', {})
+    assert blocked['ok'] is False

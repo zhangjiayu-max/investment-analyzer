@@ -58,7 +58,7 @@ class StressTestTests(unittest.TestCase):
 
     def test_market_drop_stress_test_estimates_loss_and_buffers(self):
         self._seed_portfolio()
-        from stress_test import run_portfolio_stress_test
+        from services.portfolio.stress_test import run_portfolio_stress_test
 
         result = run_portfolio_stress_test("market_drop_20")
 
@@ -83,8 +83,9 @@ class StressTestTests(unittest.TestCase):
         response = client.post("/api/portfolio/stress-test", json={"scenario": "market_drop_20"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertIn("asset_impacts", response.json())
+        body = response.json()["data"]
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("asset_impacts", body)
 
 
 if __name__ == "__main__":

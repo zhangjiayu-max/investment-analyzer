@@ -10,8 +10,25 @@ from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from tools import TOOLS, execute_tool
 from db.agents import load_specialist_agents, create_agent_run
 from db.config import get_config_int, get_config_bool
+from agent.infra.output_quality import has_raw_toolcall_tags, is_valid_analysis, validate_specialist_output
+from services.llm.text_completion import complete_text_analysis_sync
+from agent.core.answer_policy import (
+    build_answer_policy, has_attribution_intent, has_explicit_action_intent,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _bound_tool_result(content: str, max_chars: int) -> str:
+    """结构化证据必须完整保留；字符预算仅用于非结构化长文本。"""
+    if len(content) <= max_chars:
+        return content
+    try:
+        if isinstance(json.loads(content), (dict, list)):
+            return content
+    except (ValueError, TypeError):
+        pass
+    return content[:max_chars] + "\n（历史工具结果已截断）"
 
 
 def _get_tool_result_max_chars() -> int:
@@ -35,7 +52,7 @@ def _compress_prior_tool_messages(llm_messages: list):
         content = msg.get("content", "") or ""
         # 固定上限使重复压缩幂等，避免叠加摘要标记。
         if len(content) > 220:
-            msg["content"] = content[:200] + "\n（历史工具结果已截断）"
+            msg["content"] = _bound_tool_result(content, 200)
 
 
 def _maybe_compress_tool_history(llm_messages: list):
@@ -125,7 +142,7 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 ## ⚠️ 数据真实性约束（强制遵守）
 1. **只使用上下文中明确提供的数据**，包括持仓、估值、新闻等
 2. **绝对禁止编造**任何基金名称、基金代码、金额、收益率、持仓比例等数据
-3. 如果上下文中没有持仓数据或显示"无持仓"，**必须明确告知用户**"未获取到持仓信息"，不得自行补充
+3. 当用户要求持仓分析或操作方案时，若上下文中没有持仓数据或显示"无持仓"，必须说明"未获取到持仓信息"；行情解释不要求私人持仓，不得自行补充
 4. 如果某个数据在上下文中缺失，直接说明"暂无该数据"，不要猜测或杜撰
 5. 所有数字必须来自上下文或工具返回结果，不得凭记忆或推测给出具体数值
 
@@ -253,30 +270,22 @@ _UNIVERSAL_CONTEXT_INSTRUCTION = """
 
 
 def _has_raw_toolcall_tags(text: str) -> bool:
-    """检测文本中是否包含未解析的工具调用标签。"""
-    if not text:
-        return False
-    # XML 格式
-    if '<tool_call>' in text or '<invoke name=' in text or '<function=>' in text:
-        return True
-    # DSML 格式
-    if '｜｜DSML｜｜invoke' in text:
-        return True
-    return False
+    """与各消费者共享工具标签检测规则。"""
+    return has_raw_toolcall_tags(text)
 
 
 def _clear_raw_toolcall_tags(text: str) -> str:
-    """清理文本中的原始工具调用标签。"""
+    """删除完整调用块；未闭合调用从起始标签清除到末尾。"""
     if not text:
         return text
-    import re as _re
-    # 删除 <tool_call>...</tool_call> 块
-    text = _re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=_re.DOTALL)
-    # 删除 <invoke name="...">...</invoke> 块
-    text = _re.sub(r'<invoke name="[^"]*"[^>]*>.*?</invoke>', '', text, flags=_re.DOTALL)
-    # 删除 DSML 块
-    dsml = '｜｜DSML｜｜'
-    text = _re.sub(r'<' + _re.escape(dsml) + r'(?:invoke|tool_calls)[^>]*>.*?</' + _re.escape(dsml) + r'(?:invoke|tool_calls)>', '', text, flags=_re.DOTALL)
+    # 外层块优先，避免把参数值当正文留下；兼容 DSML 的两种闭合方式。
+    pattern = (r'<(?P<tag>tool_call(?:s|_[\w-]+)?|invoke|function|parameter|'
+               r'｜｜DSML｜｜(?:tool_calls|invoke|parameter))(?=[\s=>])[^>]*>'
+               r'.*?(?:</(?P=tag)>|</｜｜DSML｜｜/(?P<dsml>invoke|parameter)>|$)')
+    text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE)
+    match = re.search(r'<\s*/?\s*(?:tool_call|invoke|function|parameter|｜｜DSML｜｜)', text, re.IGNORECASE)
+    if match:
+        text = text[:match.start()]
     return text.strip()
 
 
@@ -293,22 +302,14 @@ def _extract_text_tool_calls(content_str):
 
     results = []
 
-    # ── 格式1: XML <tool_call> ──
-    if '<tool_call>' in content_str:
-        tc_open = chr(60) + 'tool' + '_call' + chr(62)
-        tc_close = chr(60) + '/tool' + '_call' + chr(62)
-        fn_open = chr(60) + 'function='
-        fn_close = chr(60) + '/function' + chr(62)
-        param_open = chr(60) + 'parameter='
-        param_close = chr(60) + '/parameter' + chr(62)
-
-        pattern = tc_open + r'\s*' + fn_open + r'(\w+)>' + r'(.*?)' + fn_close + r'\s*' + tc_close
-        matches = _re.findall(pattern, content_str, _re.DOTALL)
-        for func_name, params_block in matches:
-            pp = param_open + r'(\w+)>' + r'(.*?)' + param_close
-            param_matches = _re.findall(pp, params_block, _re.DOTALL)
-            args = {pname: pval.strip() for pname, pval in param_matches}
-            results.append({'name': func_name, 'arguments': args})
+    # 完整带 ID 的调用与固定标签使用同一解析路径；闭合标签须匹配。
+    pattern = (r'<(?P<tag>tool_call(?:_[\w-]+)?)>\s*<function=(\w+)>'
+               r'(.*?)</function>\s*</(?P=tag)>')
+    for match in _re.finditer(pattern, content_str, _re.DOTALL):
+        func_name, params_block = match.group(2), match.group(3)
+        args = {name: value.strip() for name, value in _re.findall(
+            r'<parameter=(\w+)>(.*?)</parameter>', params_block, _re.DOTALL)}
+        results.append({'name': func_name, 'arguments': args})
 
     # ── 格式2: DSML <｜｜DSML｜｜invoke> ──
     _sep = '\uff5c\uff5c'  # ｜｜ (fullwidth)
@@ -328,11 +329,15 @@ def _extract_text_tool_calls(content_str):
 
 
 def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_name, trace_id="",
-                             conversation_id=None, message_id=None, user_query=""):
+                             conversation_id=None, message_id=None, user_query="", reasoning_content=None):
     """处理文本格式的 tool_call：解析、执行、将结果追加到消息列表。"""
     text_calls = _extract_text_tool_calls(content_str)
     if not text_calls:
         return False
+    assistant = {"role": "assistant", "content": content_str}
+    if reasoning_content:
+        assistant["reasoning_content"] = reasoning_content
+    llm_messages.append(assistant)
     logger.info(f'[{agent_name}] 检测到文本格式 tool_call: {[tc["name"] for tc in text_calls]}')
     for tc in text_calls:
         args = tc['arguments']
@@ -341,8 +346,7 @@ def _process_text_tool_calls(content_str, llm_messages, tool_calls_log, agent_na
                              conversation_id=conversation_id, message_id=message_id,
                              agent_name=agent_name, user_query=user_query)
         full_result = result
-        if len(result) > 8000:
-            result = result[:8000] + chr(10) + '... (结果过长，已截断)'
+        result = _bound_tool_result(result, 8000)
         tool_calls_log.append({
             'name': tc['name'],
             'arguments': args,
@@ -408,55 +412,10 @@ def _inject_kyc_profile(system_content: str, agent: dict) -> str:
 
 
 def _check_react_convergence(tool_calls_log: list, llm_messages: list) -> bool:
-    """P2: ReAct 收敛检测 — 判断是否已产出可用结论，可提前终止。
-
-    判定标准（满足任一即视为收敛）：
-    1. 工具结果中已含结构化 JSON（含 conclusion/action_signals/confidence 字段）
-    2. 已有 assistant 消息含 ≥200 字的文本分析（非工具调用）
-    3. 工具调用次数 >= 2 且最近一次工具结果含数值型数据（PE/百分位/估值等）
-
-    Returns:
-        True 表示已收敛，可注入收口提示提前终止
-    """
-    if not tool_calls_log:
-        return False
-
-    # 判定 1：工具结果中含结构化 JSON 结论
-    for tc in tool_calls_log:
-        result_preview = tc.get("result_preview", "")
-        if any(kw in result_preview for kw in ['"conclusion"', '"action_signals"', '"confidence"', '"评级"', '"结论"']):
-            return True
-
-    # 判定 2：已有 assistant 消息含 ≥200 字文本分析
-    for msg in llm_messages:
-        if msg.get("role") == "assistant" and msg.get("content"):
-            content = msg["content"]
-            # 排除仍含工具调用标签的（修正拼写 bug: "arrison" → 工具调用标签检测）
-            if "<tool_call" in content.lower() or "<invoke>" in content or "tool_calls" in content.lower():
-                continue
-            if len(content) >= 200:
-                return True
-
-    # 判定 3：工具调用 >= 2 且最近结果含数值数据
-    if len(tool_calls_log) >= 2:
-        latest_result = tool_calls_log[-1].get("result_preview", "")
-        # 检测数值型数据（PE/百分位/估值/Z-Score 等）
-        import re as _re
-        numeric_patterns = [
-            r'PE[：:]\s*\d', r'百分位[：:]\s*\d', r'估值[：:]\s*\d',
-            r'Z-Score[：:]\s*-?\d', r'\d+\.\d+%', r'高估|低估|合理',
-        ]
-        for pattern in numeric_patterns:
-            if _re.search(pattern, latest_result):
-                return True
-
-    # 判定 4（P2 扩展）：工具调用 >= 2 且已有足够非空结果（不限数值型，覆盖新闻/资讯类场景）
-    if len(tool_calls_log) >= 2:
-        valid_results = [tc for tc in tool_calls_log if tc.get("result_preview", "")]
-        if len(valid_results) >= 2:
-            return True
-
-    return False
+    """只有已有完整分析才可收口；原始数据数量和 confidence 字段不证明完成。"""
+    return any(msg.get("role") == "assistant" and not msg.get("tool_calls")
+               and is_valid_analysis(msg.get("content", ""), min_chars=200)
+               for msg in llm_messages)
 
 
 
@@ -466,10 +425,95 @@ def _get_message_reasoning(message):
     return extra.get("reasoning_content") or getattr(message, "reasoning_content", None)
 
 
+class _SpecialistBudgetExhausted(RuntimeError):
+    """显式专家预算无法容纳下一次调用。"""
+
+
+class _SpecialistUsage:
+    """逐次累计已返回的模型用量；无 usage 的响应单独估算并标记。"""
+
+    def __init__(self, token_budget=None, max_output_tokens=None):
+        self.reported = 0
+        self.estimated = 0
+        self.reported_calls = 0
+        self.estimated_calls = 0
+        self.token_budget = token_budget
+        self.max_output_tokens = max_output_tokens
+        self.exhausted = False
+
+    def call(self, **kwargs):
+        cap = kwargs.get("max_tokens")
+        if self.max_output_tokens is not None:
+            cap = min(cap, self.max_output_tokens) if cap is not None else self.max_output_tokens
+        if self.token_budget is not None:
+            remaining = self.token_budget - self.reported - self.estimated
+            prompt_estimate = _estimate_specialist_tokens(kwargs.get("messages", []), "", [])
+            cap = min(cap, remaining - prompt_estimate) if cap is not None else remaining - prompt_estimate
+        if cap is not None:
+            if cap <= 0:
+                self.exhausted = True
+                raise _SpecialistBudgetExhausted("专家预算不足以容纳下一轮输入和输出")
+            kwargs = {**kwargs, "max_tokens": int(cap)}
+        response = _call_llm(**kwargs)
+        usage = getattr(response, "usage", None)
+        total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
+        if isinstance(total, (int, float)) and total >= 0:
+            self.reported += int(total)
+            self.reported_calls += 1
+        else:
+            message = response.choices[0].message
+            text = (getattr(message, "content", None) or "") + (_get_message_reasoning(message) or "")
+            for tool in getattr(message, "tool_calls", None) or []:
+                text += getattr(getattr(tool, "function", None), "arguments", "") or ""
+            self.estimated += _estimate_specialist_tokens(kwargs.get("messages", []), text, [])
+            self.estimated_calls += 1
+        if self.token_budget is not None and self.reported + self.estimated > self.token_budget:
+            # 输入估计与供应商实际计费可能有差异；完整首包也必须显式降级。
+            self.exhausted = True
+        return response
+
+    def fields(self):
+        source = "mixed" if self.reported_calls and self.estimated_calls else (
+            "reported" if self.reported_calls else "estimated"
+        )
+        fields = {"tokens_used": self.reported + self.estimated, "tokens_source": source}
+        if self.exhausted:
+            fields.update({"budget_exhausted": True, "status": "budget_exhausted",
+                           "completion_status": "degraded", "verdict": "unknown", "confidence": 0.0,
+                           "action_signals": [], "asset_actions": [], "portfolio_stance": "unknown"})
+        return fields
+
+
+def _complete_specialist_text(*, messages, first_response=None, call_llm=None, **kwargs):
+    """有限续写文本；适配 MIMO model_extra，并保留最近一次响应供反思回传。"""
+    last_message = None
+    last_finish_reason = None
+    original_response = first_response
+
+    def call(**call_kwargs):
+        nonlocal last_message, last_finish_reason, original_response
+        if original_response is not None:
+            response, original_response = original_response, None
+        else:
+            response = (call_llm or _call_llm)(**call_kwargs)
+        last_message = response.choices[0].message
+        last_finish_reason = getattr(response.choices[0], "finish_reason", None)
+        reasoning = _get_message_reasoning(last_message)
+        if reasoning:
+            last_message.reasoning_content = reasoning
+        return response
+
+    text, _, status = complete_text_analysis_sync(call, messages=messages, **kwargs)
+    if last_finish_reason in {"content_filter", "tool_calls"}:
+        status = "failed"
+    return text, last_message, status
+
+
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "", model: str = None, trace_id: str = "",
                    from_pipeline: bool = False, conversation_id: int = None, message_id: int = None,
-                   blackboard=None, system_prompt_override: str = None) -> dict:
+                   blackboard=None, system_prompt_override: str = None,
+                   token_budget: int = None, max_output_tokens: int = None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -481,7 +525,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
 
     Args:
         from_pipeline: Pipeline 路径标记。True 时 prebuilt_context 已含 Layer 0-5
-                      （含 system_prompt/KYC/持仓），跳过重复注入。
+                      （含 system_prompt/KYC/持仓），跳过重复注入，并交由 Pipeline 统一反思。
+        token_budget: 显式严格总用量预算（含输入估算）；默认不启用
+        max_output_tokens: 每次模型输出上限，不改变现有更低配置；默认不启用
 
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
@@ -491,11 +537,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         import uuid as _uuid
         trace_id = f"spec-{_uuid.uuid4().hex[:8]}"
     agent = load_specialist_agents()[agent_key]
+    action_requested = has_explicit_action_intent(query)
+    attribution_only = has_attribution_intent(query) and not action_requested
     if system_prompt_override is not None:
         agent = {**agent, "system_prompt": system_prompt_override}
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
     _model = model or MODEL  # 增强6: 成本路由 — 支持外部传入模型
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     logger.info(f"[trace:{trace_id}] 专家开始: {agent['name']} ({agent_key}) query={query[:50]}...")
 
     # 只给该专家分配它的专属工具
@@ -524,7 +574,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
         if prebuilt_context:
             system_content += f"\n\n{prebuilt_context}"
-        else:
+        elif not attribution_only:
             try:
                 from services.portfolio_context import build_portfolio_context
                 portfolio_ctx = build_portfolio_context()
@@ -533,7 +583,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 pass
 
         # 注入 KYC 理财画像（按专家职责裁剪维度）
-        system_content = _inject_kyc_profile(system_content, agent)
+        if not attribution_only:
+            system_content = _inject_kyc_profile(system_content, agent)
 
         # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
         if "search_knowledge" in agent.get("tools", []) and get_config_bool("agent.agentic_rag_enabled", True):
@@ -546,17 +597,20 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
 
     # P0 全局视角指令：强制看全局再分析
-    system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
+    if action_requested:
+        system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
 
     # 追加分析模板约束（根据用户问题自动检测分析类型）
-    analysis_type = _detect_analysis_type(query)
+    analysis_type = "general" if attribution_only else _detect_analysis_type(query)
     template_constraint = _get_template_constraint(analysis_type)
     if template_constraint:
         system_content += template_constraint
 
     # 追加通用可执行性约束 + 数据约束（含emoji禁令）
-    system_content += _ACTIONABILITY_CONSTRAINT
+    if action_requested:
+        system_content += _ACTIONABILITY_CONSTRAINT
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+    system_content += build_answer_policy(query)
 
     # 注入幻觉防御 Prompt（事实约束 + 类型专用约束）
     try:
@@ -581,6 +635,9 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     tool_calls_log = []
     answer = ""
     answer_message = None
+    completion_status = "completed"
+    output_source = "analysis"
+    closure_failed = False
     # M6: Agentic RAG 硬性限制 — 检索类工具单独计数，超过上限强制进入分析
     # 解决原 max_rounds=2 仅是 prompt 指令、无硬性截断的问题
     _SEARCH_TOOLS = {
@@ -634,7 +691,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # 方案3：caller 增加 turn 后缀，便于 token_usage 排查
         _caller_turn = f"{_caller}#turn{turn}"
         try:
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller_turn,
                 trace_id=trace_id,
                 model=_model,
@@ -644,13 +701,18 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
+        except _SpecialistBudgetExhausted:
+            completion_status = "degraded"
+            output_source = "budget_exhausted"
+            answer = "本轮模型调用预算不足，未完成专家分析；已取得证据保留待复核。"
+            break
         except Exception as e:
             err_msg = str(e)
             logger.error(f"[trace:{trace_id}] [{agent['name']}] LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 logger.warning(f"[trace:{trace_id}] [{agent['name']}] 模型不兼容，回退到普通模式")
                 # 回退：不带 tools 调用
-                response = _call_llm(
+                response = call_llm(
                     caller=_caller_turn,
                     trace_id=trace_id,
                     model=_model,
@@ -658,17 +720,16 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
-                answer = response.choices[0].message.content or ""
-                answer_message = response.choices[0].message
-                break
-            raise
+            else:
+                raise
 
         msg = response.choices[0].message
 
         # 没有工具调用 → 检查文本格式 tool_call，否则为最终回答
         if not msg.tool_calls:
             if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"], trace_id=trace_id,
-                                        conversation_id=conversation_id, message_id=message_id, user_query=query):
+                                        conversation_id=conversation_id, message_id=message_id, user_query=query,
+                                        reasoning_content=_get_message_reasoning(msg)):
                 continue
             # 兜底：如果文本中仍有未解析的 tool_call 标签，清理后追加恢复消息
             raw = msg.content or ""
@@ -687,6 +748,19 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 continue
             answer = raw
             answer_message = msg
+            if getattr(response.choices[0], "finish_reason", None) == "content_filter":
+                completion_status = "failed"
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                try:
+                    answer, answer_message, completion_status = _complete_specialist_text(
+                        call_llm=call_llm,
+                        first_response=response, messages=llm_messages,
+                        caller=f"{_caller}#continue", trace_id=trace_id, model=_model,
+                        temperature=get_config_float('llm.temperature_agent', 0.3),
+                        max_tokens=get_config_int('llm.max_tokens_agent', 8000))
+                except Exception as continuation_error:
+                    completion_status = "truncated"
+                    logger.warning(f"[{agent['name']}] 文本续写失败: {continuation_error}")
             break
 
         # 有工具调用 → 执行工具
@@ -739,8 +813,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             full_result = result
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
             _max_chars = _get_tool_result_max_chars()
-            if len(result) > _max_chars:
-                result = result[:_max_chars] + "\n... (结果过长，已截断)"
+            result = _bound_tool_result(result, _max_chars)
 
             tool_calls_log.append({
                 "name": tc.function.name,
@@ -780,12 +853,13 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 方案2：合并"强制总结 + 重新生成"为单次收口调用
     # 原逻辑：answer 为空 → 强制总结（1次LLM）→ <200字 → 重新生成（1次LLM）= 最多2次
     # 新逻辑：answer 为空或 <200 字 → 单次收口调用（1次LLM），prompt 直接要求 ≥200 字
-    _needs_closure = (not answer) or (len(answer) < 200) or ('<tool_call>' in answer)
+    _needs_closure = not usage.exhausted and completion_status != "truncated" and not is_valid_analysis(answer, min_chars=200)
     if _needs_closure:
-        # 清理含 tool_call 标签的 answer
-        if answer and '<tool_call>' in answer:
-            answer = re.sub(r'<tool_call>.*?</function>', '', answer, flags=re.DOTALL).strip()
-        if len(answer) < 200:
+        prior_answer = answer if is_valid_analysis(answer, completion_status=completion_status) else ""
+        prior_message, prior_completion_status = answer_message, completion_status
+        if _has_raw_toolcall_tags(answer):
+            answer = _clear_raw_toolcall_tags(answer)
+        if not is_valid_analysis(answer, min_chars=200):
             logger.info(f'[trace:{trace_id}] [{agent["name"]}] answer 为空或过短({len(answer)}字)，触发单次收口')
             try:
                 # L4 防幻觉：收口前检测基金代码幻觉，注入纠正提示
@@ -800,7 +874,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     "role": "user",
                     "content": "请基于以上工具调用结果，给出你的专业分析结论。要求：不调用工具，直接输出分析，至少 200 字。",
                 })
-                _closure_resp = _call_llm(
+                _closure_answer, _closure_message, _closure_status = _complete_specialist_text(
+                    call_llm=call_llm,
                     caller=f"{_caller}#summary",
                     trace_id=trace_id,
                     model=_model,
@@ -808,25 +883,31 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     temperature=get_config_float('llm.temperature_agent', 0.3),
                     max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                 )
-                _closure_answer = _closure_resp.choices[0].message.content or ""
-                if len(_closure_answer) >= 200:
+                if is_valid_analysis(_closure_answer, completion_status=_closure_status, min_chars=200):
                     answer = _closure_answer
-                    answer_message = _closure_resp.choices[0].message
+                    answer_message = _closure_message
+                    completion_status = _closure_status
                 else:
                     # 兜底：收口仍 <200 字 → 用工具结果拼接，不再二次调 LLM
                     logger.warning(f'[trace:{trace_id}] [{agent["name"]}] 收口仍 {len(_closure_answer)} 字，用工具结果兜底')
-                    answer = _fallback_from_tool_results(tool_calls_log) or _closure_answer or "分析过程遇到问题，请重试。"
-                    answer_message = _closure_resp.choices[0].message if answer == _closure_answer else None
+                    # 原始证据供人工复核，不能把数据拼接冒充专家成功分析。
+                    answer = _fallback_from_tool_results(tool_calls_log) or "分析过程遇到问题，请重试。"
+                    answer_message = None
+                    completion_status = _closure_status if _closure_status != "completed" else "failed"
+                    output_source = "tool_fallback"
             except Exception as _e:
                 logger.error(f'[trace:{trace_id}] [{agent["name"]}] 收口调用失败: {_e}')
                 answer = _fallback_from_tool_results(tool_calls_log) or "分析过程遇到问题，请重试。"
                 answer_message = None
+                completion_status = "failed"
+                output_source = "tool_fallback"
+            if output_source == "tool_fallback" and prior_answer:
+                # 扩写失败仍保留可用初稿，不能用 XML 或工具预览取代正文。
+                answer, answer_message = prior_answer, prior_message
+                completion_status, output_source = prior_completion_status, "analysis"
+                closure_failed = True
 
     duration_ms = int((time.time() - start_time) * 1000)
-
-    # 清理 DSML 标记
-    if answer:
-        answer = _clean_dsml_from_content(answer)
 
     # ── 单专家自我反思（Self-Reflection） ──
     # 在 answer 定型后、返回前，评估分析质量，发现缺口时重试补充
@@ -836,7 +917,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             evaluate_analysis, build_retry_prompt,
             is_self_reflection_enabled, get_max_retry,
         )
-        if is_self_reflection_enabled() and answer and len(answer) > 50:
+        # Pipeline 在全部专家返回后统一反思和补跑；此处再评估并全文重写会
+        # 把已完成初稿卡在专家阶段，耗尽共享截止时间（对话 204）。
+        pipeline_reviews = from_pipeline and get_config_bool("pipeline.reflection_enabled", True)
+        if not usage.exhausted and not pipeline_reviews and is_self_reflection_enabled() and is_valid_analysis(answer, completion_status=completion_status):
             # M7：从黑板获取其他专家结论，供跨专家盲点检查（开关关闭时不传，无额外成本）
             peer_conclusions = ""
             if blackboard:
@@ -870,20 +954,22 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                             {"role": "user", "content": retry_prompt}
                         ]
                         try:
-                            retry_response = _call_llm(
+                            retry_answer, retry_message, retry_status = _complete_specialist_text(
+                                call_llm=call_llm,
                                 caller=f"{agent_key}#self_reflection_retry",
                                 trace_id=trace_id,
                                 model=_retry_model,
                                 messages=retry_messages,
                                 temperature=0.3,
-                                max_tokens=4000,
+                                max_tokens=get_config_int('llm.max_tokens_agent', 8000),
                             )
-                            retry_answer = retry_response.choices[0].message.content or ""
                         except Exception as retry_err:
                             logger.warning(f"[self_reflection] {agent['name']} 重试调用失败: {retry_err}")
                             retry_answer = None
-                        if retry_answer and len(retry_answer) > 50:
-                            answer = _clean_dsml_from_content(retry_answer)
+                        if retry_answer and is_valid_analysis(retry_answer, completion_status=retry_status):
+                            answer = retry_answer
+                            answer_message = retry_message
+                            completion_status = retry_status
                             reflection["gaps_resolved"] = True
                             break
                     else:
@@ -893,13 +979,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     except Exception as e:
         logger.warning(f"[self_reflection] {agent['name']} 反思异常: {e}")
 
-    # Pipeline Phase C：估算 token 消耗（用于预算追踪）
-    tokens_used = _estimate_specialist_tokens(llm_messages, answer, tool_calls_log)
-
     # 失败检测：兜底文本或过短内容标记为 failed
-    _FALLBACK_ANSWERS = {"分析过程遇到问题，请重试。", "交叉审阅完成，请参考其他专家分析。"}
-    is_fallback = answer in _FALLBACK_ANSWERS or answer.startswith("（执行失败：") or len(answer.strip()) < 50
-    status = "failed" if is_fallback else "success"
+    quality = validate_specialist_output({"analysis": answer, "completion_status": completion_status,
+                                          "output_source": output_source,
+                                          "closure_failed": closure_failed,
+                                          "self_reflection": self_reflection_result})
+    status = quality["status"]
+    if usage.exhausted:
+        status = "budget_exhausted"
+        completion_status = "degraded"
 
     # 剥离 A2A JSON 块，analysis 字段只保留纯 Markdown 给用户
     import re as _re
@@ -907,6 +995,10 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     clean_analysis = answer
     if _json_match:
         clean_analysis = (answer[:_json_match.start()] + answer[_json_match.end():]).strip()
+    if _has_raw_toolcall_tags(clean_analysis):
+        clean_analysis = _clear_raw_toolcall_tags(clean_analysis)
+
+    duration_ms = int((time.time() - start_time) * 1000)
 
     # P0 修复（2026-08-02）：归一化，保证 verdict/confidence/action_signals 提升到顶层
     # 消除仲裁层从 structured 嵌套字段提取方向的幻觉
@@ -916,10 +1008,14 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "icon": agent["icon"],
         "analysis": clean_analysis,
         "status": status,
+        "completion_status": completion_status,
+        "output_source": output_source,
+        "closure_failed": closure_failed,
+        "output_quality": quality,
         "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
-        "tokens_used": tokens_used,
+        **usage.fields(),
         "self_reflection": self_reflection_result,
     }
     try:
@@ -927,6 +1023,19 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         _result = normalize_specialist_result(_result)
     except Exception:
         pass
+    if status != "success":
+        # 不完整分析可保留供审阅，但不得携带可执行信号或高置信共识。
+        neutral = {"verdict": "unknown", "confidence": 0.0, "action_signals": [],
+                   "asset_actions": [], "portfolio_stance": "unknown"}
+        _result.update(neutral)
+        if isinstance(_result.get("structured"), dict):
+            _result["structured"].update(neutral)
+            inner = _result["structured"].get("structured")
+            if isinstance(inner, dict):
+                inner.update(neutral)
+            a2a = _result["structured"].get("a2a") or {}
+            if isinstance(a2a.get("payload"), dict):
+                a2a["payload"].update(neutral)
     return _result
 
 
@@ -1069,7 +1178,8 @@ def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,
 def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict, trace_id: str = "",
                                 max_turns: int = 2, prebuilt_context: str = "",
                                 model: str = None,
-                                conversation_id: int = 0, message_id: int = 0) -> dict:
+                                conversation_id: int = 0, message_id: int = 0,
+                                token_budget: int = None, max_output_tokens: int = None) -> dict:
     """
     交叉审阅模式：专家拿到其他专家的分析结果后进行二次审阅。
 
@@ -1086,9 +1196,13 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         prebuilt_context: 预构建的持仓+估值上下文，避免重复 DB 查询
     """
     agent = load_specialist_agents()[agent_key]
+    action_requested = has_explicit_action_intent(query)
+    attribution_only = has_attribution_intent(query) and not action_requested
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
     _model = model or MODEL
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     # 兜底：trace_id 为空时自动生成
     if not trace_id:
         import uuid as _uuid
@@ -1102,7 +1216,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     # 注入持仓上下文（优先使用预构建的）
     if prebuilt_context:
         system_content += f"\n\n{prebuilt_context}"
-    else:
+    elif not attribution_only:
         try:
             from services.portfolio_context import build_portfolio_context
             portfolio_ctx = build_portfolio_context()
@@ -1112,17 +1226,21 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             pass
 
     # 注入 KYC 理财画像（按专家职责裁剪维度）
-    system_content = _inject_kyc_profile(system_content, agent)
+    if not attribution_only:
+        system_content = _inject_kyc_profile(system_content, agent)
 
     # 追加分析模板约束（交叉审阅也需要结构化输出）
-    analysis_type = _detect_analysis_type(query)
+    analysis_type = "general" if attribution_only else _detect_analysis_type(query)
     template_constraint = _get_template_constraint(analysis_type)
     if template_constraint:
         system_content += template_constraint
 
     # 追加通用可执行性约束 + 数据约束（含emoji禁令）
-    system_content += _ACTIONABILITY_CONSTRAINT
+    if action_requested:
+        system_content += _ACTIONABILITY_CONSTRAINT
+        system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+    system_content += build_answer_policy(query)
 
     # 追加禁止原始 tool_call 文本约束
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
@@ -1162,7 +1280,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         # P3 优化：历史 tool 消息压缩
         _maybe_compress_tool_history(llm_messages)
         try:
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller,
                 trace_id=trace_id,
                 model=_model,
@@ -1172,11 +1290,14 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
+        except _SpecialistBudgetExhausted:
+            answer = "交叉审阅预算不足，未完成复核。"
+            break
         except Exception as e:
             err_msg = str(e)
             logger.error(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
-                response = _call_llm(
+                response = call_llm(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1192,7 +1313,8 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
 
         if not msg.tool_calls:
             if _process_text_tool_calls(msg.content or "", llm_messages, tool_calls_log, agent["name"], trace_id=trace_id,
-                                        conversation_id=conversation_id, message_id=message_id, user_query=query):
+                                        conversation_id=conversation_id, message_id=message_id, user_query=query,
+                                        reasoning_content=_get_message_reasoning(msg)):
                 continue
             answer = msg.content or ""
             break
@@ -1231,8 +1353,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                                  agent_name=agent['name'], user_query=query)
             # P3 优化：截断阈值可配置（默认 1500，原 3000）
             _max_chars = _get_tool_result_max_chars()
-            if len(result) > _max_chars:
-                result = result[:_max_chars] + "\n... (结果过长，已截断)"
+            result = _bound_tool_result(result, _max_chars)
             tool_calls_log.append({
                 "name": tc.function.name,
                 "arguments": args,
@@ -1244,13 +1365,13 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 "content": result,
             })
 
-    if not answer:
+    if not answer and not usage.exhausted:
         try:
             llm_messages.append({
                 "role": "user",
                 "content": "请根据以上信息，给出你的交叉审阅结论。",
             })
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller,
                 trace_id=trace_id,
                 model=_model,
@@ -1275,7 +1396,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                     "role": "user",
                     "content": "请基于以上信息和其他专家的分析结果，给出你的交叉审阅结论（不要调用工具，直接输出分析）。",
                 })
-                _regen_resp = _call_llm(
+                _regen_resp = call_llm(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1302,10 +1423,11 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 agent_name=agent["name"],
                 query=query,
                 result=answer[:4000],
-                tool_calls=str(tool_calls_log)[:2000],
+                tool_calls=tool_calls_log,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
-                status="success",
+                status="budget_exhausted" if usage.exhausted else "success",
+                run_phase="cross_review",
             )
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1317,6 +1439,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         "analysis": answer,
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
+        **usage.fields(),
         "is_cross_review": True,
     })
 
@@ -1342,7 +1465,8 @@ def _normalize_cross_review_result(result: dict) -> dict:
 def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                               peer_analyses: dict, trace_id: str = "",
                               model: str = None,
-                              conversation_id: int = 0, message_id: int = 0) -> dict:
+                              conversation_id: int = 0, message_id: int = 0,
+                              token_budget: int = None, max_output_tokens: int = None) -> dict:
     """交叉审阅单轮意见模式（不调用工具，仅 1 次 LLM 调用）。
 
     与 run_specialist_with_context 的区别：
@@ -1370,6 +1494,8 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
     _model = model or MODEL
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     if not trace_id:
         import uuid as _uuid
         trace_id = f"cross-{_uuid.uuid4().hex[:8]}"
@@ -1400,6 +1526,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         "}\n"
         "只输出 JSON，不要其他文字。"
     )
+    system_content += build_answer_policy(query)
 
     user_content = (
         f"原始问题：{query}\n\n"
@@ -1408,7 +1535,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
     )
 
     try:
-        response = _call_llm(
+        response = call_llm(
             caller=_caller,
             trace_id=trace_id,
             model=_model,
@@ -1477,12 +1604,13 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 "\"reason\": \"反驳理由\"}], \"summary\": \"魔鬼代言人总结\"}\n"
                 "只输出 JSON，必须包含至少 1 条 disagreement。"
             )
+            retry_system += build_answer_policy(query)
             retry_user = (
                 f"原始问题：{query}\n\n"
                 f"其他专家分析：\n{peer_text[:6000]}"
             )
             try:
-                retry_resp = _call_llm(
+                retry_resp = call_llm(
                     caller=_caller + ":devil",
                     trace_id=trace_id,
                     model=devil_model or _model,
@@ -1536,7 +1664,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         analysis_text = "\n".join(parts) if parts else raw[:8000]
 
     if not analysis_text:
-        analysis_text = "交叉审阅完成，请参考其他专家分析。"
+        analysis_text = "交叉审阅预算不足，未完成复核。" if usage.exhausted else "交叉审阅完成，请参考其他专家分析。"
 
     duration_ms = int((time.time() - start_time) * 1000)
 
@@ -1553,7 +1681,8 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 tool_calls="",
                 duration_ms=duration_ms,
                 trace_id=trace_id,
-                status="success",
+                status="budget_exhausted" if usage.exhausted else "success",
+                run_phase="cross_review",
             )
         except Exception as log_err:
             logger.warning(f"[cross_review] agent_runs 写入失败 ({agent_key}): {log_err}")
@@ -1566,6 +1695,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         "opinion": opinion,
         "tool_calls": [],  # 空数组，保持字段兼容
         "duration_ms": duration_ms,
+        **usage.fields(),
         "is_cross_review": True,
     })
 
@@ -1741,6 +1871,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
 
             _caller = f"specialist:{agent_key}:phase_c"
             _model = model or MODEL
+            usage = _SpecialistUsage()
             system_content = (
                 f"你是{agent['name']}。在圆桌讨论中，其他专家对你的分析提出了以下质疑：\n\n"
                 f"{challenge_text}\n\n"
@@ -1749,9 +1880,10 @@ def run_round_table_discussion(query: str, specialist_results: list,
                 f"2. 如果质疑不合理，用数据或逻辑反驳\n"
                 f"3. 给出修正后的最终结论\n"
             )
+            system_content += build_answer_policy(query)
 
             try:
-                response = _call_llm(
+                response = usage.call(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1771,6 +1903,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
                         "analysis": revised,
                         "tool_calls": [],
                         "duration_ms": 0,
+                        **usage.fields(),
                         "is_cross_review": True,
                         "is_phase_c_revision": True,
                     })

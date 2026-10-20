@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from datetime import date, datetime, timedelta
 
 from db._conn import _get_conn
+from db.valuation_sources import mark_freshness, newest_valuation, image_valuation_rows
 
 logger = logging.getLogger(__name__)
 
@@ -38,60 +39,39 @@ _online_cache: dict[str, dict] = {}  # key: f"{index_code}:{metric_type}"
 
 def _mark_online_source_age(data: dict) -> dict:
     """抓取时间不是估值日期；保留未知日期和真实数据年龄。"""
-    try:
-        source_day = date.fromisoformat(str(data.get('snapshot_date') or '')[:10])
-        age = (date.today() - source_day).days
-        if age < 0:
-            raise ValueError('future source date')
-    except (TypeError, ValueError):
-        data.update(days_old=None, is_expired=True, date_verified=False)
-    else:
-        data.update(days_old=age, is_expired=age > 3, date_verified=True)
+    data.update(mark_freshness(data))
     return data
 
 
-def _normalize_percentile(val, *, fractional: bool = True) -> float | None:
-    """P2-4.1: 统一百分位字段为 float 类型（0-100 区间）。
+def _normalize_percentile(val, *, fractional: bool = False) -> float | None:
+    """返回百分数点；只有来源显式声明 ratio 时才令 fractional=True。
 
-    历史数据存在多种格式，影响评分逻辑（如 dca_add 的估值维度比较）。
-    案例 conv 122：akshare 返回 0.7231（0-1 小数），图片解析返回 "84.71%"（0-100），
-    格式不一致导致专家看到"百分位 0.7231%"和"百分位 93%"两个矛盾数据。
-
-    规则：
-      - None / 空字符串 → None
-      - int / float：
-        - 0 < val < 1 → 视为小数表示，乘以 100 转百分比（0.7231 → 72.31）
-        - 1 ≤ val ≤ 100 → 已是百分比，原样返回
-        - val > 100 → 异常值，截断到 100
-        - val < 0 → 异常值，截断到 0
-      - 带百分号的字符串已是百分制，0.5% → 0.5
-      - fractional=False 用于已归一化的数据库数值，避免读取时再次乘 100
-      - 无法解析 → None
+    数值大小不决定单位。0.62 默认表示 0.62%，ratio 的 1 表示 100%。
+    带 % 的源字符串优先使用其显式单位。
     """
+    import math
     if val is None or val == "":
         return None
-
-    def _to_pct(v: float) -> float:
-        """归一化到 0-100 区间。"""
-        if fractional and 0 < v < 1:
-            return round(v * 100, 4)
-        if v > 100:
-            return 100.0
-        if v < 0:
-            return 0.0
-        return v
-
-    if isinstance(val, (int, float)):
-        return _to_pct(float(val))
-    if isinstance(val, str):
-        try:
-            if '%' in val:
-                # 显式百分号已给出单位，0.5% 就是 0.5，不能再乘 100。
-                return _normalize_percentile(float(val.replace('%', '').strip()), fractional=False)
-            return _to_pct(float(val.replace('%', '').strip()))
-        except ValueError:
+    try:
+        explicit_percent = isinstance(val, str) and '%' in val
+        value = float(val.replace('%', '').strip() if isinstance(val, str) else val)
+        if not math.isfinite(value):
             return None
-    return None
+        if fractional and not explicit_percent:
+            value = round(value * 100, 4)
+        return min(100.0, max(0.0, value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _percentile_unit(data: dict) -> str:
+    """单位来自契约或来源元数据，禁止按数值推断。"""
+    unit = data.get('percentile_unit')
+    if unit is None:
+        unit = 'ratio' if data.get('percentile_scale') == 1 else 'percent'
+    if unit not in ('percent', 'ratio'):
+        raise ValueError(f'unsupported percentile_unit: {unit}')
+    return unit
 
 
 def save_valuation(data: dict, source_image: str = None, source_url: str = None, snapshot_date: str = None) -> int:
@@ -108,7 +88,23 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
     data["index_code"] = normalize_index_code(data["index_code"])
 
     # P2-4.1: 写入时统一 percentile 为 float
-    percentile = _normalize_percentile(data.get("percentile"))
+    unit = _percentile_unit(data)
+    percentile = _normalize_percentile(data.get("percentile"), fractional=unit == 'ratio')
+    # 现有 schema 的 raw_json 同时保留原始提取与可审核的单位/窗口元数据。
+    try:
+        raw = _json.loads(data.get('raw_json') or '{}')
+    except (ValueError, TypeError):
+        raw = {'raw_response': data.get('raw_json')}
+    if not isinstance(raw, dict):
+        raw = {'raw_response': raw}
+    raw['_valuation_contract'] = {
+        'percentile_unit': 'percent', 'percentile_input_unit': unit,
+        'percentile_raw': data.get('percentile'),
+        'history_window': data.get('history_window') or data.get('percentile_window'),
+        'metric_verified': data.get('metric_verified'),
+        'validation_status': data.get('validation_status', 'source_extracted'),
+    }
+    raw_json = _json.dumps(raw, ensure_ascii=False)
 
     conn = _get_conn()
     cur = conn.execute("""
@@ -145,7 +141,7 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
         data.get("opportunity_value"), data.get("max_value"),
         data.get("min_value"), data.get("avg_value"), data.get("zscore"),
         data.get("background_color"),
-        source_image, source_url, data.get("raw_json"),
+        source_image, source_url, raw_json,
     ))
     valuation_id = conn.execute(
         "SELECT id FROM index_valuations WHERE index_code=? AND snapshot_date=? AND metric_type=?",
@@ -163,6 +159,12 @@ def _apply_percentile_normalize(row: dict) -> dict:
     if "percentile" in row:
         # save_valuation 已将数值转换为百分制，读取不能再次放大低于 1% 的值。
         row["percentile"] = _normalize_percentile(row.get("percentile"), fractional=False)
+    try:
+        metadata = _json.loads(row.get('raw_json') or '{}').get('_valuation_contract', {})
+        row.update({key: value for key, value in metadata.items() if key not in row})
+    except (TypeError, ValueError, AttributeError):
+        pass
+    row.update(percentile_unit='percent', percentile_scale=100)
     return row
 
 
@@ -170,12 +172,13 @@ def _normalize_valuation_result(result: dict | None) -> dict | None:
     """确保所有估值查询出口使用 0-100 百分制。"""
     if result is None:
         return None
-    fractional = result.get("data_source") not in ("manual", "螺丝钉")
+    fractional = _percentile_unit(result) == "ratio"
     result["percentile"] = _normalize_percentile(result.get("percentile"), fractional=fractional)
     if "fallback_pb_percentile" in result:
         result["fallback_pb_percentile"] = _normalize_percentile(
             result.get("fallback_pb_percentile"), fractional=False
         )
+    result.update(percentile_unit='percent', percentile_scale=100)
     return result
 
 
@@ -218,10 +221,10 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
     """
     from datetime import datetime, timedelta
     conn = _get_conn()
-    date_filter = ""
+    date_filter = " AND snapshot_date <= ?"
     if max_days:
         cutoff = (datetime.now() - timedelta(days=max_days)).strftime("%Y-%m-%d")
-        date_filter = f" AND snapshot_date >= '{cutoff}'"
+        date_filter += f" AND snapshot_date >= '{cutoff}'"
     # 构造候选代码列表：原始code + 后缀变体（双向兼容）
     # - 传入不带后缀（H30217）→ 加带后缀变体（H30217.CSI/H30217.WI...）
     # - 传入带后缀（H30217.CSI）→ 加去后缀变体（H30217）
@@ -232,13 +235,13 @@ def get_latest_valuation(index_code: str, metric_type: str = None, max_days: int
             SELECT * FROM index_valuations
             WHERE index_code IN ({placeholders}) AND metric_type = ?{date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
-        """, (*candidates, metric_type)).fetchone()
+        """, (*candidates, metric_type, date.today().isoformat())).fetchone()
     else:
         row = conn.execute(f"""
             SELECT * FROM index_valuations
             WHERE index_code IN ({placeholders}){date_filter}
             ORDER BY snapshot_date DESC LIMIT 1
-        """, (*candidates,)).fetchone()
+        """, (*candidates, date.today().isoformat())).fetchone()
     conn.close()
     # P2-4.1: 读取容错
     return _apply_percentile_normalize(dict(row)) if row else None
@@ -608,284 +611,70 @@ def normalize_index_code(index_code: str, index_name: str = None) -> str:
 # ── 螺丝钉数据查询（支持按指数代码）──────────────────────────────
 
 def get_latest_dd_valuation_for_index(index_code: str, metric_type: str = "市盈率", max_days: int = 30) -> dict | None:
-    """获取螺丝钉估值中某个指数的最新数据。
+    """按真实来源日期查询螺丝钉；缺代码时仅通过唯一名称/别名匹配。"""
+    code = normalize_index_code(index_code)
+    rows = [mark_freshness(row) for row in image_valuation_rows('螺丝钉')
+            if row['index_code'] == code and row['metric_type'] == metric_type]
+    return newest_valuation([row for row in rows if row['date_verified'] and row['days_old'] <= max_days], metric_type)
 
-    参数:
-        index_code: 指数代码
-        metric_type: 指标类型（市盈率/市净率）
-        max_days: 最大有效天数
 
-    返回:
-        包含估值数据的字典，或 None
-    """
-    conn = _get_conn()
-
-    # 标准化指数代码
-    normalized_code = normalize_index_code(index_code)
-
-    # 查询最近的螺丝钉记录
-    rows = conn.execute("""
-        SELECT * FROM dd_valuations
-        WHERE update_date IS NOT NULL
-        ORDER BY update_date DESC
-        LIMIT 10
-    """).fetchall()
-    conn.close()
-
-    from datetime import datetime, timedelta
-    cutoff_date = (datetime.now() - timedelta(days=max_days)).strftime("%Y-%m-%d")
-
+def list_available_valuation_indexes() -> list[dict]:
+    """供分析与对话发现所有本地估值来源，保持每个指标独立。"""
+    rows = [{**row, 'snapshot_date': row['latest_date']} for row in list_valuation_indexes()]
+    rows.extend(image_valuation_rows())
+    grouped = {}
     for row in rows:
-        dd = dict(row)
-        if dd.get("update_date") and dd["update_date"] < cutoff_date:
-            continue  # 数据过期
-
-        if not dd.get("raw_json"):
-            continue
-
-        try:
-            parsed = _json.loads(dd["raw_json"])
-            if not parsed.get("ok"):
-                continue
-
-            # 在指数列表中查找匹配的指数
-            for item in parsed.get("data", []):
-                item_code = normalize_index_code(item.get("index_code", ""))
-                item_name = item.get("index_name", "")
-
-                # 代码匹配或名称匹配
-                code_match = item_code == normalized_code
-                name_match = index_name and item_name and (
-                    index_name in item_name or item_name in index_name
-                )
-
-                if code_match or name_match:
-                    # 根据指标类型返回数据
-                    if metric_type == "市盈率" and item.get("pe") is not None:
-                        return {
-                            "index_code": item_code,
-                            "index_name": item_name,
-                            "metric_type": "市盈率",
-                            "current_value": item["pe"],
-                            "percentile": item.get("pe_percentile"),
-                            "snapshot_date": dd["update_date"],
-                            "source": "螺丝钉",
-                            "dd_id": dd["id"],
-                            "background_color": item.get("background_color"),
-                            "valuation_status": item.get("valuation_status"),
-                        }
-                    elif metric_type == "市净率" and item.get("pb") is not None:
-                        return {
-                            "index_code": item_code,
-                            "index_name": item_name,
-                            "metric_type": "市净率",
-                            "current_value": item["pb"],
-                            "percentile": item.get("pb_percentile"),
-                            "snapshot_date": dd["update_date"],
-                            "source": "螺丝钉",
-                            "dd_id": dd["id"],
-                            "background_color": item.get("background_color"),
-                            "valuation_status": item.get("valuation_status"),
-                        }
-        except Exception:
-            continue
-
-    return None
+        key = (normalize_index_code(row['index_code']), row['metric_type'])
+        best = newest_valuation([grouped.get(key), row], row['metric_type'])
+        if best:
+            grouped[key] = {**best, 'index_code': key[0], 'latest_date': best.get('snapshot_date')}
+    return list(grouped.values())
 
 
 def get_best_valuation(
-    index_code: str,
-    metric_type: str = "市盈率",
-    query_source: str = "unknown",
-    trace_id: str = None,
-    enable_online: bool = True,
-    allow_metric_fallback: bool = False,
-    conv_id: int = None,
-    message_id: int = None,
-    agent_name: str = None,
-    user_query: str = None,
-    cache_hit: int = 0,
+    index_code: str, metric_type: str = "市盈率", query_source: str = "unknown",
+    trace_id: str = None, enable_online: bool = True, allow_metric_fallback: bool = False,
+    conv_id: int = None, message_id: int = None, agent_name: str = None,
+    user_query: str = None, cache_hit: int = 0,
 ) -> dict | None:
-    """获取最佳估值数据（智能降级 + 在线兜底 + 监控日志）。
-
-    降级策略：
-    1. 优先使用最近 7 天内的详细数据（雷牛牛）
-    2. 降级到螺丝钉数据（最近 30 天内）
-    3. 使用过期数据（365 天内，标记 is_expired）
-    4. 在线兜底：akshare 中证官方 → 天天基金 MCP（受 valuation.online_fallback_enabled 开关控制）
-
-    Args:
-        index_code: 指数代码（支持带后缀格式如 000922.CSI / H30217.CSI，内部自动 normalize）
-        metric_type: 指标类型（市盈率/市净率）
-        query_source: 查询来源（portfolio/valuation_page/agent/chat/alert_scanner），用于监控
-        trace_id: 追踪ID，用于监控
-        enable_online: 是否启用在线兜底。批量调用场景（如 smart_add_planner 循环多个持仓）
-                       应传 False 以避免累积超时。默认 True。
-        allow_metric_fallback: 是否允许 metric_type 自动 fallback。
-                              当指定 metric_type 本地查不到时，按预设顺序自动尝试其他 metric_type。
-                              fallback 顺序：市盈率 → 市净率 → 市销率 → 股息率。
-                              默认 False（不破坏现有调用），alert_scanner 等场景传 True。
-                              返回结果中新增 fallback_metric_type 字段标注实际命中的指标。
-        conv_id: 对话ID，用于监控关联
-        message_id: 消息ID，用于监控关联
-        agent_name: 专家名称，用于监控关联
-        user_query: 用户问题，用于监控关联
-        cache_hit: 是否命中缓存（1=缓存命中，0=未命中）
-
-    返回:
-        包含估值数据的字典，带 data_source、is_expired、days_old 字段；
-        在线兜底结果额外带 source: "akshare"/"ttfund"，不入库。
-    """
+    """同指数同指标选最新来源；超过3天先补查在线，再返回明确标记的历史参考。"""
     start_ts = datetime.now()
-    final_source = "failed"
-    degraded = 0
-    is_expired = 0
-    error_msg = None
-
-    # 入口统一 normalize：去除 .CSI/.WI/.SH 等后缀，兼容持仓表带后缀的指数代码
     index_code = normalize_index_code(index_code)
-
-    # 1. 优先使用最近 7 天内的详细数据
-    detailed = get_latest_valuation(index_code, metric_type, max_days=7)
-    # 修复：本地数据所有关键字段都为 null 时，不应返回空记录，应继续降级到在线兜底
-    if detailed and (detailed.get("current_value") is not None or detailed.get("percentile") is not None):
-        detailed["data_source"] = "manual"
-        detailed["is_expired"] = False
-        if detailed.get("snapshot_date"):
-            try:
-                days_old = (datetime.now() - datetime.fromisoformat(detailed["snapshot_date"])).days
-                detailed["days_old"] = days_old
-            except Exception:
-                detailed["days_old"] = 0
-
-        # R4: PE过期超过14天时，尝试PB替代
-        if metric_type == "市盈率" and detailed.get("days_old", 0) > 14:
-            try:
-                pb_data = get_latest_valuation(index_code, "市净率", max_days=7)
-                if pb_data and pb_data.get("percentile") is not None:
-                    pb_days_old = 0
-                    if pb_data.get("snapshot_date"):
-                        try:
-                            pb_days_old = (datetime.now() - datetime.fromisoformat(pb_data["snapshot_date"])).days
-                        except Exception:
-                            pass
-                    if pb_days_old <= 7:
-                        detailed["percentile"] = pb_data["percentile"]
-                        detailed["percentile_source"] = f"PB替代(PE过期{detailed['days_old']}天)"
-                        # P3-6: 周期股 PE/PB 可能反向，标注警告
-                        detailed["pb_substitute_warning"] = "PE过期使用PB替代，周期股PE/PB可能反向，注意估值判断偏差"
-                        detailed["fallback_pb_value"] = pb_data.get("current_value")
-                        detailed["fallback_pb_percentile"] = pb_data.get("percentile")
-                        logger.info(
-                            f"R4 PB替代: {index_code} PE过期{detailed['days_old']}天, "
-                            f"使用PB百分位{pb_data['percentile']:.1f}%"
-                        )
-            except Exception as e:
-                logger.debug(f"R4 PB替代检查失败: {e}")
-
-        final_source = "leiniuniu"
-        _log_valuation_query(index_code, detailed.get("index_name"), query_source, final_source,
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=cache_hit)
-        return _normalize_valuation_result(detailed)
-
-    # 2. 降级到螺丝钉数据（最近 30 天内）
-    dd_data = get_latest_dd_valuation_for_index(index_code, metric_type, max_days=30)
-    if dd_data:
-        dd_data["data_source"] = "螺丝钉"
-        dd_data["is_expired"] = False
-        dd_data["degraded"] = True
-        degraded = 1
-        if dd_data.get("snapshot_date"):
-            try:
-                days_old = (datetime.now() - datetime.fromisoformat(dd_data["snapshot_date"])).days
-                dd_data["days_old"] = days_old
-            except Exception:
-                dd_data["days_old"] = 0
-        final_source = "dd_luosiding"
-        _log_valuation_query(index_code, dd_data.get("index_name"), query_source, final_source,
-                             degraded, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=cache_hit)
-        return _normalize_valuation_result(dd_data)
-
-    # 3. 使用过期的详细数据（如有）
-    detailed_expired = get_latest_valuation(index_code, metric_type, max_days=365)
-    # 同样检查关键字段是否为 null
-    if detailed_expired and (detailed_expired.get("current_value") is not None or detailed_expired.get("percentile") is not None):
-        detailed_expired["data_source"] = "manual"
-        detailed_expired["is_expired"] = True
-        is_expired = 1
-        if detailed_expired.get("snapshot_date"):
-            try:
-                days_old = (datetime.now() - datetime.fromisoformat(detailed_expired["snapshot_date"])).days
-                detailed_expired["days_old"] = days_old
-            except Exception:
-                detailed_expired["days_old"] = 0
-        final_source = "expired_leiniuniu"
-        _log_valuation_query(index_code, detailed_expired.get("index_name"), query_source, final_source,
-                             0, is_expired, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=cache_hit)
-        return _normalize_valuation_result(detailed_expired)
-
-    # 3.5 metric_type fallback：本地指定 metric_type 查不到时，尝试本地其他 metric_type
-    #     场景：alert_scanner 默认查"市盈率"，但持仓中很多指数本地只有"市净率/市销率/股息率"
-    #     此步骤不触发在线兜底（避免误超时），仅用本地已有数据，命中后直接返回
-    if allow_metric_fallback:
-        for fallback_type in ["市净率", "市销率", "股息率"]:
+    local = get_latest_valuation(index_code, metric_type)
+    if local:
+        local = {**local, 'data_source': 'manual', 'percentile_scale': 100}
+    images = [row for row in image_valuation_rows()
+              if row['index_code'] == index_code and row['metric_type'] == metric_type]
+    best = newest_valuation([local, *images], metric_type)
+    metadata = dict(conv_id=conv_id, message_id=message_id, agent_name=agent_name,
+                    user_query=user_query, cache_hit=cache_hit)
+    if (not best or best['is_expired']) and enable_online:
+        online = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id, **metadata)
+        best = newest_valuation([best, online], metric_type)
+    # 只有主指标完全缺失才允许显式换指标，不用新PB覆盖旧PE的口径。
+    if not best and allow_metric_fallback:
+        for fallback_type in ('市净率', '市销率', '股息率'):
             if fallback_type == metric_type:
                 continue
-            fb_data = get_latest_valuation(index_code, fallback_type, max_days=7)
-            if fb_data and (fb_data.get("current_value") is not None or fb_data.get("percentile") is not None):
-                fb_data["data_source"] = "manual"
-                fb_data["is_expired"] = False
-                fb_data["fallback_metric_type"] = fallback_type
-                fb_data["original_metric_type"] = metric_type
-                if fb_data.get("snapshot_date"):
-                    try:
-                        days_old = (datetime.now() - datetime.fromisoformat(fb_data["snapshot_date"])).days
-                        fb_data["days_old"] = days_old
-                    except Exception:
-                        fb_data["days_old"] = 0
-                final_source = f"leiniuniu_fallback_{fallback_type}"
-                _log_valuation_query(index_code, fb_data.get("index_name"), query_source, final_source,
-                                     0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                                     conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                                     user_query=user_query, cache_hit=cache_hit)
-                logger.info(
-                    f"[valuation] {index_code} metric_type fallback：{metric_type} 无数据，"
-                    f"改用 {fallback_type} 命中（query_source={query_source}）"
-                )
-                return _normalize_valuation_result(fb_data)
-
-    # 4. 在线兜底：akshare → 天天基金（仅在 enable_online=True 时触发）
-    if enable_online:
-        online_result = _online_fallback(index_code, metric_type, start_ts, query_source, trace_id,
-                                         conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                                         user_query=user_query, cache_hit=cache_hit)
-        if online_result:
-            return _normalize_valuation_result(online_result)
-        # 在线兜底已启用但全部失败 → 真正需要告警
-        error_msg = "all sources failed (local + akshare + ttfund)"
-        failed_name = _lookup_index_name(index_code)
-        _log_valuation_query(index_code, failed_name, query_source, "failed",
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=cache_hit)
-        logger.warning(f"[valuation] {index_code} 估值查询全部失败 ({query_source})")
-        return None
-    else:
-        # 在线兜底被禁用（批量场景）→ 本地表缺失，但在线渠道可能可查到，不应触发告警
-        error_msg = "local sources failed, online fallback disabled"
-        failed_name = _lookup_index_name(index_code)
-        _log_valuation_query(index_code, failed_name, query_source, "local_failed_online_disabled",
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, error_msg,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=cache_hit)
-        logger.info(f"[valuation] {index_code} 本地估值缺失，在线兜底已禁用 ({query_source})")
-        return None
+            fallback = get_best_valuation(index_code, fallback_type, query_source, trace_id,
+                                          enable_online=False, **metadata)
+            if fallback and not fallback['is_expired']:
+                best = {**fallback, 'fallback_metric_type': fallback_type, 'original_metric_type': metric_type}
+                break
+    source = 'failed' if enable_online else 'local_failed_online_disabled'
+    if best:
+        best = _normalize_valuation_result(best)
+        source = {'manual': 'leiniuniu', '螺丝钉': 'dd_luosiding', '六亿': 'liuyi'}.get(
+            best.get('data_source'), best.get('source') or 'online')
+        if best['is_expired']:
+            source = 'expired_' + source
+            best['data_freshness_hint'] = '估值日期过期或未知，仅供历史参考，不能据此判断当前低估或给出确定买卖结论。'
+    _log_valuation_query(index_code, (best or {}).get('index_name'), query_source, source,
+                         int(bool(best and best.get('data_source') != 'manual')),
+                         int(bool(best and best['is_expired'])),
+                         int((datetime.now()-start_ts).total_seconds()*1000), trace_id,
+                         None if best else 'no usable valuation data', **metadata)
+    return best
 
 
 def save_online_valuation(index_code: str, metric_type: str, data: dict, source: str) -> None:
@@ -897,6 +686,7 @@ def save_online_valuation(index_code: str, metric_type: str, data: dict, source:
         data: 在线查询返回的估值数据 dict
         source: "akshare" / "ttfund"
     """
+    percentile = _normalize_percentile(data.get('percentile'), fractional=_percentile_unit(data) == 'ratio')
     conn = _get_conn()
     try:
         conn.execute("""
@@ -907,7 +697,7 @@ def save_online_valuation(index_code: str, metric_type: str, data: dict, source:
         """, (
             index_code, metric_type,
             data.get("current_value"),
-            data.get("percentile"),
+            percentile,
             data.get("current_point"),
             data.get("index_name"),
             data.get("snapshot_date"),
@@ -944,6 +734,8 @@ def get_online_valuation_cached(index_code: str, metric_type: str, max_days: int
         row = dict(row)
         row["data_source"] = f"online_{row.get('source', 'unknown')}"
         row["cached"] = True
+        row["percentile_scale"] = 100
+        row["percentile_unit"] = "percent"
         _mark_online_source_age(row)
         return row
     except Exception as e:
@@ -984,108 +776,55 @@ def _online_fallback(index_code, metric_type, start_ts, query_source, trace_id=N
 
 
 def _online_fallback_uncached(index_code: str, metric_type: str, start_ts: datetime,
-                     query_source: str, trace_id: str = None,
-                     conv_id: int = None, message_id: int = None,
-                     agent_name: str = None, user_query: str = None,
-                     cache_hit: int = 0) -> dict | None:
-    """在线兜底：akshare → 天天基金。结果写入 L1 内存缓存 + L2 持久化缓存（valuations_online 表）。
-
-    使用 ThreadPoolExecutor 实现真正的超时控制，避免 akshare/MCP 调用卡住主线程。
-    """
+                     query_source: str, trace_id: str = None, **metadata) -> dict | None:
+    """缓存TTL与来源日期分别校验；旧缓存不阻断真实来源刷新。"""
     from db.config import get_config_bool, get_config_int
-
     if not get_config_bool("valuation.online_fallback_enabled", True):
         return None
+    key = f"{index_code}:{metric_type}"
+    cached = _online_cache.get(key)
+    ttl = get_config_int("valuation.online_cache_ttl", 3600)
+    if cached and (datetime.now()-cached['_cached_at']).total_seconds() < ttl:
+        cached = mark_freshness({k: value for k, value in cached.items() if k != '_cached_at'})
+        if not cached['is_expired']:
+            return {**cached, 'cached': True}
+    l2 = get_online_valuation_cached(index_code, metric_type,
+                                    max_days=get_config_int('valuation.online_cache_ttl_days', 7))
+    if l2 and not l2['is_expired']:
+        return l2
+    timeout_ms = get_config_int('valuation.online_fallback_timeout_ms', 5000)
+    fetched = _fetch_online_sources(index_code, metric_type, timeout_ms)
+    result = newest_valuation([fetched, l2, cached], metric_type)
+    if result and fetched is not None:
+        provider = result.get('source', '').removesuffix('_online')
+        if provider in ('akshare', 'ttfund'):
+            save_online_valuation(index_code, metric_type, result, provider)
+    return result
 
-    cache_ttl = get_config_int("valuation.online_cache_ttl", 3600)
-    cache_key = f"{index_code}:{metric_type}"
-    cached = _online_cache.get(cache_key)
-    if cached:
-        if (datetime.now() - cached["_cached_at"]).total_seconds() < cache_ttl:
-            logger.debug(f"[valuation] {index_code} 命中在线缓存 (source={cached.get('source')})")
-            final_source = cached.get("source", "online_cached")
-            _log_valuation_query(index_code, cached.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                                 user_query=user_query, cache_hit=1)
-            return {k: v for k, v in cached.items() if k != "_cached_at"}
-        else:
-            del _online_cache[cache_key]
 
-    # P0-4: L2 持久化缓存（valuations_online 表，可配置 valuation.online_cache_ttl_days，默认7天）
-    online_ttl_days = get_config_int("valuation.online_cache_ttl_days", 7)
-    l2_cached = get_online_valuation_cached(index_code, metric_type, max_days=online_ttl_days)
-    if l2_cached:
-        l2_cached["source"] = l2_cached.get("source", "cached")
-        l2_cached["degraded"] = True
-        final_source = f"online_{l2_cached.get('source')}_cached"
-        _log_valuation_query(index_code, l2_cached.get("index_name"), query_source, final_source,
-                             0, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                             conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                             user_query=user_query, cache_hit=1)
-        logger.debug(f"[valuation] {index_code} 命中 L2 在线缓存 (source={l2_cached.get('source')})")
-        return l2_cached
-
-    timeout_ms = get_config_int("valuation.online_fallback_timeout_ms", 5000)
-    timeout_s = max(timeout_ms / 1000.0, 1.0)
-
-    # 渠道1：akshare 中证官方（带真正超时）
-    try:
-        online_data = _run_with_safe_timeout(
-            _query_akshare_valuation, index_code, metric_type, timeout_ms,
-            timeout_s=timeout_s,
-            timeout_msg=f"[valuation] akshare 查询超时 {index_code} ({timeout_s}s)",
-        )
-        if online_data:
-            online_data["data_source"] = "online"
-            online_data["source"] = "akshare"
-            online_data["is_expired"] = False
-            online_data["degraded"] = True
-            _mark_online_source_age(online_data)
-            online_data["_cached_at"] = datetime.now()
-            _online_cache[cache_key] = online_data
-            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
-            # P0-4: 写入 L2 持久化缓存（保存失败不影响主流程）
-            save_online_valuation(index_code, metric_type, result, "akshare")
-            final_source = "akshare"
-            _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                                 user_query=user_query, cache_hit=cache_hit)
-            logger.info(f"[valuation] {index_code} 在线兜底成功 (akshare, {query_source})")
-            return result
-    except Exception as e:
-        logger.debug(f"[valuation] akshare 兜底失败 {index_code}: {e}")
-
-    # 渠道2：天天基金 MCP（带真正超时）
-    try:
-        online_data = _run_with_safe_timeout(
-            _query_ttfund_valuation, index_code, metric_type, timeout_ms,
-            timeout_s=timeout_s,
-            timeout_msg=f"[valuation] ttfund 查询超时 {index_code} ({timeout_s}s)",
-        )
-        if online_data:
-            online_data["data_source"] = "online"
-            online_data["source"] = "ttfund"
-            online_data["is_expired"] = False
-            online_data["degraded"] = True
-            _mark_online_source_age(online_data)
-            online_data["_cached_at"] = datetime.now()
-            _online_cache[cache_key] = online_data
-            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
-            # P0-4: 写入 L2 持久化缓存（保存失败不影响主流程）
-            save_online_valuation(index_code, metric_type, result, "ttfund")
-            final_source = "ttfund"
-            _log_valuation_query(index_code, result.get("index_name"), query_source, final_source,
-                                 1, 0, int((datetime.now() - start_ts).total_seconds() * 1000), trace_id, None,
-                                 conv_id=conv_id, message_id=message_id, agent_name=agent_name,
-                                 user_query=user_query, cache_hit=cache_hit)
-            logger.info(f"[valuation] {index_code} 在线兜底成功 (ttfund, {query_source})")
-            return result
-    except Exception as e:
-        logger.debug(f"[valuation] ttfund 兜底失败 {index_code}: {e}")
-
-    return None
+def _fetch_online_sources(index_code: str, metric_type: str, timeout_ms: int) -> dict | None:
+    """第一来源过期/无日期时继续查询第二来源；失败保留可核验的最新历史数据。"""
+    if metric_type not in ('市盈率', '市净率'):
+        return None
+    candidates = []
+    for provider, fn in (('akshare', _query_akshare_valuation), ('ttfund', _query_ttfund_valuation)):
+        data = _run_with_safe_timeout(fn, index_code, metric_type, timeout_ms,
+            timeout_s=max(timeout_ms / 1000.0, 1.0),
+            timeout_msg=f'估值查询超时 {provider} {index_code}')
+        if not data or data.get('metric_type') != metric_type:
+            continue
+        data = mark_freshness({**data, 'data_source': 'online', 'source': provider + '_online',
+                               'percentile_scale': data.get('percentile_scale', 100)})
+        data['percentile'] = _normalize_percentile(data.get('percentile'), fractional=_percentile_unit(data) == 'ratio')
+        data['percentile_unit'] = 'percent'
+        data['percentile_scale'] = 100
+        candidates.append(data)
+        if not data['is_expired']:
+            break
+    best = newest_valuation(candidates, metric_type)
+    if best:
+        _online_cache[f'{index_code}:{metric_type}'] = {**best, '_cached_at': datetime.now()}
+    return best
 
 
 def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int) -> dict | None:
@@ -1131,6 +870,7 @@ def _query_akshare_valuation(index_code: str, metric_type: str, timeout_ms: int)
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
+            "percentile_unit": "ratio",  # market_data 的百分位契约固定为 0-1
             "snapshot_date": result.get("date"),
             "percentile_window": "近3年",  # P2-5: 标注百分位口径
             "dividend_yield": result.get("dividend_yield"),
@@ -1198,9 +938,7 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
         elif metric_type == "市净率":
             percentile = valuation.get("pb_percentile_10y")
             current_value = valuation.get("pb")
-        # 天天基金百分位是 0-100 格式，统一转为 0-1
-        if percentile is not None and percentile > 1.0:
-            percentile = round(percentile / 100.0, 4)
+        # 天天基金契约为百分数点，0.62 就是 0.62%，不得按数值切换单位。
         index_name = (quote.get("index_name") or index_profile.get("index_name")
                       or index_profile.get("full_index_name") or idx_code)
         # 关键修复：如果 current_value 和 percentile 都为 None，说明数据不完整，返回 None 触发重试
@@ -1212,6 +950,7 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
             "metric_type": metric_type,
             "current_value": current_value,
             "percentile": percentile,
+            "percentile_unit": "percent",
             "snapshot_date": valuation.get("update_date") or valuation.get("date") or quote.get("quote_time"),
             "percentile_window": "近10年",
             "dividend_yield": valuation.get("dividend_yield"),
@@ -1251,98 +990,24 @@ def _query_ttfund_valuation(index_code: str, metric_type: str, timeout_ms: int) 
 
 def fetch_online_valuation(index_code: str, metric_type: str = "市盈率",
                             timeout_ms: int = 6000) -> dict | None:
-    """主动查询在线最新估值（akshare 中证官方）。
-
-    与自动兜底 _online_fallback 的区别：
-    - 不受 valuation.online_fallback_enabled 开关控制（这是用户/专家主动调用）
-    - 受 tool.online_valuation_query_enabled 开关控制（默认 true）
-    - 复用 akshare 数据源 + 内存缓存（1小时TTL）
-    - 带真正超时控制（ThreadPoolExecutor）
-
-    Args:
-        index_code: 指数代码（支持带后缀，内部 normalize）
-        metric_type: 市盈率/市净率
-        timeout_ms: 超时毫秒（默认 6 秒，略长于自动兜底的 5 秒）
-
-    Returns:
-        估值字典，带 source="akshare_online" 标识；失败返回 None
-    """
+    """主动补查在线来源；来源日期未知或过期的缓存不代表最新估值。"""
     from db.config import get_config_bool, get_config_int
-    try:
-        if not get_config_bool("tool.online_valuation_query_enabled", True):
-            logger.info(f"[valuation] 主动在线查询已禁用 (tool.online_valuation_query_enabled=false) {index_code}")
-            return None
-    except Exception:
-        pass
-
+    if not get_config_bool('tool.online_valuation_query_enabled', True):
+        return None
     index_code = normalize_index_code(index_code)
-
-    # 复用在线缓存（与自动兜底共享）
-    cache_ttl = get_config_int("valuation.online_cache_ttl", 3600)
-    cache_key = f"{index_code}:{metric_type}"
-    cached = _online_cache.get(cache_key)
+    key = f'{index_code}:{metric_type}'
+    cached = _online_cache.get(key)
     if cached:
-        if (datetime.now() - cached["_cached_at"]).total_seconds() < cache_ttl:
-            result = {k: v for k, v in cached.items() if k != "_cached_at"}
-            result["cached"] = True
-            _mark_online_source_age(result)
-            logger.debug(f"[valuation] 主动在线查询命中缓存 {index_code}")
-            return result
-        else:
-            del _online_cache[cache_key]
-
-    timeout_s = max(timeout_ms / 1000.0, 1.0)
-
-    # 渠道1：akshare 中证官方
-    try:
-        online_data = _run_with_safe_timeout(
-            _query_akshare_valuation, index_code, metric_type, timeout_ms,
-            timeout_s=timeout_s,
-            timeout_msg=f"[valuation] 主动在线查询 akshare 超时 {index_code} ({timeout_s}s)",
-        )
-        if online_data:
-            online_data["data_source"] = "online"
-            online_data["source"] = "akshare_online"
-            online_data["is_expired"] = False
-            _mark_online_source_age(online_data)
-            # 统一 percentile 为 0-100 格式（akshare 返回 0-1 小数）
-            pct_raw = online_data.get("percentile")
-            if pct_raw is not None and pct_raw <= 1.0:
-                online_data["percentile"] = round(pct_raw * 100, 2)
-            online_data["_cached_at"] = datetime.now()
-            _online_cache[cache_key] = online_data
-            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
-            logger.info(f"[valuation] 主动在线查询成功(akshare) {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
-            return result
-    except Exception as e:
-        logger.warning(f"[valuation] 主动在线查询 akshare 失败 {index_code}: {e}")
-
-    # 渠道2：天天基金 MCP（akshare 查不到或超时时兜底）
-    try:
-        # F-akshare（2026-07-23）：用 _run_with_safe_timeout 替代 `with ThreadPoolExecutor`，
-        # 避免 shutdown(wait=True) 无限等待 zombie 线程导致服务卡死。
-        online_data = _run_with_safe_timeout(
-            _query_ttfund_valuation, index_code, metric_type, timeout_ms,
-            timeout_s=timeout_s,
-            timeout_msg=f"[valuation] 主动在线查询 ttfund 超时 {index_code} ({timeout_s}s)",
-        )
-        if online_data:
-            online_data["data_source"] = "online"
-            online_data["source"] = "ttfund_online"
-            online_data["is_expired"] = False
-            _mark_online_source_age(online_data)
-            # 天天基金 percentile 已在 _query_ttfund_valuation 转为 0-1，这里统一转 0-100
-            pct_raw = online_data.get("percentile")
-            if pct_raw is not None and pct_raw <= 1.0:
-                online_data["percentile"] = round(pct_raw * 100, 2)
-            online_data["_cached_at"] = datetime.now()
-            _online_cache[cache_key] = online_data
-            result = {k: v for k, v in online_data.items() if k != "_cached_at"}
-            logger.info(f"[valuation] 主动在线查询成功(ttfund) {index_code} ({metric_type}={result.get('current_value')}, 分位={result.get('percentile')}%)")
-            return result
-    except Exception as e:
-        logger.warning(f"[valuation] 主动在线查询 ttfund 失败 {index_code}: {e}")
-    return None
+        cached = mark_freshness({k: value for k, value in cached.items() if k != '_cached_at'})
+        original = _online_cache[key]
+        if ((datetime.now()-original['_cached_at']).total_seconds()
+                < get_config_int('valuation.online_cache_ttl', 3600) and not cached['is_expired']):
+            return {**cached, 'cached': True}
+    fetched = _fetch_online_sources(index_code, metric_type, timeout_ms)
+    result = newest_valuation([fetched, cached], metric_type)
+    if result and fetched is None:
+        result['cached'] = True
+    return result
 
 
 def _lookup_index_name(index_code: str) -> str | None:

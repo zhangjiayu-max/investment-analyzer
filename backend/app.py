@@ -2,6 +2,7 @@
 
 import asyncio
 from infra.blocking import run_blocking
+from infra.background_tasks import create_background_task, cancel_background_tasks
 import json
 import logging
 
@@ -377,7 +378,7 @@ async def startup():
         if index_codes:
             logging.info(f"开始异步回填 {len(index_codes)} 个指数历史数据...")
             # 后台执行，不阻塞启动
-            asyncio.create_task(_async_fetch_index_history(list(index_codes)))
+            create_background_task(_async_fetch_index_history(list(index_codes)))
     except Exception as e:
         logging.warning(f"回填指数历史启动失败（不影响启动）: {e}")
 
@@ -445,40 +446,40 @@ async def startup():
             logging.warning(f"记忆维护失败: {e}")
 
     # 后台执行异步初始化
-    asyncio.create_task(run_blocking(_blocking_init))
+    create_background_task(run_blocking(_blocking_init))
     logging.info("后台初始化任务已启动")
 
     # 后台每日报告（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_report", "false") == "true":
-        asyncio.create_task(_auto_daily_report())
+        create_background_task(_auto_daily_report())
     else:
         logging.info("自动市场日报已关闭（llm_cost.auto_daily_report=false）")
 
     # 后台每日净值自动刷新（15:30 收盘后）
-    asyncio.create_task(_auto_refresh_nav())
+    create_background_task(_auto_refresh_nav())
 
     # 后台每日备份（启动时 + 每天凌晨 2 点）
-    asyncio.create_task(_auto_daily_backup())
+    create_background_task(_auto_daily_backup())
 
     # 后台每日清理（启动回填 + 每天凌晨 3 点：决策过期 + 结论清理，P0-4.1/3.3）
-    asyncio.create_task(_auto_daily_cleanup())
+    create_background_task(_auto_daily_cleanup())
 
     # 后台每周预警准确性回测（每周一 02:00，纯本地计算，P2-4.3）
     if get_config("alert.auto_weekly_backtest", "true") == "true":
-        asyncio.create_task(_auto_weekly_alert_backtest())
+        create_background_task(_auto_weekly_alert_backtest())
         logging.info("每周预警准确性回测任务已启动（alert.auto_weekly_backtest=true）")
     else:
         logging.info("每周预警准确性回测已关闭（alert.auto_weekly_backtest=false）")
 
     # 后台每日评测 Pipeline（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_eval", "false") == "true":
-        asyncio.create_task(_auto_daily_eval())
+        create_background_task(_auto_daily_eval())
     else:
         logging.info("每日评测 Pipeline 已关闭（llm_cost.auto_daily_eval=false）")
 
     # P0 主动提醒扫描（估值阈值/持仓风险/建议验证，默认开启）
     if get_config("alerts.proactive_scan_enabled", "true") == "true":
-        asyncio.create_task(_auto_periodic_scan())
+        create_background_task(_auto_periodic_scan())
         logging.info("主动提醒扫描任务已启动（alerts.proactive_scan_enabled=true）")
     else:
         logging.info("主动提醒扫描已关闭（alerts.proactive_scan_enabled=false）")
@@ -486,7 +487,7 @@ async def startup():
     # 预警自动清理任务（每日 03:00 执行，默认开启）
     # 清理 14 天前所有预警（含未读），info 级 7 天未处理自动标记 ignored
     if get_config("alerts.auto_cleanup_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_alerts())
+        create_background_task(_auto_cleanup_alerts())
         logging.info("预警自动清理任务已启动（alerts.auto_cleanup_enabled=true）")
     else:
         logging.info("预警自动清理已关闭（alerts.auto_cleanup_enabled=false）")
@@ -494,18 +495,18 @@ async def startup():
     # 功能使用埋点自动清理（每日 03:00 执行，默认开启）
     # 清理 90 天前的埋点数据，避免表无限膨胀
     if get_config("tracking.feature_usage_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_feature_usage())
+        create_background_task(_auto_cleanup_feature_usage())
         logging.info("功能使用埋点清理任务已启动（tracking.feature_usage_enabled=true）")
 
     # 编排检查点自动清理（每日 03:00 执行，默认开启）
     # 清理 7 天前的 checkpoint（含 llm_messages/blackboard_dict，单条约 50-150KB）
     if get_config("orchestrator.checkpoint_cleanup_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_checkpoints())
+        create_background_task(_auto_cleanup_checkpoints())
         logging.info("编排检查点清理任务已启动（orchestrator.checkpoint_cleanup_enabled=true）")
 
     # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
     if get_config("alerts.event_radar_enabled", "false") == "true":
-        asyncio.create_task(_auto_event_radar_scan())
+        create_background_task(_auto_event_radar_scan())
         logging.info("前瞻事件雷达任务已启动（alerts.event_radar_enabled=true）")
     else:
         logging.info("前瞻事件雷达已关闭（alerts.event_radar_enabled=false）")
@@ -516,7 +517,7 @@ async def startup():
     # 修复：解耦验证与扫描，独立定时任务每4小时（09:00/13:00/17:00/21:00）执行。
     # 开关：alerts.event_radar_verify_enabled（默认 true，非LLM相关）
     if get_config("alerts.event_radar_verify_enabled", "true") == "true":
-        asyncio.create_task(_auto_event_verification())
+        create_background_task(_auto_event_verification())
         logging.info("事件落地验证独立任务已启动（alerts.event_radar_verify_enabled=true，每4小时执行）")
     else:
         logging.info("事件落地验证独立任务已关闭（alerts.event_radar_verify_enabled=false）")
@@ -527,7 +528,7 @@ async def startup():
     #         改为 asyncio.create_task 后台执行，不阻塞 startup
     try:
         if get_config("alerts.event_backfill_verify_enabled", "true") == "true":
-            asyncio.create_task(_startup_event_backfill())
+            create_background_task(_startup_event_backfill())
     except Exception as e:
         logging.warning(f"[启动 backfill] 事件验证补全任务创建失败（不影响启动）: {e}")
 
@@ -573,7 +574,7 @@ async def startup():
         logging.warning(f"机会雷达 backfill 失败（不影响启动）: {e}")
 
     if get_config("alerts.opportunity_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_opportunity_backtest())
+        create_background_task(_auto_opportunity_backtest())
         logging.info("机会雷达每日回测任务已启动（alerts.opportunity_backtest_enabled=true）")
     else:
         logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
@@ -582,7 +583,7 @@ async def startup():
     # 开关：opportunity.auto_daily_scan_enabled（默认 true）
     # 复用事件雷达 _collect_news() 三源新闻，避免重复采集
     if get_config("opportunity.auto_daily_scan_enabled", "true") == "true":
-        asyncio.create_task(_auto_daily_opportunity_scan())
+        create_background_task(_auto_daily_opportunity_scan())
         logging.info("主题机会每日扫描任务已启动（opportunity.auto_daily_scan_enabled=true，16:00 触发）")
     else:
         logging.info("主题机会每日扫描已关闭（opportunity.auto_daily_scan_enabled=false）")
@@ -591,28 +592,28 @@ async def startup():
     # 开关：health_v2.auto_daily_diagnosis_enabled（默认 true）
     # 确保历史快照连续，score_change_7d 计算准确
     if get_config("health_v2.auto_daily_diagnosis_enabled", "true") == "true":
-        asyncio.create_task(_auto_daily_health_diagnosis())
+        create_background_task(_auto_daily_health_diagnosis())
         logging.info("全账户诊断每日自动调度已启动（health_v2.auto_daily_diagnosis_enabled=true，18:00 触发）")
     else:
         logging.info("全账户诊断每日自动调度已关闭（health_v2.auto_daily_diagnosis_enabled=false）")
 
     # P0-3（2026-07-21）：关注列表信号回测定时任务
     if get_config("alerts.watchlist_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_watchlist_backtest())
+        create_background_task(_auto_watchlist_backtest())
         logging.info("关注列表信号回测任务已启动（alerts.watchlist_backtest_enabled=true）")
     else:
         logging.info("关注列表信号回测已关闭（alerts.watchlist_backtest_enabled=false）")
 
     # 三模块联动 P0-A3（2026-08-01）：决策账本每日回测（"越来越准"引擎）
     if get_config("decision_ledger.auto_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_decision_backtest())
+        create_background_task(_auto_decision_backtest())
         logging.info("决策账本每日回测任务已启动（decision_ledger.auto_backtest_enabled=true，09:45 触发）")
     else:
         logging.info("决策账本每日回测已关闭（decision_ledger.auto_backtest_enabled=false）")
 
     # 三模块联动 P0-S2（2026-08-01）：止盈闭环定时扫描（每 60 分钟）
     if get_config("smartadd.exitloop.enabled", "true") == "true":
-        asyncio.create_task(_auto_exit_loop_scan())
+        create_background_task(_auto_exit_loop_scan())
         logging.info("止盈闭环扫描任务已启动（smartadd.exitloop.enabled=true，每 60 分钟）")
     else:
         logging.info("止盈闭环扫描已关闭（smartadd.exitloop.enabled=false）")
@@ -728,21 +729,20 @@ async def shutdown():
     except Exception:
         pass
 
-    # 3. 关闭数据库连接池
+    # 3. 等待正在执行的指数分析保存报告，再关闭资源。
+    from routers.analysis.index_analysis import drain_index_analysis_tasks
+    await drain_index_analysis_tasks()
+
+    # 4. 仅取消应用注册的常驻任务；不能取消 uvicorn/ASGI 生命周期任务。
+    count = await cancel_background_tasks()
+    logging.info(f"已取消 {count} 个应用后台任务")
+
+    # 5. 关闭数据库连接池
     try:
         from db import _get_conn
         conn = _get_conn()
         conn.close()
         logging.info("数据库连接已关闭")
-    except Exception:
-        pass
-
-    # 4. 取消后台任务
-    try:
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-        logging.info(f"已取消 {len(tasks)} 个后台任务")
     except Exception:
         pass
 
@@ -1711,7 +1711,7 @@ async def _auto_daily_report():
                     )
                 except Exception as e:
                     logging.warning(f"简报自动质量评估失败: {e}")
-            asyncio.create_task(_auto_eval_report())
+            create_background_task(_auto_eval_report())
         else:
             logging.info("简报自动质量评估已关闭（llm_cost.llm_judge_eval=false）")
     except Exception as e:
@@ -1795,122 +1795,9 @@ class ChatRequest(BaseModel):
 
 
 def _build_valuation_context(question: str) -> str:
-    """从用户问题中提取关键词，检索匹配的指数估值数据，格式化为上下文文本。"""
-    # 获取所有已入库的指数名称，用反向匹配（指数名→问题）解决中文分词难题
-    all_indexes = list_valuation_indexes()
-    # 去重得到唯一指数列表
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    # 用指数名称（或其核心部分，如"白酒"匹配"中证白酒"）在问题中做子串匹配
-    _prefixes = ("中证", "国证", "沪", "深", "恒生")
-    _middles = ("全指", "综指", "50", "100", "200", "300", "500", "800", "1000")
-    seen_codes = set()
-    matched_indexes = []
-    for code, name in unique_indexes.items():
-        # 优先匹配完整名称
-        if name in question and code not in seen_codes:
-            seen_codes.add(code)
-            matched_indexes.append({"index_code": code, "index_name": name})
-            continue
-        # 去掉常见前缀后匹配
-        for prefix in _prefixes:
-            core = name.replace(prefix, "", 1)
-            if len(core) >= 2 and core in question and code not in seen_codes:
-                seen_codes.add(code)
-                matched_indexes.append({"index_code": code, "index_name": name})
-                break
-        else:
-            # 去掉前缀+中间词后匹配（如"中证全指半导体"→"半导体"）
-            for prefix in _prefixes:
-                core = name.replace(prefix, "", 1)
-                for mid in _middles:
-                    core2 = core.replace(mid, "", 1)
-                    if len(core2) >= 2 and core2 in question and code not in seen_codes:
-                        seen_codes.add(code)
-                        matched_indexes.append({"index_code": code, "index_name": name})
-                        break
-                if code in seen_codes:
-                    break
-
-    if not matched_indexes:
-        return ""
-
-    # 全局数据新鲜度摘要
-    from datetime import date as dt_date
-    freshness = list_index_freshness()
-    stale_summary = []
-    for f in freshness:
-        sd = f.get("stale_days")
-        if sd is not None and sd >= 5:
-            stale_summary.append(f"{f['index_name']}({sd:.0f}天)")
-    if stale_summary:
-        parts = [f"⚠️ 数据新鲜度警告: 以下指数估值数据超过5天未更新: {'; '.join(stale_summary[:6])}，分析时请注意数据可能滞后。"]
-    else:
-        parts = []
-
-    # 查询每个匹配指数的最新估值和近期趋势
-    for idx in matched_indexes:
-        code = idx["index_code"]
-        name = idx["index_name"]
-
-        index_metrics = [i for i in all_indexes if i["index_code"] == code]
-        if not index_metrics:
-            continue
-
-        lines = [f"【{name}（{code}）】"]
-        for metric in index_metrics:
-            mt = metric["metric_type"]
-            latest = get_latest_valuation(code, mt)
-            if not latest:
-                continue
-
-            val = latest.get("current_value")
-            pct = latest.get("percentile")
-            danger = latest.get("danger_value")
-            opp = latest.get("opportunity_value")
-            zscore = latest.get("zscore")
-            date = latest.get("snapshot_date", "")
-
-            # 估值水平描述
-            level = ""
-            if pct is not None:
-                if pct < 30:
-                    level = "低估"
-                elif pct < 70:
-                    level = "合理"
-                else:
-                    level = "高估"
-
-            line = f"  {mt}: 当前值={val}, 分位点={pct}%({level}), 危险值={danger}, 机会值={opp}"
-            if zscore is not None:
-                line += f", z-score={zscore}"
-            if date:
-                line += f" [{date}]"
-                # 数据新鲜度提示，超过10天标记为过期
-                from datetime import date as dt_date
-                try:
-                    d = dt_date.fromisoformat(str(date))
-                    stale_days = (dt_date.today() - d).days
-                    if stale_days >= 10:
-                        line += f" [数据已过期{stale_days}天]"
-                except Exception:
-                    pass
-            lines.append(line)
-
-            # 近5日趋势
-            history = get_valuation_history(code, 5, mt)
-            if len(history) >= 2:
-                trend_vals = [str(h["current_value"]) for h in reversed(history)]
-                lines.append(f"    近{len(history)}日趋势: {'→'.join(trend_vals)}")
-
-        if len(lines) > 1:
-            parts.append("\n".join(lines))
-
-    return "\n\n".join(parts)
+    """旧问答入口复用多来源选择与过期降级约束。"""
+    from services.valuation.context import build_question_valuation_context
+    return build_question_valuation_context(question)
 
 
 @app.post("/api/chat")
@@ -2287,31 +2174,116 @@ async def finance_quote_bar():
     from datetime import date, datetime, timedelta
 
     quotes = [
+        # 经典投资理念（名言采用常见中文译法）
         "别人贪婪时恐惧，别人恐惧时贪婪。—— 巴菲特",
-        "投资中最重要的是：不要亏损。—— 巴菲特",
-        "复利是世界第八大奇迹。—— 爱因斯坦",
         "退潮时才知道谁在裸泳。—— 巴菲特",
-        "投资不是比谁聪明，而是比谁更有耐心。",
-        "不要把鸡蛋放在同一个篮子里。",
-        "最好的买入时机是昨天，其次是今天。",
-        "资产配置决定了投资回报的 90% 以上。",
-        "种一棵树最好的时间是十年前，其次是现在。",
-        "市场下跌时买入，需要勇气；上涨时持有，需要定力。",
-        "风险永远和收益成正比，警惕高收益诱惑。",
-        "投资不是为了暴富，而是为了让生活更安心。",
-        "定投的魅力在于：摊低成本，积少成多。",
-        "不要试图预测市场，要适应市场。",
-        "投资最大的成本不是手续费，是无知。",
-        "市场永远在波动，情绪稳定才是最大的优势。",
-        "买你了解的东西，不懂不投。",
-        "收益是时间的函数，不是操作频率的函数。",
-        "优质资产拿得住，远比频繁交易更重要。",
-        "今晚的下跌，是为了明天的上涨留空间。",
-        "在别人悲观时买入，在别人乐观时卖出。",
-        "耐心是投资者最好的朋友。—— 格雷厄姆",
         "价格是你支付的，价值是你得到的。—— 巴菲特",
         "市场短期是投票机，长期是称重机。—— 格雷厄姆",
+        "风险来自你不知道自己在做什么。—— 巴菲特",
+        "以合理的价格买入优秀的公司，胜过以便宜的价格买入平庸的公司。—— 巴菲特",
+        "投资者最重要的品质是性情，而不是智力。—— 巴菲特",
+        "知道自己拥有什么，以及为什么拥有它。—— 彼得·林奇",
+        "投资最大的敌人，很可能就是投资者自己。—— 格雷厄姆",
+        "承认自己的无知，是智慧的开端。—— 查理·芒格",
+        # 本金与风险
         "永远不要投资你输不起的钱。",
+        "先考虑能承受多少损失，再考虑想获得多少收益。",
+        "留在牌桌上，才有机会等到下一次好机会。",
+        "不要为了赚自己不需要的钱，冒失去必需之物的风险。",
+        "高收益的承诺越诱人，越要问清风险由谁承担。",
+        "风险可以管理，却无法彻底消除。",
+        "波动不等于永久损失，但高价和杠杆可能让波动变成损失。",
+        "看不见风险，不代表风险不存在。",
+        "投资之前，先想清楚最坏的结果。",
+        "本金亏损一半，需要翻倍才能回到起点。",
+        # 长期与复利
+        "复利需要的，不只是收益，还有时间和持续投入。",
+        "投资不是比谁聪明，而是比谁更有耐心。",
+        "不要打断一项有依据的长期计划，只因短期的市场噪声。",
+        "时间能放大复利，也能放大错误的代价。",
+        "长期持有的前提，是买入理由依然成立。",
+        "让资金的投资期限，与生活的用钱期限相匹配。",
+        "耐心不是忽视变化，而是给正确的判断兑现的时间。",
+        "好的投资习惯，往往比一次漂亮的交易更有价值。",
+        "积累财富是一段长跑，节奏比一时领先更重要。",
+        "优质资产拿得住，远比频繁交易更重要。",
+        # 价值与价格
+        "好公司不一定在任何价格下都是好投资。",
+        "便宜不等于有价值，昂贵也不等于优质。",
+        "安全边际，是为判断可能出错留下余地。",
+        "市场给出的是报价，价值需要自己判断。",
+        "买入之前问问自己：如果没有行情软件，我还愿意持有吗？",
+        "一项资产的价值，不由你买入它的价格决定。",
+        "股价下跌不自动构成买入理由，上涨也不自动构成卖出理由。",
+        "关注资产能创造什么，而不只是下一位买家愿出多少。",
+        "估值是决策的参考，不是精准择时的时钟。",
+        "买入时多一分审慎，持有时才可能多一分从容。",
+        # 能力圈与独立思考
+        "买你了解的东西，不懂不投。",
+        "承认看不懂，也是一种投资能力。",
+        "能力圈的边界，比能力圈的大小更重要。",
+        "如果无法用简单的话解释一项投资，就再多研究一步。",
+        "别人的信心，不能代替自己的研究。",
+        "投资最大的成本之一，是为无知付出的代价。",
+        "先看事实，再看观点，最后才做决定。",
+        "区分你知道的、你推测的，以及你希望发生的。",
+        "当事实改变时，重新审视判断是一种纪律。",
+        "独立思考不是总与大众相反，而是不把人多当作理由。",
+        # 情绪与纪律
+        "市场永远在波动，情绪稳定才是最大的优势。",
+        "不要把市场的热闹，当作自己的投资机会。",
+        "害怕错过，往往比错过本身更昂贵。",
+        "上涨时想想风险，下跌时检查价值。",
+        "账户的涨跌，不应成为生活情绪的开关。",
+        "在平静时写下计划，在波动时按计划核对。",
+        "不要用一次冲动的交易，安慰另一次交易的失误。",
+        "市场不会因为你的焦虑而加快回报。",
+        "可以错过机会，不必追逐每一次上涨。",
+        "越是情绪强烈的时候，越值得给决策留一点时间。",
+        # 分散与资产配置
+        "不要把鸡蛋放在同一个篮子里。",
+        "分散投资，是承认未来存在不确定性。",
+        "持有很多只基金，不一定意味着真正分散。",
+        "资产配置的起点，是目标、期限和风险承受能力。",
+        "适合自己的组合，比看起来最耀眼的组合更重要。",
+        "再平衡，是把风险拉回计划中的位置。",
+        "不同名字的资产，也可能承担同一种风险。",
+        "留出现金缓冲，才能减少被迫卖出的可能。",
+        "不要让一项投资的成败，决定整个家庭的生活。",
+        "配置没有一劳永逸，生活变化时也要重新审视组合。",
+        # 交易与成本
+        "频繁操作之前，先算清手续费、税费和判断出错的成本。",
+        "有时候，最有价值的投资动作是耐心等待。",
+        "交易次数不是努力程度的证明。",
+        "过去付出的成本，不应成为继续持有的唯一理由。",
+        "每一次加仓，都值得像第一次买入那样重新审视。",
+        "定投帮助分散买入时点，但不保证盈利。",
+        "低成本不能保证高收益，却能减少收益的流失。",
+        "借来的钱有期限，市场的回报却没有时间表。",
+        "不要把运气带来的盈利，误认为稳定的能力。",
+        "复盘要看决策过程，也要看结果。",
+        # 周期与不确定性
+        "不要试图预测每一次市场波动，要准备应对不同情景。",
+        "市场可以比预想更久地偏离你的判断。",
+        "过去的收益，不是未来的承诺。",
+        "没有只涨不跌的资产，也没有适合所有人的策略。",
+        "牛市里别忘了风险，熊市里别丢掉研究。",
+        "最乐观的假设，不该是投资计划唯一的支撑。",
+        "历史不会简单重演，却能提醒我们保持谦逊。",
+        "短期的胜负，未必能证明长期判断的对错。",
+        "对未来保持开放，对风险保持敬畏。",
+        "比猜中下一步更重要的，是走错时仍有余地。",
+        # 财富与生活
+        "投资不是为了暴富，而是为了让生活更安心。",
+        "先安排好应急资金，再为长期目标投资。",
+        "最好的投资计划，是你理解并能长期执行的计划。",
+        "不要拿明天要用的钱，押注没有期限的等待。",
+        "财富的意义，是增加生活的选择，而不是增加焦虑。",
+        "与其追逐别人的收益，不如守住自己的目标。",
+        "持续储蓄，是投资计划最朴素的基础。",
+        "投资自己，也是值得长期坚持的资产积累。",
+        "知道什么是足够，和知道如何赚钱一样重要。",
+        "能让你安稳入睡的仓位，才更容易陪你走得长远。",
     ]
     # 随机选择一条（每次刷新不同）
     daily_quote = random.choice(quotes)
@@ -2322,7 +2294,7 @@ async def finance_quote_bar():
     global _quote_bar_cache
     now = datetime.now()
     if _quote_bar_cache["hot_keywords"] is not None and _quote_bar_cache["expires_at"] > now:
-        return {"date": today, "quote": daily_quote, "hot_keywords": _quote_bar_cache["hot_keywords"]}
+        return {"date": today, "quote": daily_quote, "quotes": quotes, "hot_keywords": _quote_bar_cache["hot_keywords"]}
 
     hot_keywords = []
     try:
@@ -2356,7 +2328,7 @@ async def finance_quote_bar():
     _quote_bar_cache["hot_keywords"] = hot_keywords
     _quote_bar_cache["expires_at"] = now + timedelta(seconds=30)
 
-    return {"date": today, "quote": daily_quote, "hot_keywords": hot_keywords}
+    return {"date": today, "quote": daily_quote, "quotes": quotes, "hot_keywords": hot_keywords}
 
 
 @app.post("/api/admin/backup")

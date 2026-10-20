@@ -7,7 +7,7 @@ import time
 import logging
 import uuid
 from pathlib import Path
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpxClient
 from config import IMAGE_PARSER_MODEL_TYPE
 from db.config import get_config_float, get_config_int
 from collections import Counter
@@ -64,7 +64,9 @@ def _resolve_vision() -> tuple[str, str, str]:
 def _openai_chat(prompt: str, img_b64: str, mime: str, model: str,
                  base_url: str, api_key: str, trace_id: str = "") -> str:
     """OpenAI 兼容接口调用，带 thinking mode 兜底。"""
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=get_config_int('llm.timeout_vision', 120))
+    # 与文本模型一致直连 MIMO，不继承本机代理。
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=get_config_int('llm.timeout_vision', 120),
+                    http_client=DefaultHttpxClient(trust_env=False))
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": [
@@ -207,17 +209,13 @@ DD_PARSE_PROMPT_CROP = """读取这张裁剪后的螺丝钉估值表。输出 JS
 只输出 JSON。"""
 
 # 六亿估值表（格式与螺丝钉一致，多指数表格）
-LIUYI_PARSE_PROMPT = """从图片表格逐列读取每个指数的完整数据。表格列顺序（从左到右）：
-指数名称 → 指数温度 → PE → PE百分位 → PB → PB百分位 → 股息率 → 最新ROE
-关键：PE百分位是紧接PE后面的窄列，PB百分位是紧接PB后面的窄列，指数温度是紧接指数名称后面的窄列。这三个窄列是百分比数值，必须逐列读取，不得遗漏。
-输出 JSON 对象：
-{"更新日期":"(YYYY-MM-DD)","市场温度":null,"数据":[{"指数名称":"","指数温度":数值,"PE":数值,"PE百分位":数值,"PB":数值,"PB百分位":数值,"股息率":数值,"最新ROE":数值,"估值状态":"(低估/适中/高估)","背景颜色":"(绿色/黄色/红色)"}]}
-估值状态根据行背景色判断：绿色=低估, 黄色=适中, 红色=高估。此为六亿估值表，只输出 JSON。"""
-
-LIUYI_PARSE_PROMPT_CROP = """读取这张裁剪后的六亿估值表。表格列顺序：指数名称 | 指数温度 | PE | PE百分位 | PB | PB百分位 | 股息率 | 最新ROE。
+LIUYI_PARSE_PROMPT = """从六亿图片逐行逐列读取完整数据。第二组估值列可能为 PE 或 PS，必须检查每行数字旁的 PS 下标；不得把整列统一当 PE，也不得按指数名称猜测。
+列顺序：指数名称 | 指数温度 | PE或PS | 对应百分位 | PB | PB百分位 | 股息率 | 最新ROE。
 输出 JSON：
-{"数据":[{"指数名称":"","指数温度":null,"PE":null,"PE百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"背景颜色":"(绿色/橙色/红色)"}]}
-PE百分位和PB百分位是百分比数值（如 25.3% 则输出 25.3），指数温度是数值（如 45.2 则输出 45.2）。必须逐列读取，不要遗漏。只输出 JSON。"""
+{"更新日期":"YYYY-MM-DD","市场温度":null,"历史窗口":null,"数据":[{"指数名称":"","指数代码":null,"指数温度":null,"估值类型":"PE或PS或unknown","PE":null,"PE百分位":null,"PS":null,"PS百分位":null,"PB":null,"PB百分位":null,"股息率":null,"最新ROE":null,"历史窗口":null,"背景颜色":null}]}
+PS 行只填 PS 和 PS百分位，PE 字段留 null；看不清类型写 unknown，不得编造。百分位统一为百分数点：1.3% 输出1.3，0.62%输出0.62，禁止乘除100。历史窗口按原图记录（10Y/成立以来等），看不到留 null。只输出 JSON。"""
+
+LIUYI_PARSE_PROMPT_CROP = LIUYI_PARSE_PROMPT + "\n这是裁剪区域，仍需检查每行的 PS 下标，保留原始指标类型。"
 
 # 普通估值图（key 与 _normalize 对齐）
 PARSE_PROMPT = """从图片读取指数估值数据，输出 JSON：
@@ -226,7 +224,7 @@ PARSE_PROMPT = """从图片读取指数估值数据，输出 JSON：
 "市净率统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null},
 "市销率TTM统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null},
 "股息率统计指标":{"当前值":null}}
-背景颜色：绿色=低估、黄色=适中、红色=高估。只看图片实际数据，不编造。只输出 JSON。"""
+分位点单位固定为百分数点：0.62% 输出0.62，禁止转换为比例数。另输出历史窗口（如10Y），看不到填null。背景颜色按原图。只看图片实际数据，不编造。只输出 JSON。"""
 
 # 兜底裁剪 Prompt：只关注底部数据表区域（用于整图解析失败时的二次提取）
 STATS_CROP_PROMPT = """从这张估值数据表区域读取数据，输出 JSON：
@@ -234,7 +232,7 @@ STATS_CROP_PROMPT = """从这张估值数据表区域读取数据，输出 JSON�
 "市盈率TTM统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null},
 "市净率统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null},
 "市销率TTM统计指标":{"当前值":null,"分位点":null,"危险值":null,"中位数":null,"机会值":null,"最大值":null,"最小值":null,"平均值":null,"z分数":null}}
-请仔细读取表格中的数字，包括小数点和百分号。不要编造数据，只输出 JSON。"""
+请仔细读取数字、百分号及历史窗口。分位点单位固定为百分数点：0.62%输出0.62，禁止乘除100；历史窗口看不到填null。不要编造数据，只输出 JSON。"""
 
 
 # ── ImageParser（普通估值图）─────────────────────────
@@ -380,7 +378,11 @@ class ImageParser:
             "index_code": data.get("指数代码"), "index_name": data.get("指数名称"),
             "current_point": data.get("当前点位"), "change_pct": data.get("涨跌幅"),
             "metric_type": metric_type, "current_value": s.get("当前值"),
-            "percentile": s.get("分位点"), "danger_value": s.get("危险值"),
+            "percentile": s.get("分位点"), "percentile_unit": "percent",
+            "percentile_raw": s.get("分位点"),
+            "history_window": s.get("历史窗口") or data.get("历史窗口"),
+            "metric_verified": _get_current_value(s) is not None,
+            "danger_value": s.get("危险值"),
             "median": s.get("中位数"), "opportunity_value": s.get("机会值"),
             "max_value": s.get("最大值"), "min_value": s.get("最小值"),
             "avg_value": s.get("平均值"), "zscore": s.get("z分数"),
@@ -461,6 +463,20 @@ class DDImageParser:
             if not result.get("ok") or result.get("count", 0) == 0:
                 result = self._parse_cropped_regions(image_path, mime)
         if result.get("ok"):
+            from services.content.table_header_date import read_table_header_date
+            header_date = read_table_header_date(image_path)
+            model_date = result.get('update_date') or ''
+            if header_date:
+                verified_date = self._normalize_date(header_date)
+                result['date_verification'] = {
+                    'status': 'confirmed' if verified_date == model_date else 'corrected',
+                    'source': 'tesseract_header', 'raw_date': header_date, 'model_date': model_date,
+                }
+                result['update_date'] = verified_date
+                if verified_date != model_date:
+                    logger.warning('表头日期校正：模型=%s，表头=%s，图片=%s', model_date, verified_date, image_path)
+            else:
+                result['date_verification'] = {'status': 'unverified', 'model_date': model_date}
             need_bg = any(not item.get("background_color") for item in result.get("data", []))
             if need_bg:
                 bg = extract_dominant_color(image_path)
@@ -481,8 +497,8 @@ class DDImageParser:
         name = str(item.get('index_name') or '').strip()
         code = str(item.get('index_code') or '').strip().upper()
         if code:
-            return ('code', code, name)
-        numeric = ('pe', 'pb', 'pe_percentile', 'pb_percentile', 'index_temperature', 'dividend_yield', 'roe')
+            return ('code', code, name, item.get('metric_type'))
+        numeric = ('pe', 'ps', 'pb', 'pe_percentile', 'ps_percentile', 'pb_percentile', 'index_temperature', 'dividend_yield', 'roe')
         return ('values', name, *(item.get(key) for key in numeric))
 
     def _parse_cropped_regions(self, image_path: str, mime: str, crop_prompt: str = None) -> dict:
@@ -575,17 +591,35 @@ class DDImageParser:
         items = data.get("数据") or []
         normalized = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
+            metric_label = str(item.get('估值类型') or item.get('指标类型') or '').strip().upper()
+            metric_type = {'PE': '市盈率', 'PS': '市销率', '市盈率': '市盈率', '市销率': '市销率'}.get(metric_label)
+            pe, ps = self._parse_number(item.get('PE')), self._parse_number(item.get('PS'))
+            pe_pct, ps_pct = self._parse_number(item.get('PE百分位')), self._parse_number(item.get('PS百分位'))
+            # 有显式行类型时兼容模型沿用通用 PE 列键；绝不根据指数或数值改类型。
+            if metric_type == '市销率' and ps is None:
+                ps, ps_pct, pe, pe_pct = pe, pe_pct, None, None
             normalized.append({
                 "index_name": item.get("指数名称"), "index_code": item.get("指数代码"),
                 "index_temperature": self._parse_number(item.get("指数温度")),
-                "pe": self._parse_number(item.get("PE")), "pe_percentile": self._parse_number(item.get("PE百分位")),
+                "metric_type": metric_type, "percentile_unit": "percent",
+                "history_window": item.get('历史窗口') or data.get('历史窗口'),
+                "metric_verification": {
+                    'pe': metric_type == '市盈率',
+                    'ps': metric_type == '市销率' or item.get('PS') is not None,
+                    'pb': item.get('PB') is not None,
+                },
+                "raw_fields": dict(item),
+                "pe": pe, "pe_percentile": pe_pct,
+                "ps": ps, "ps_percentile": ps_pct,
                 "pb": self._parse_number(item.get("PB")), "pb_percentile": self._parse_number(item.get("PB百分位")),
                 "dividend_yield": self._parse_number(item.get("股息率")), "roe": self._parse_number(item.get("最新ROE") or item.get("ROE")),
                 "valuation_status": item.get("估值状态"), "background_color": item.get("背景颜色"),
             })
         # 有效性检查：过滤掉全空占位项（模型间歇性回吐 prompt 模板的情况）
         # 一条有效数据需 index_name 非空，或至少一个数值字段非空
-        _num_keys = ("pe", "pb", "dividend_yield", "roe")
+        _num_keys = ("pe", "ps", "pb", "dividend_yield", "roe")
         valid = [
             it for it in normalized
             if (it.get("index_name") and str(it["index_name"]).strip())

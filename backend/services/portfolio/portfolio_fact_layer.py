@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def build_portfolio_facts(conn=None) -> dict:
+def build_portfolio_facts(conn=None, snapshot: dict | None = None) -> dict:
     """
     所有分析入口调用此函数获取统一的组合事实快照。
 
@@ -17,13 +17,16 @@ def build_portfolio_facts(conn=None) -> dict:
         dict with keys: snapshot, constraints, market, recent_analyses,
                         market_state, recent_decisions
     """
+    if snapshot is None:
+        from db.portfolio import get_portfolio_snapshot
+        snapshot = get_portfolio_snapshot(conn=conn)
     facts = {
-        "snapshot": _build_snapshot(conn),
-        "constraints": _build_constraints(),
+        "snapshot": _build_snapshot(conn, snapshot=snapshot),
+        "constraints": _build_constraints(snapshot=snapshot),
         "market": _build_market_summary(),
-        "recent_analyses": _build_recent_analyses(),
+        "recent_analyses": _build_recent_analyses(snapshot=snapshot),
         "market_state": _build_market_state(),
-        "recent_decisions": _build_recent_decisions(),
+        "recent_decisions": _build_recent_decisions(snapshot=snapshot),
     }
     return facts
 
@@ -43,45 +46,47 @@ def _get_conn_once(conn=None):
         return None, False
 
 
-def _build_snapshot(conn=None) -> dict:
+def _build_snapshot(conn=None, snapshot: dict | None = None) -> dict:
     """构建持仓快照：总市值、债基占比、过度集中基金列表。"""
     try:
-        c, own = _get_conn_once(conn)
-        if c is None:
-            return {
-                "total_value": None,
-                "bond_pct": None,
-                "overconcentrated": [],
-            }
-
-        from db import list_holdings
-        holdings = list_holdings()
-        total_value = sum((h.get("current_value", 0) or 0) for h in holdings)
-        bond_value = sum(
-            (h.get("current_value", 0) or 0)
-            for h in holdings
-            if (h.get("fund_category") or "").lower() == "bond"
-        )
+        if snapshot is None:
+            from db.portfolio import get_portfolio_snapshot
+            snapshot = get_portfolio_snapshot(conn=conn)
+        from services.portfolio.analysis_contract import build_portfolio_calculations
+        holdings = snapshot.get("funds", [])
+        total_value = snapshot.get("invested_value", snapshot.get("total_value", 0)) or 0
+        calculations = build_portfolio_calculations(snapshot)
+        total_assets = total_value + (snapshot.get("cash_balance") or 0)
+        bond_value = calculations["category_values"]["bond"]
         bond_pct = round(bond_value / total_value * 100, 1) if total_value > 0 else 0
 
         overconcentrated = []
         for h in holdings:
             val = h.get("current_value", 0) or 0
             pct = round(val / total_value * 100, 1) if total_value > 0 else 0
-            if pct > 25:
+            threshold = snapshot.get("concentration_policy", {}).get("max_single_position_pct")
+            # 策略阈值以总资产分母；未设置 KYC 时不凭空设定用户上限。
+            policy_pct = val / total_assets * 100 if total_assets else 0
+            if threshold is not None and policy_pct > threshold:
                 overconcentrated.append({
                     "fund_code": h.get("fund_code", ""),
                     "fund_name": h.get("fund_name", ""),
                     "pct": pct,
+                    "total_assets_pct": round(policy_pct, 2),
+                    "threshold_pct": threshold,
+                    "denominator": "total_assets",
                 })
-
-        if own and c:
-            c.close()
 
         return {
             "total_value": round(total_value, 2),
+            "invested_value": round(total_value, 2),
+            "total_assets": round(total_assets, 2),
+            "cash_balance": snapshot.get("cash_balance"),
+            "fund_count": snapshot.get("fund_count", len(holdings)),
+            "record_count": snapshot.get("record_count"),
             "bond_pct": bond_pct,
             "overconcentrated": overconcentrated,
+            "calculations": calculations,
         }
     except Exception as e:
         logger.warning(f"构建持仓快照失败: {e}")
@@ -92,51 +97,45 @@ def _build_snapshot(conn=None) -> dict:
         }
 
 
-def _build_constraints() -> dict:
-    """构建约束规则：债市温度、是否偏贵、禁加目标列表。"""
+def _build_constraints(snapshot: dict | None = None) -> dict:
+    """KYC 与市场读取相互独立；温度只作建议，不生成一刀切债券禁令。"""
+    temperature = None
+    bond_raw = {}
     try:
         from tools import _get_bond_temperature
-
         bond_raw = json.loads(_get_bond_temperature())
         temperature = bond_raw.get("temperature")
-        bond_expensive = temperature is not None and temperature > 70
-
-        # 构建禁加目标
-        no_add_targets = []
-        if bond_expensive:
-            no_add_targets.append("债券型基金（债市温度>70°，偏贵）")
-
-        # 检查集中度
-        try:
-            c, own = _get_conn_once(None)
-            if c is not None:
-                from db import list_holdings
-                holdings = list_holdings()
-                total_value = sum((h.get("current_value", 0) or 0) for h in holdings)
-                for h in holdings:
-                    val = h.get("current_value", 0) or 0
-                    pct = round(val / total_value * 100, 1) if total_value > 0 else 0
-                    if pct > 25:
-                        no_add_targets.append(
-                            f"{h.get('fund_code','')} {h.get('fund_name','')}（占比{pct}%>25%）"
-                        )
-                if own and c:
-                    c.close()
-        except Exception:
-            pass
-
-        return {
-            "bond_temperature": temperature,
-            "bond_expensive": bond_expensive,
-            "no_add_targets": no_add_targets,
-        }
     except Exception as e:
-        logger.warning(f"构建约束规则失败: {e}")
-        return {
-            "bond_temperature": None,
-            "bond_expensive": False,
-            "no_add_targets": [],
-        }
+        logger.warning(f"读取债市温度失败（保留KYC约束）: {e}")
+
+    no_add_targets = []
+    if snapshot is None:
+        try:
+            from db.portfolio import get_portfolio_snapshot
+            snapshot = get_portfolio_snapshot()
+        except Exception as e:
+            logger.warning(f"读取持仓约束失败: {e}")
+            snapshot = {}
+    invested = snapshot.get("invested_value", snapshot.get("total_value", 0)) or 0
+    total_assets = invested + (snapshot.get("cash_balance") or 0)
+    threshold = snapshot.get("concentration_policy", {}).get("max_single_position_pct")
+    for fund in snapshot.get("funds", []):
+        pct = (fund.get("current_value", 0) or 0) / total_assets * 100 if total_assets > 0 else 0
+        if threshold is not None and pct > threshold:
+            no_add_targets.append(
+                f"{fund.get('fund_code', '')} {fund.get('fund_name', '')}（总资产占比{pct:.3f}%>{threshold}%）"
+            )
+    bond_expensive = temperature is not None and temperature > 70
+    return {
+        "bond_temperature": temperature,
+        "bond_temperature_date": bond_raw.get("date"),
+        "bond_expensive": bond_expensive,
+        "bond_temperature_advisory": "债市温度偏高，需结合久期、信用和现金需求评估" if bond_expensive else "",
+        "max_single_position_pct": threshold,
+        "max_single_position_denominator": "total_assets",
+        "target_equity_ratio": snapshot.get("target_equity_ratio"),
+        "no_add_targets": no_add_targets,
+    }
 
 
 def _build_market_summary() -> dict:
@@ -165,7 +164,7 @@ def _build_market_summary() -> dict:
         return {"indices": []}
 
 
-def _build_recent_analyses() -> list:
+def _build_recent_analyses(snapshot: dict | None = None) -> list:
     """获取最近 24 小时内其他分析的结论摘要。"""
     try:
         c, own = _get_conn_once(None)
@@ -193,6 +192,15 @@ def _build_recent_analyses() -> list:
                 result_text = r.get("result_data", "") or ""
                 # P3-4: 前 200 字符截断关键结论，提升到 500 字符
                 if result_text:
+                    from services.portfolio.analysis_contract import filter_portfolio_conclusions
+                    try:
+                        structured = json.loads(result_text)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(structured, dict) or snapshot is None:
+                        continue
+                    if not filter_portfolio_conclusions([structured], snapshot):
+                        continue
                     conclusion = result_text[:500].strip()
             except Exception:
                 pass
@@ -328,7 +336,7 @@ def _build_market_state() -> dict:
     return result
 
 
-def _build_recent_decisions() -> dict:
+def _build_recent_decisions(snapshot: dict | None = None) -> dict:
     """
     获取近期决策记录（最近3天）和待执行行动。
 
@@ -354,13 +362,15 @@ def _build_recent_decisions() -> dict:
             )
             if cur.fetchone():
                 rows = c.execute(
-                    """SELECT source_type, target_subject, action, summary, created_at
+                    """SELECT source_type, target_subject, action, summary, created_at, data_basis
                        FROM analysis_conclusions
                        WHERE created_at >= datetime('now', 'localtime', '-3 days')
                        ORDER BY created_at DESC
                        LIMIT 20"""
                 ).fetchall()
-                for r in rows:
+                from services.portfolio.analysis_contract import filter_portfolio_conclusions
+                verified = filter_portfolio_conclusions([dict(r) for r in rows], snapshot) if snapshot is not None else []
+                for r in verified:
                     result["last_3_days"].append({
                         "source_type": r["source_type"],
                         "target_subject": r["target_subject"],

@@ -137,7 +137,7 @@ const pageProps = computed(() => {
     return { onNavigate: (page) => navigate(page) }
   }
   // 与 Home.vue 对齐：需跨页跳转的页面透传 onNavigate
-  if (['chat', 'alert-center', 'decisions', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
+  if (['chat', 'alert-center', 'decisions', 'decision-center', 'family-finance', 'goal-buckets', 'portfolio', 'event-radar', 'smart-add'].includes(activePage.value)) {
     return { onNavigate: (page) => navigate(page) }
   }
   return {}
@@ -189,7 +189,7 @@ function toggleDevMode() {
     <header class="mobile-header">
       <span class="mobile-title editorial-title">{{ currentPageLabel || '投资分析助手' }}</span>
       <div class="mobile-header-actions">
-        <AlertBell @navigate="navigate" @openNotifications="showNotificationCenter = true" />
+        <AlertBell @navigate="navigate" />
         <button class="mobile-theme-btn" @click="toggleDark()" :title="isDark ? '亮色模式' : '暗色模式'">
           <svg v-if="isDark" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>

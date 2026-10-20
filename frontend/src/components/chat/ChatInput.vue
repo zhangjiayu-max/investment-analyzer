@@ -187,6 +187,10 @@ function closeMention() {
   mentionIndex.value = 0
 }
 
+function handleBlur() {
+  setTimeout(closeMention, 200)
+}
+
 // 选择 Agent
 function selectAgent(agent) {
   const textarea = textareaRef.value
@@ -307,7 +311,7 @@ function emitSend() {
           :disabled="sending"
           @keydown="handleKeydown"
           @input="handleInput"
-          @blur="() => setTimeout(closeMention, 200)"
+          @blur="handleBlur"
           @paste="handlePaste"
           rows="1"
         ></textarea>

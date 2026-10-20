@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   listDecisions, updateDecisionStatus, submitDecisionReview, completeDecisionAction,
   getDecisionPrecheck, getExecutionStatus, getDecisionTimeline, createTransactionDraftFromDecision,
-  getDecisionStats, listRecommendationCandidates, ignoreRecommendationCandidate,
+  getDecisionStats, getDecision, listRecommendationCandidates, ignoreRecommendationCandidate,
   createDecisionFromCandidate, deferRecommendationCandidate,
 } from '../../api'
 import { useToast } from '../../composables/useToast'
@@ -49,8 +49,12 @@ const timelineModal = ref({ visible: false, decision: null, loading: false, data
 async function openTimeline(decision) {
   timelineModal.value = { visible: true, decision, loading: true, data: null }
   try {
-    const { data } = await getDecisionTimeline(decision.id)
-    timelineModal.value.data = data
+    const [timelineResponse, detailResponse] = await Promise.all([
+      getDecisionTimeline(decision.id),
+      getDecision(decision.id),
+    ])
+    timelineModal.value.data = timelineResponse.data
+    if (detailResponse?.data) timelineModal.value.decision = { ...decision, ...detailResponse.data }
   } catch (e) {
     showToast('加载时间线失败', 'error')
     timelineModal.value.visible = false
@@ -121,6 +125,15 @@ async function load() {
   try {
     const { data } = await listDecisions('', 200)
     decisions.value = data.items || []
+    try {
+      const archiveId = Number(localStorage.getItem('decisionArchiveId'))
+      if (archiveId) {
+        let target = decisions.value.find(item => item.id === archiveId)
+        if (!target) target = (await getDecision(archiveId)).data
+        localStorage.removeItem('decisionArchiveId')
+        if (target) openTimeline(target)
+      }
+    } catch { /* ignore navigation hint */ }
     // 仅对待执行决策按需加载预检查（分批避免并发风暴）
     const pendingIds = decisions.value
       .filter(d => ['proposed', 'accepted', 'deferred'].includes(d.status))
@@ -773,6 +786,14 @@ onMounted(load)
           <button class="icon-btn" @click="timelineModal.visible = false"><Icon name="close" size="18" /></button>
         </header>
         <div class="modal-body">
+          <div v-if="timelineModal.decision?.investment_decision" class="linked-quant-summary">
+            <strong>量化账本</strong>
+            <span>置信度 {{ timelineModal.decision.investment_decision.confidence ?? '—' }}</span>
+            <span>建议 ¥{{ money(timelineModal.decision.investment_decision.suggested_amount) }}</span>
+            <span v-if="timelineModal.decision.investment_decision.is_hit === true" class="positive">已命中</span>
+            <span v-else-if="timelineModal.decision.investment_decision.is_hit === false" class="negative">未命中</span>
+            <span v-else class="td-muted">待回测</span>
+          </div>
           <div v-if="timelineModal.loading" class="tl-loading">
             <Icon name="spinner" size="24" />
             <span>加载中...</span>
@@ -1310,6 +1331,8 @@ onMounted(load)
   transition: color 0.15s;
 }
 .timeline-link:hover { color: var(--color-primary); }
+.linked-quant-summary { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.65rem 0.8rem; margin-bottom: 0.8rem; border: 1px solid var(--color-primary-light, #dbeafe); border-radius: var(--radius-md); background: var(--color-primary-bg, #eff6ff); color: var(--color-text-secondary); font-size: 0.78rem; }
+.linked-quant-summary strong { color: var(--color-primary-700, var(--color-primary)); }
 
 /* 时间线弹窗 */
 .modal-wide { max-width: 560px; }

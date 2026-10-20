@@ -43,7 +43,8 @@ def init_table(conn=None):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_created ON agent_analysis_log(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_aal_trace ON agent_analysis_log(trace_id)")
         from db._utils import _add_column_if_not_exists
-        for name, definition in [('eval_status', "TEXT DEFAULT 'idle'"),('eval_error', "TEXT DEFAULT ''"),('eval_task_id','INTEGER')]:
+        for name, definition in [('eval_status', "TEXT DEFAULT 'idle'"),('eval_error', "TEXT DEFAULT ''"),('eval_task_id','INTEGER'),
+                                 ('error_details', "TEXT DEFAULT '{}'" )]:
             _add_column_if_not_exists(conn,'agent_analysis_log',name,definition)
         conn.execute("UPDATE agent_analysis_log SET eval_status='scored' WHERE has_eval=1 AND eval_score>0 AND eval_status='idle'")
         conn.commit()
@@ -72,19 +73,43 @@ def create_analysis_log(trace_id: str, analysis_type: str, source_table: str,
 
 
 def complete_analysis_log(trace_id: str, status: str, duration_ms: int = None,
-                          token_usage: int = None, error_msg: str = None) -> bool:
+                          token_usage: int = None, error_msg: str = None, error_details: dict = None) -> bool:
     """完成分析记录（status=done/error），更新耗时、token、错误信息。"""
     conn = _get_conn()
     cur = conn.execute("""
         UPDATE agent_analysis_log SET
             status = ?, duration_ms = ?, token_usage = ?,
-            error_msg = ?, completed_at = datetime('now','localtime')
+            error_msg = ?, error_details = COALESCE(?, error_details), completed_at = datetime('now','localtime')
         WHERE trace_id = ? AND (status = 'running' OR status = ?)
-    """, (status, duration_ms, token_usage, error_msg, trace_id, status))
+    """, (status, duration_ms, token_usage, error_msg,
+          json.dumps(error_details, ensure_ascii=False) if error_details is not None else None, trace_id, status))
     updated = cur.rowcount > 0
     conn.commit()
     conn.close()
     return updated
+
+
+def save_analysis_error_details(trace_id: str, details: dict):
+    """模型入口补充诊断，不提前改变业务记录的运行状态。"""
+    conn = _get_conn(timeout=0.05)
+    try:
+        conn.execute('UPDATE agent_analysis_log SET error_details=? WHERE trace_id=?',
+                     (json.dumps(details, ensure_ascii=False), trace_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _log_dict(row):
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        details = json.loads(result.get('error_details') or '{}')
+        result['error_details'] = details if isinstance(details, dict) else {}
+    except (ValueError, TypeError):
+        result['error_details'] = {}
+    return result
 
 
 def update_analysis_log_source(trace_id: str, source_id: int) -> bool:
@@ -119,7 +144,7 @@ def get_analysis_log(log_id: int) -> dict | None:
     _sync_eval_task_state(conn)
     row = conn.execute("SELECT * FROM agent_analysis_log WHERE id = ?", (log_id,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _log_dict(row)
 
 
 def get_analysis_log_by_trace(trace_id: str) -> dict | None:
@@ -127,7 +152,7 @@ def get_analysis_log_by_trace(trace_id: str) -> dict | None:
     conn = _get_conn()
     row = conn.execute("SELECT * FROM agent_analysis_log WHERE trace_id = ?", (trace_id,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _log_dict(row)
 
 
 def list_analysis_logs(agent_id: int = None, analysis_type: str = None,

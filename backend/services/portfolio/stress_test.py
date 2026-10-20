@@ -69,7 +69,7 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
         user_id: 用户 ID
         custom_shocks: 自定义冲击系数 {"cash": 0, "equity": -0.3, ...}
     """
-    from db import get_cash_balance, list_holdings
+    from db import get_portfolio_cash_snapshot, list_holdings
     from db.goal_buckets import get_goal_bucket_summary
 
     if scenario == "custom" and custom_shocks:
@@ -80,8 +80,7 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
         raise ValueError(f"不支持的压力测试场景: {scenario}")
 
     holdings = [h for h in list_holdings(user_id) if (h.get("shares") or 0) > 0]
-    cash_info = get_cash_balance(user_id)
-    cash_balance = cash_info.get("balance", 0) if cash_info else 0
+    cash_balance = get_portfolio_cash_snapshot(user_id)["cash_balance"]
     total_holding_value = sum(h.get("current_value") or 0 for h in holdings)
     total_assets = round(total_holding_value + cash_balance, 2)
     if total_assets <= 0:

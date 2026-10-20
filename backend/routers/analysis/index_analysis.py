@@ -15,7 +15,7 @@ from db import (
     get_analysis_history_item, get_analysis_history_status,
     update_analysis_history, delete_analysis_history,
     save_prompt_version,
-    get_latest_valuation, get_valuation_history,
+    get_latest_valuation, get_valuation_history, get_best_valuation,
     list_holdings,
     create_async_task, update_async_task, get_async_task, get_running_async_task,
     get_config_float, get_config_int,
@@ -26,11 +26,25 @@ from models.analysis import AnalysisRunRequest, AnalysisAgentUpdateRequest
 from db.agent_analysis_log import create_analysis_log, complete_analysis_log
 from ._shared import inject_rag_context, build_portfolio_facts_with_check
 from ._agent_contract import require_analysis_agent, complete_text_analysis
+from infra.analysis_errors import build_error_details
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analysis-index-analysis"])
 
 _background_tasks = set()
+
+
+async def drain_index_analysis_tasks(timeout=195):
+    """关闭前给报告保留检索及模型的完整等待预算，避免已返回结果丢失。"""
+    tasks = {task for task in _background_tasks if not task.done()}
+    if not tasks:
+        return
+    logger.info('服务关闭前等待 %s 个指数分析完成（最多 %s 秒）', len(tasks), timeout)
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel('服务重启：指数分析超过关闭等待期限，执行已中断，请重试')
+    # 等待取消处理落库，保证历史、日志和异步任务具有一致的终态。
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _date_status(value, stale_days=3):
@@ -118,7 +132,8 @@ def _collect_valuation_evidence(req):
     if not req.index_code:
         evidence['warnings'].append('未指定指数代码，缺少主指标估值')
         return evidence
-    latest = get_latest_valuation(req.index_code, metric_type=req.metric_type)
+    latest = get_best_valuation(req.index_code, metric_type=req.metric_type,
+                                query_source="index_analysis", enable_online=False)
     history = get_valuation_history(req.index_code, days=60, metric_type=req.metric_type)
     # 即使上游数据不符合契约，也不能将别的指标混入主指标序列。
     history = [_sanitize_valuation_row(row) for row in history if row.get('metric_type') == req.metric_type]
@@ -309,11 +324,17 @@ async def _run_index_analysis_async(history_id: int, req_data: dict, agent: dict
         await _execute_index_analysis(history_id, req_data, agent, async_task_id, trace_id, start_ts)
     except (Exception, asyncio.CancelledError) as error:
         error_msg = str(error) or "分析任务已取消"
+        details = getattr(error, 'analysis_error_details', None) or build_error_details(
+            error, stage='background_analysis', trace_id=trace_id,
+            elapsed_ms=int((time.time() - start_ts) * 1000))
+        if isinstance(error, asyncio.CancelledError) and str(error):
+            details['summary'] = error_msg
         logger.error(f"指数分析后台失败 history_id={history_id}: {error_msg}")
         updates = [
             ("analysis_history", lambda: update_analysis_history(history_id, status="error", error_msg=error_msg)),
             ("analysis_log", lambda: complete_analysis_log(
-                trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000), error_msg=error_msg)),
+                trace_id=trace_id, status="error", duration_ms=int((time.time() - start_ts) * 1000),
+                error_msg=error_msg, error_details=details)),
         ]
         if async_task_id is not None:
             updates.append(("async_task", lambda: update_async_task(async_task_id, status="error", error_msg=error_msg)))
@@ -483,14 +504,28 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
             evidence_header += '> 数据限制：' + '；'.join(evidence['warnings']) + '。\n'
         result_text = evidence_header + '\n' + result_text
     except Exception as e:
-        error_msg = str(e) or "模型分析超时，请稍后重试"
-        logger.error(f"AI 分析失败: {error_msg}")
+        details = getattr(e, 'analysis_error_details', None) or build_error_details(
+            e, stage='model_analysis', caller='index_deep_analysis', trace_id=trace_id,
+            model=MODEL_ANALYSIS, elapsed_ms=int((time.time() - _start_ts) * 1000))
+        raw = str(e) or ""
+        # 连接类异常裸信息仅为 "Connection error."，无法还原原因，改用可读摘要；
+        # 其余异常（截断/数据错误等）保留原始可读信息。完整异常链已写入 error_details。
+        if isinstance(details, dict) and details.get('category') in {
+                'connection_refused', 'proxy_error', 'dns_error', 'timeout',
+                'connection_interrupted', 'tls_error', 'connection_error'}:
+            error_msg = details.get('summary') or raw
+        else:
+            error_msg = raw
+        error_msg = error_msg or "模型分析超时，请稍后重试"
+        logger.error('[trace:%s] 指数分析失败 history_id=%s diagnostics=%s',
+                     trace_id, history_id, json.dumps(details, ensure_ascii=False))
         update_analysis_history(history_id, status="error", error_msg=error_msg)
         try:
             complete_analysis_log(
                 trace_id=trace_id, status="error",
                 duration_ms=int((time.time() - _start_ts) * 1000),
                 error_msg=error_msg,
+                error_details=details,
             )
         except Exception as _e:
             logger.warning(f"complete_analysis_log 失败: {_e}")

@@ -34,6 +34,7 @@ _CACHEABLE_TOOLS = {
     "query_valuation",       # 估值查询
     "search_knowledge",      # 知识库检索
     "query_fund_info",       # 基金信息查询
+    "ttfund_fund_holding",   # 同轮基金持仓快照
     "ttfund_search",         # 基金搜索
     "get_index_valuation",   # 指数估值
     "get_market_status",     # 市场状态
@@ -60,6 +61,7 @@ def is_cacheable(tool_name: str, args: dict = None) -> bool:
         return False
     # query_portfolio 的 refresh 类型不缓存
     if tool_name == "query_portfolio" and args:
+        args = args.get("arguments", args)
         query_type = args.get("query_type", "summary")
         if query_type == "refresh":
             return False

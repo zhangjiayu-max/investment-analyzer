@@ -732,7 +732,7 @@ def _build_dca_rules() -> str:
 
 
 def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None,
-                                 cross_review_performed: bool = False, plan=None) -> str:
+                                 cross_review_performed: bool = False, plan=None, query=None) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。
 
     Args:
@@ -740,6 +740,13 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
                     关键数据汇总、冲突检测、风险否决约束、持仓影响汇总。
         cross_review_performed: 是否实际执行了交叉评审。用于防止 LLM 虚构交叉评审过程。
     """
+    from agent.core.answer_policy import build_answer_policy, has_explicit_action_intent
+    if query is not None and not has_explicit_action_intent(query):
+        from services.conversation.quality_contract import compact_tool_evidence
+        context = {"executed_specialists": [sr.get("agent_key") for sr in specialist_results],
+                   "cross_review_performed": cross_review_performed,
+                   "evidence": compact_tool_evidence([call for sr in specialist_results for call in sr.get("tool_calls", [])])}
+        return build_answer_policy(query) + "\n\n" + json.dumps(context, ensure_ascii=False)
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
     executed_names = {sr.get("agent", "") for sr in specialist_results}
     routed_but_not_executed = [s for s in routed_specialists if s not in executed_keys]
@@ -1439,7 +1446,9 @@ def should_run_cross_review(
         )
         if has_action_advice:
             logger.info(f"交叉审阅: 检测到操作建议关键词，强制触发（魔鬼代言人制衡），专家数={spec_count}")
-            return not OrchestratorOptimizer.should_skip_cross_review(specialist_results, complexity)
+            # 操作建议即使被前置路由误判为 simple 也必须审阅；否则 simple
+            # 分类会把风险/配置动作直接绕过质量检查。
+            return True
 
     # B1: 复杂度强制触发 — complex/medium 即使无冲突也强制交叉审阅（发挥魔鬼代言人作用）
     try:
@@ -4561,7 +4570,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         llm_messages.append({
             "role": "user",
             "content": _build_final_synthesis_prompt(
-                specialist_results, specialists, cross_review_performed=bool(cross_review_results), plan=active_plan),
+                specialist_results, specialists, cross_review_performed=bool(cross_review_results), plan=active_plan, query=query),
         })
         response = _call_llm(
             caller="orchestrator",
@@ -4639,7 +4648,12 @@ def _inject_analysis_context(query: str) -> tuple:
     """
     try:
         from db.analysis_conclusions import get_latest_analysis_conclusions
-        conclusions = get_latest_analysis_conclusions(hours=24, limit=5)
+        from db import get_portfolio_snapshot
+        from services.portfolio.analysis_contract import filter_portfolio_conclusions
+        snapshot = get_portfolio_snapshot()
+        conclusions = filter_portfolio_conclusions(
+            get_latest_analysis_conclusions(hours=24, limit=30), snapshot,
+        )[:5]
         if not conclusions:
             return query, ""
 
@@ -4707,17 +4721,22 @@ def _load_recent_conclusions(
         conn = _get_conn()
         # LIKE 匹配 target_subject（双向：历史结论可能是 "161725" 或 "白酒"）
         rows = conn.execute(
-            """SELECT id, source_type, target_subject, action, summary, reasoning,
+            """SELECT id, source_type, target_subject, action, summary, reasoning, data_basis,
                       confidence, urgent, created_at
                FROM analysis_conclusions
                WHERE source_system = 'ai_dialogue'
                  AND (target_subject = ? OR target_subject LIKE ? OR ? LIKE '%' || target_subject || '%')
                  AND created_at >= datetime('now', 'localtime', ?)
+                 AND (expires_at IS NULL OR expires_at >= datetime('now', 'localtime'))
                ORDER BY urgent DESC, confidence DESC, created_at DESC
                LIMIT ?""",
-            (target_subject, f"%{target_subject}%", target_subject, f"-{hours} hours", limit),
+            (target_subject, f"%{target_subject}%", target_subject, f"-{hours} hours", max(limit * 10, 30)),
         ).fetchall()
         conn.close()
+
+        from db import get_portfolio_snapshot
+        from services.portfolio.analysis_contract import filter_portfolio_conclusions
+        rows = filter_portfolio_conclusions([dict(r) for r in rows], get_portfolio_snapshot())[:limit]
 
         if not rows:
             return ""
@@ -4727,7 +4746,7 @@ def _load_recent_conclusions(
             "decrease": "减仓", "hold": "持有", "": "-",
         }
         lines = [
-            f"\n## 历史分析结论（{hours}h 内同标的，强参考）",
+            f"\n## 历史分析结论（{hours}h 内同标的，已验证且匹配当前组合快照）",
             f"目标标的: **{target_subject}**",
             "",
         ]
@@ -5654,7 +5673,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             "role": "user",
             "content": _build_final_synthesis_prompt(
                 specialist_results, specialists, blackboard=blackboard,
-                cross_review_performed=cross_review_performed, plan=plan),
+                cross_review_performed=cross_review_performed, plan=plan, query=query),
         })
         final_answer = ""
         try:
@@ -5851,7 +5870,7 @@ def _pipeline_phase_message(phase: str) -> str:
     return messages.get(phase, f"阶段: {phase}")
 
 
-def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None, resume_from_checkpoint: dict | None = None):
+def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_event: threading.Event | None = None, resume_from: dict | None = None, conversation_id: int = 0, message_id: int = 0, trace_id: str = "", target_specialists: list[str] = None, resume_from_checkpoint: dict | None = None, prepared_rag_result: dict | None = None):
     """
     Orchestrator 的流式版本,通过生成器逐步返回事件。
 
@@ -5899,6 +5918,7 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     trace_id=trace_id,
                     cancel_event=cancel_event,
                     prepared_rag_context=rag_context,
+                    prepared_rag_result=prepared_rag_result,
                 ):
                     evt_type = evt.get("type", "")
                     # 事件映射：pipeline → orchestrator 兼容格式

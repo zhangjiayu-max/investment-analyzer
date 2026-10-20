@@ -15,6 +15,7 @@ from db.config import get_config_int, get_config_float, get_config
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -23,6 +24,9 @@ from pathlib import Path
 from db._conn import DB_PATH, _get_conn as _get_db_conn
 from db.config import get_config_int, get_config_float, get_config, get_config_bool
 from services.rag_enhanced import expand_query, lightweight_rerank, get_rrf_params
+from services.rag.evidence_quality import (
+    allocation_scope_mismatch, hydrate_evidence, numeric_consistency_issues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,7 @@ _RAG_CONFIG_DEFAULTS = {
     "chroma_max_distance": ("0.8", "ChromaDB 最大余弦距离阈值"),
     "rrf_top_n": ("5", "每个来源参与 RRF 融合的最大候选数"),
     "rrf_cross_bonus": ("0.01", "跨来源（FTS+Chroma）命中加成"),
+    "rerank_min_score": ("0.1", "CrossEncoder 相关性最低分，个性化加权前验收；不是事实正确率"),
 }
 
 _rag_config_cache: dict[str, str] = {}
@@ -191,20 +196,22 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
     Returns:
         重排序后的结果列表
     """
-    if not results or len(results) <= 1:
+    if not results:
         return results
 
     # P3-12: 限制重排序文档数，避免大量文档导致延迟
     max_docs = get_config_int("rag.reranker_max_docs", 20)
     if len(results) > max_docs:
         results = results[:max_docs]
+    for result in results:
+        for field in ("quality_reason", "quality_status", "rerank_score", "personal_boost"):
+            result.pop(field, None)
 
     reranker = _get_reranker()
     if not reranker:
-        # 无 reranker 时仍可做画像加权
-        if user_id:
-            _apply_personalization_boost(results, user_id)
-            results.sort(key=lambda x: x.get("personal_boost", 0), reverse=True)
+        for result in results:
+            result["quality_status"] = "unverified_relevance"
+            result["quality_reason"] = "reranker_unavailable"
         return results[:top_k]
 
     # P3-12: 超时保护 — predict 在子线程执行，超时降级到轻量重排序
@@ -213,10 +220,23 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
     try:
         future = pool.submit(_cross_encoder_predict, reranker, query, results)
         scores = future.result(timeout=timeout_ms / 1000)
+        if len(scores) != len(results):
+            raise ValueError("reranker score count does not match evidence count")
 
         # 将分数添加到结果中
+        minimum = get_config_float("rag.rerank_min_score", get_rag_config_float("rerank_min_score", .1))
+        if not math.isfinite(minimum) or minimum <= 0:
+            minimum = .1
         for i, score in enumerate(scores):
             results[i]["rerank_score"] = score
+            if math.isfinite(score) and score >= minimum:
+                results[i]["quality_status"] = "usable"
+            else:
+                results[i]["quality_status"] = "rejected"
+                results[i]["quality_reason"] = "semantic_relevance_below_threshold"
+
+        # 语义门槛先于个性化：画像加分不能挽救明显不相关的结果。
+        results = [result for result in results if result["quality_status"] == "usable"]
 
         # 个性化加权（在 cross-encoder 分数基础上叠加）
         if user_id:
@@ -230,9 +250,15 @@ def rerank_results(query: str, results: list[dict], top_k: int = 5,
         return results[:top_k]
     except concurrent.futures.TimeoutError:
         logger.warning(f"重排序超时（{timeout_ms}ms），降级到轻量重排序")
+        for result in results:
+            result["quality_status"] = "unverified_relevance"
+            result["quality_reason"] = "reranker_timeout"
         return lightweight_rerank(query, results, top_k=top_k)
     except Exception as e:
         logger.warning(f"重排序失败，降级到轻量重排序: {e}")
+        for result in results:
+            result["quality_status"] = "unverified_relevance"
+            result["quality_reason"] = "reranker_failed"
         return lightweight_rerank(query, results, top_k=top_k)
     finally:
         # wait=False 避免超时后阻塞主流程等待孤儿线程
@@ -2246,6 +2272,8 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "freshness_filtered": int,   # 被时效性策略过滤的条数
         }
     """
+    quality_reasons = set()
+    quality_filtered = 0
     # R-4-1（2026-07-23）：URL 剥离 — mp.weixin.qq.com 类查询的 URL token 会进入 FTS5
     # 被 AND 连接后破坏匹配。剥离 URL 后用纯文本检索。
     _preprocess_enabled = get_rag_config("rag.query_preprocess_enabled", "true") == "true"
@@ -2439,6 +2467,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             seen[key] = r
 
     all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
+    try:
+        # 原文先于场景、算术和模型验收，FTS 分词片段不能替代原始条件。
+        hydrate_evidence(all_results, _get_conn)
+    except Exception as exc:
+        logger.warning("回查原始检索证据失败: %s", exc)
+        quality_reasons.add("original_source_unavailable")
 
     # 内容类型优先级加权：时效性强的内容优先于理论知识
     # 优先级分数 = 1 / priority，数值越小优先级越高，分数越高
@@ -2588,6 +2622,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         # 旧逻辑保留全部导致"英国富时100"等不相关海外指数进入上下文
         # 排序：相关性降序 → RRF _score 降序（同等相关性时优先高分结果）
         if not kept and scored_results:
+            quality_reasons.add("lexical_relevance_fallback")
             scored_results.sort(key=lambda x: (x[0], x[1].get("_score", 0)), reverse=True)
             _fallback_n = min(3, len(scored_results))
             kept = [r for _, r in scored_results[:_fallback_n]]
@@ -2665,12 +2700,22 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 供后续 _apply_personalization_boost 中的加权分支使用
     _enrich_results_with_time(all_results)
 
-    # 默认个性化重排：画像 2.0、行为偏差、知识原子元数据提供温和加权。
-    if all_results:
-        _apply_personalization_boost(all_results, "default")
-        for r in all_results:
-            r["_score"] = r.get("_score", 0) + r.get("personal_boost", 0)
-        all_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
+    checked_results = []
+    for result in all_results:
+        issues = numeric_consistency_issues(result.get("body", ""))
+        if issues:
+            result["validation_status"] = "requires_source_check"
+            result["validation_issues"] = issues
+            quality_reasons.update(issue["code"] for issue in issues)
+            quality_filtered += 1
+            continue
+        if allocation_scope_mismatch(query, result):
+            quality_reasons.add("allocation_scope_mismatch")
+            quality_filtered += 1
+            continue
+        result["validation_status"] = "limited_checks_passed"
+        checked_results.append(result)
+    all_results = checked_results
 
     # P3-12: Reranker 默认开启（CrossEncoder 重排序 + 超时降级保护）
     # rag.reranker_enabled=true（默认）：CrossEncoder 重排序，超时/失败降级到 lightweight_rerank
@@ -2678,17 +2723,23 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # rag.auto_rerank_topn=true：轻量 rerank（仅 top-5），reranker 关闭时的备选方案
     _reranker_enabled = get_config_bool("rag.reranker_enabled", True) and RERANK_ENABLED
     _auto_rerank = get_config("rag.auto_rerank_topn", "false") == "true"
-    if _reranker_enabled and len(all_results) > 3:
+    rerank_candidates = list(all_results)
+    if _reranker_enabled and all_results:
         all_results = rerank_results(query, all_results, top_k=limit, user_id="default")
         logger.info(f"Rerank 后: {len(all_results)}条")
-    elif _auto_rerank and len(all_results) > 3:
-        # 轻量 rerank：仅对 top-5 结果启用，减少延迟
-        _rerank_topn = min(5, len(all_results))
-        _top_results = all_results[:_rerank_topn]
-        _rest = all_results[_rerank_topn:]
-        _reranked = rerank_results(query, _top_results, top_k=_rerank_topn, user_id="default")
-        all_results = _reranked + _rest
-        logger.info(f"轻量 Rerank(top-{_rerank_topn}) 后: {len(all_results)}条")
+    elif _auto_rerank and all_results:
+        # top-N 之外不再绕过语义验收进入证据上下文。
+        all_results = rerank_results(query, all_results[:5], top_k=min(5, limit), user_id="default")
+    else:
+        for result in all_results:
+            result["quality_status"] = "unverified_relevance"
+            result["quality_reason"] = "reranker_disabled"
+    for result in rerank_candidates:
+        reason = result.get("quality_reason")
+        if reason:
+            quality_reasons.add(reason)
+        if result.get("quality_status") == "rejected":
+            quality_filtered += 1
 
     # 标记来源（fts / chroma / both）
     for r in all_results:
@@ -2696,11 +2747,11 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         in_fts = key in fts_keys
         in_chroma = key in chroma_keys
         if in_fts and in_chroma:
-            r["source"] = "both"
+            r["retrieval_source"] = "both"
         elif in_fts:
-            r["source"] = "fts"
+            r["retrieval_source"] = "fts"
         else:
-            r["source"] = "chroma"
+            r["retrieval_source"] = "chroma"
 
     # 添加标签
     label_map = {
@@ -2728,6 +2779,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         for r in direct_valuation_results:
             key = f"{r['content_type']}:{r['reference_id']}"
             if key not in rag_keys:
+                r["evidence_id"] = key
+                r["quality_status"] = "usable"
+                r["validation_status"] = "limited_checks_passed"
                 all_results.insert(0, r)
 
     if not all_results:
@@ -2735,6 +2789,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "context": "", "results": [], "keywords": keywords, "query": query,
             "fts_count": fts_count, "chroma_count": chroma_count,
             "freshness_filtered": total_freshness_filtered,
+            "rag_low_quality": True,
+            "quality_filtered": quality_filtered,
+            "quality_reasons": sorted(quality_reasons or {"no_usable_evidence"}),
         }
 
     # 构建上下文：以完整结果为单位，避免截断丢失来源标注
@@ -2744,21 +2801,24 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     body_preview_chars = get_rag_config_int("body_preview_chars", 600)
 
     for r in all_results:
-        # 构建单条结果（包含来源标注 + 相关度标签）
-        # Phase C: 补可信度信号，让专家区分高分精确命中与边缘命中
-        # 阈值基于实测分数分布（0.014-0.125）：高>=0.08, 中>=0.03, 低<0.03
-        score = float(r.get("_score", 0))
-        if score >= 0.08:
-            relevance_tag = "相关度:高"
-        elif score >= 0.03:
-            relevance_tag = "相关度:中"
+        # 融合分、语义分与事实可信度不是同一量，不能共用“高”标签。
+        if r.get("rerank_score") is not None:
+            relevance_tag = f"语义相关分:{r['rerank_score']:.3f}，非事实正确率"
+        elif r.get("_direct_inject"):
+            relevance_tag = "实体匹配的结构化数据"
         else:
-            relevance_tag = "相关度:低"
-        part = f"[{r['label']}] [{relevance_tag}] {r['title']}"
+            relevance_tag = "相关性未验收"
+        part = f"[{r['label']}] [引用: {r.get('evidence_id', '')}] [{relevance_tag}] {r['title']}"
         if r.get("time"):
             part += f" ({r['time']})"
+        if r.get("usage_scope"):
+            part += f" [usage_scope:{r['usage_scope']}; date_verified:{r.get('date_verified', False)}]"
         if r.get("source"):
             part += f" [来源: {r['source']}]"
+        if r.get("limitations"):
+            part += "\n适用限制: " + "；".join(str(value) for value in r["limitations"])
+        if r.get("quality_status") != "usable":
+            part += "\n检索相关性尚未验收，不能作为已验证证据。"
 
         # 添加 body（限制长度但保持完整性）
         if r["body"]:
@@ -2808,6 +2868,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "freshness_filtered": total_freshness_filtered,
         "detected_indexes": detected_indexes,
         "direct_valuation_count": len(direct_valuation_results),
+        "rag_low_quality": bool(quality_reasons) or any(r.get("quality_status") != "usable" for r in all_results),
+        "quality_filtered": quality_filtered,
+        "quality_reasons": sorted(quality_reasons),
     }
 
 

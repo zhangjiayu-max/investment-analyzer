@@ -1,0 +1,116 @@
+import { mount, flushPromises } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+const api = vi.hoisted(() => ({ listAlerts: vi.fn(), getUnreadAlertCount: vi.fn(), markAlertRead: vi.fn(), acknowledgeAlert: vi.fn() }))
+vi.mock('../api', () => api)
+import AlertBell from '../components/task/AlertBell.vue'
+const wrappers = []
+const alert = (extra = {}) => ({ latest_id: 42, alert_type: 'loss_warning', severity: 'warning', title: '测试提醒', cnt: 3, unread_count: 3, is_read: 0, ...extra })
+function render() { const w = mount(AlertBell, { attachTo: document.body, global: { stubs: { Icon: true } } }); wrappers.push(w); return w }
+function panel() { return document.body.querySelector('.alert-panel') }
+async function click(selector) { panel().querySelector(selector).click(); await flushPromises() }
+beforeEach(() => {
+  vi.useFakeTimers(); vi.resetAllMocks()
+  api.getUnreadAlertCount.mockResolvedValue({ data: { count: 3 } })
+  api.listAlerts.mockResolvedValue({ data: { alerts: [alert()] } })
+  api.markAlertRead.mockResolvedValue({ data: { ok: true } })
+  api.acknowledgeAlert.mockResolvedValue({ data: { ok: true } })
+})
+afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); document.body.innerHTML = ''; vi.useRealTimers() })
+describe('主动提醒', () => {
+  it('uses grouped identity and re-fetches the authoritative unread count after reading', async () => {
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    api.getUnreadAlertCount.mockResolvedValue({ data: { count: 0 } })
+    await click('.alert-open')
+    expect(api.markAlertRead).toHaveBeenCalledWith(42)
+    expect(w.find('.bell-badge').exists()).toBe(false)
+    expect(w.emitted('navigate')).toEqual([['portfolio']])
+  })
+  it('reloads each opening and does not open a second notification panel', async () => {
+    const w = render(); await flushPromises()
+    await w.get('.bell-btn').trigger('click'); await flushPromises()
+    await w.get('.bell-btn').trigger('click'); await flushPromises()
+    api.listAlerts.mockResolvedValue({ data: { alerts: [alert({ title: '新的提醒' })] } })
+    await w.get('.bell-btn').trigger('click'); await flushPromises()
+    expect(api.listAlerts).toHaveBeenCalledTimes(2)
+    expect(panel().textContent).toContain('新的提醒')
+    expect(w.emitted('openNotifications')).toBeUndefined()
+  })
+  it('shows request failure with retry instead of claiming there are no alerts', async () => {
+    api.listAlerts.mockRejectedValueOnce(new Error('offline'))
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    expect(panel().textContent).toContain('加载失败')
+    await click('.alert-retry')
+    expect(panel().textContent).toContain('测试提醒')
+  })
+  it('keeps the panel open and reports read failures', async () => {
+    api.markAlertRead.mockRejectedValue(new Error('offline'))
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    await click('.alert-open')
+    expect(panel().textContent).toContain('标记已读失败')
+    expect(w.emitted('navigate')).toBeUndefined()
+  })
+  it('guards repeated acknowledgment and supports id fallback', async () => {
+    api.listAlerts.mockResolvedValue({ data: { alerts: [alert({ latest_id: undefined, id: 7 })] } })
+    let resolve; api.acknowledgeAlert.mockReturnValue(new Promise(r => { resolve = r }))
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    await click('.ack-adopt'); await click('.ack-adopt')
+    expect(api.acknowledgeAlert).toHaveBeenCalledTimes(1)
+    expect(panel().querySelector('.ack-skip').disabled).toBe(true)
+    resolve({ data: { ok: true } }); await flushPromises()
+    expect(panel().textContent).toContain('已采纳')
+  })
+  it('automatically refreshes open panels without overlapping list requests', async () => {
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    let resolve; api.listAlerts.mockReturnValue(new Promise(r => { resolve = r }))
+    await vi.advanceTimersByTimeAsync(60000)
+    const calls = api.listAlerts.mock.calls.length
+    expect(calls).toBe(2)
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(api.listAlerts).toHaveBeenCalledTimes(calls)
+    resolve({ data: { alerts: [alert({ title: '自动刷新提醒' })] } }); await flushPromises()
+    expect(panel().textContent).toContain('自动刷新提醒')
+  })
+  it('supports unread/recent filters, Escape and the full center entry', async () => {
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    expect(api.listAlerts).toHaveBeenLastCalledWith(true, 10)
+    await click('.alert-filter-recent')
+    expect(api.listAlerts).toHaveBeenLastCalledWith(false, 10)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await flushPromises()
+    expect(panel()).toBeNull()
+    await w.get('.bell-btn').trigger('click'); await flushPromises(); await click('.alert-view-all')
+    expect(w.emitted('navigate')).toEqual([['alert-center']])
+  })
+  it('keeps results when switching back to unread during a slow recent request', async () => {
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    let resolve
+    api.listAlerts.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    await click('.alert-filter-recent')
+    await click('.alert-filters button:first-child')
+    resolve({ data: { alerts: [alert({ title: '旧的最近列表' })] } }); await flushPromises()
+    expect(panel().textContent).toContain('测试提醒')
+    expect(panel().textContent).not.toContain('旧的最近列表')
+    expect(api.listAlerts).toHaveBeenLastCalledWith(true, 10)
+  })
+  it('ignores a stale list response arriving after acknowledgment', async () => {
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    let resolve; api.listAlerts.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    await click('.alert-refresh'); await click('.ack-adopt')
+    resolve({ data: { alerts: [alert()] } }); await flushPromises()
+    expect(panel().textContent).toContain('已采纳')
+  })
+  it('clamps the panel to a narrow viewport and closes on outside pointerdown', async () => {
+    vi.stubGlobal('innerWidth', 320); vi.stubGlobal('innerHeight', 600)
+    const w = render(); await flushPromises(); await w.get('.bell-btn').trigger('click'); await flushPromises()
+    expect(parseFloat(panel().style.width) + parseFloat(panel().style.left)).toBeLessThanOrEqual(308)
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })); await flushPromises()
+    expect(panel()).toBeNull()
+    vi.unstubAllGlobals()
+  })
+  it('does not restart polling after an in-flight request completes on unmount', async () => {
+    let resolve; api.getUnreadAlertCount.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const w = render(); w.unmount(); wrappers.pop()
+    resolve({ data: { count: 5 } }); await flushPromises()
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(api.getUnreadAlertCount).toHaveBeenCalledTimes(1)
+  })
+})

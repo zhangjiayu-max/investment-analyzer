@@ -18,6 +18,8 @@
 pip install -r requirements.txt
 ```
 
+估值表日期支持独立表头 OCR 核验，需安装 Tesseract（英文识别库）：macOS 用 `brew install tesseract`，Ubuntu/Debian 用 `sudo apt-get install tesseract-ocr tesseract-ocr-eng`。核验会纠正视觉模型误读的八位日期，并在结果的 `date_verification` 中保留原始数字和模型日期。未安装、识别失败或日期有歧义时保留模型结果，标记为 `unverified`。
+
 ### 2. 配置 API Key
 
 ```bash

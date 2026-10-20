@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from functools import wraps
-from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
+from openai import OpenAI, DefaultHttpxClient, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
 from config import get_llm_config, get_llm_fallback_config
 from db.config import get_config_float, get_config_int
@@ -49,7 +49,8 @@ def _sleep_retry(seconds):
 
 _llm_retry = retry(
     retry=retry_if_exception(_is_retryable),
-    stop=stop_after_attempt(2),
+    # 连接被拒绝/传输中断通常数秒内自愈，多一次退避重试可显著降低瞬时网络抖动导致的失败。
+    stop=stop_after_attempt(3),
     wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     sleep=_sleep_retry,
@@ -58,7 +59,9 @@ _llm_retry = retry(
 
 _api_key, _base_url, _model = get_llm_config()
 # 超时保护：3 分钟，避免 MIMO API hang 住导致 pipeline 死锁（对话 99 案例）
-client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0, max_retries=0)
+# MIMO 国内接口直连：httpx 默认还会读取 macOS 系统代理，代理退出会导致全站模型连接失败。
+client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0, max_retries=0,
+                http_client=DefaultHttpxClient(trust_env=False))
 MODEL = _model
 
 # ── 分级模型常量（供独立分析路由使用）────
@@ -69,7 +72,8 @@ MODEL_AUX = MODEL
 
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
-_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0, max_retries=0) if _fallback_config else None
+_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0, max_retries=0,
+                         http_client=DefaultHttpxClient(trust_env=False)) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
 # 仲裁 Agent 复用主客户端（统一 mimo-v2.6-pro，可通过 system_config 'arbitration.model' 覆盖模型名）
@@ -142,7 +146,7 @@ def _enforce_token_budget(caller: str = "", trace_id: str = ""):
         )
 
 
-def _create_completion_with_fallback(request_kwargs: dict, trace_id: str):
+def _create_completion_with_fallback(request_kwargs: dict, trace_id: str, on_error=None):
     """每次请求复制参数并重算剩余时间，仅使用已配置的兼容兜底。"""
     def request_kwargs_for(model=None):
         current = dict(request_kwargs)
@@ -151,17 +155,27 @@ def _create_completion_with_fallback(request_kwargs: dict, trace_id: str):
             current['model'] = model
         return current
 
+    def send(target, model=None, role='primary'):
+        current = request_kwargs_for(model)
+        started = time.monotonic()
+        try:
+            return target.chat.completions.create(**current)
+        except Exception as error:
+            if on_error:
+                on_error(error, current.get('model', MODEL), role,
+                         int((time.monotonic() - started) * 1000))
+            raise
+
     try:
-        return client.chat.completions.create(**request_kwargs_for())
+        return send(client)
     except (ExecutionCancelled, TimeoutError):
         raise
     except Exception as exc:
         if not (_fallback_client and _fallback_model):
             raise
-        fallback_kwargs = request_kwargs_for(_fallback_model)
         logger.warning('[trace:%s] 主用 LLM 失败 (%s)，使用已配置兜底: %s',
                        trace_id, exc.__class__.__name__, _fallback_model)
-        return _fallback_client.chat.completions.create(**fallback_kwargs)
+        return send(_fallback_client, _fallback_model, 'fallback')
 
 
 def _configured_llm_timeout() -> float:
@@ -176,9 +190,23 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
     # 全局 token 预算检查：所有 LLM 调用（对话/分析/辅助模块）均受限
     _enforce_token_budget(caller, trace_id)
     requested_model = kwargs.get("model", MODEL)
+    from infra.analysis_errors import build_error_details
+    started = time.monotonic()
+    attempts = []
+    def record_attempt(error, model, role, elapsed_ms):
+        try:
+            attempt = build_error_details(error, stage='llm_request', caller=caller, trace_id=trace_id,
+                model=model, endpoint=_base_url, elapsed_ms=elapsed_ms)
+            attempt.update(attempt=len(attempts) + 1, role=role)
+            attempts.append(attempt)
+            logger.warning('[trace:%s] LLM 请求失败 caller=%s attempt=%s diagnostics=%s',
+                           trace_id, caller, attempt['attempt'], json.dumps(attempt, ensure_ascii=False))
+        except Exception as diagnostic_error:
+            logger.warning('[trace:%s] 构建请求诊断失败: %s', trace_id, type(diagnostic_error).__name__)
+
     @_llm_retry
     def _do_call():
-        resp = _create_completion_with_fallback(kwargs, trace_id)
+        resp = _create_completion_with_fallback(kwargs, trace_id, on_error=record_attempt)
         # P4: 检测 provider 静默映射（请求模型 ≠ 响应模型）
         _check_model_silent_mapping(requested_model, resp.model, caller, trace_id)
         if resp.usage:
@@ -190,8 +218,24 @@ def _call_llm(caller: str = "", trace_id: str = "", **kwargs):
             _record_token_usage(resp.usage, resp.model, caller, trace_id=trace_id,
                                 requested_model=requested_model)
         return resp
-    with execution_budget(_configured_llm_timeout()):
-        return _do_call()
+    try:
+        with execution_budget(_configured_llm_timeout()):
+            return _do_call()
+    except Exception as error:
+        try:
+            details = build_error_details(error, stage='llm_request', caller=caller, trace_id=trace_id,
+                model=attempts[-1]['model'] if attempts else requested_model,
+                endpoint=_base_url, elapsed_ms=int((time.monotonic() - started) * 1000),
+                attempts=attempts)
+            details['requested_model'] = requested_model
+            error.analysis_error_details = details
+            # 取消和期限已耗尽时立即传播，由业务层处理终态；不等待诊断写锁。
+            if trace_id and not isinstance(error, (ExecutionCancelled, TimeoutError)):
+                from db.agent_analysis_log import save_analysis_error_details
+                save_analysis_error_details(trace_id, details)
+        except Exception as diagnostic_error:
+            logger.warning('[trace:%s] 保存模型错误诊断失败: %s', trace_id, type(diagnostic_error).__name__)
+        raise
 
 
 async def call_llm_async(caller: str = "", **kwargs):

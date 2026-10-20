@@ -188,6 +188,12 @@ def run_decision_backtest(user_id: str = "default", as_of_date: str | None = Non
                 "hit_rule": "excess" if benchmark_pct is not None else "absolute",
             },
         )
+        try:
+            from services.advisor.decision_adapter import sync_investment_status
+
+            sync_investment_status(dec["id"])
+        except Exception:
+            logger.exception("量化回测结果同步决策档案失败 investment_id=%s", dec.get("id"))
         summary["processed"] += 1
         if is_hit:
             summary["hits"] += 1

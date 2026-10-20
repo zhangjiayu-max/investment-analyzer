@@ -63,6 +63,8 @@ async def list_ledger(
             user_id=user_id, status=status, fund_code=fund_code,
             decision_type=decision_type, source_module=source_module, limit=limit,
         )
+        for item in data:
+            item["decision_record_id"] = item.get("decision_record_id")
         return ApiResponse.success(data)
     except Exception as e:
         return ApiResponse.error(500, str(e))
@@ -76,8 +78,39 @@ async def get_ledger_item(decision_id: int):
         data = get_decision(decision_id)
         if not data:
             return ApiResponse.error(404, f"未找到决策 {decision_id}")
+        archive = None
+        try:
+            from services.advisor.decision_adapter import unified_decision
+
+            archive = unified_decision(investment_id=decision_id)
+        except Exception:
+            logger.exception("量化账本关联档案加载失败 investment_id=%s", decision_id)
+        if archive:
+            data["decision_record"] = archive.get("decision_record")
+            data["decision_record_id"] = archive.get("decision_record_id")
         return ApiResponse.success(data)
     except Exception as e:
+        return ApiResponse.error(500, str(e))
+
+
+@router.post("/api/decision/ledger/{decision_id}/archive")
+async def create_ledger_archive(decision_id: int):
+    """为没有档案的量化账本创建用户可见的决策档案。"""
+    try:
+        from services.advisor.decision_adapter import (
+            ensure_decision_record_for_investment,
+            unified_decision,
+        )
+
+        ensure_decision_record_for_investment(decision_id)
+        result = unified_decision(investment_id=decision_id)
+        if not result:
+            return ApiResponse.error(404, f"未找到决策 {decision_id}")
+        return ApiResponse.success(result)
+    except ValueError as e:
+        return ApiResponse.error(404, str(e))
+    except Exception as e:
+        logger.exception("量化账本档案创建失败 investment_id=%s", decision_id)
         return ApiResponse.error(500, str(e))
 
 
@@ -88,6 +121,23 @@ async def accuracy_stats(user_id: str = "default", days: int = Query(90, le=365)
         from db import get_decision_accuracy_stats
         return ApiResponse.success(get_decision_accuracy_stats(user_id, days))
     except Exception as e:
+        return ApiResponse.error(500, str(e))
+
+
+@router.get("/api/decision/unified")
+async def get_unified_decision(investment_id: int | None = None, archive_id: int | None = None, user_id: str | None = None):
+    """查询用户档案和量化账本组成的统一只读视图。"""
+    if investment_id is None and archive_id is None:
+        return ApiResponse.error(400, "至少提供 investment_id 或 archive_id")
+    try:
+        from services.advisor.decision_adapter import unified_decision
+
+        result = unified_decision(investment_id=investment_id, archive_id=archive_id, user_id=user_id)
+        if not result:
+            return ApiResponse.error(404, "决策不存在")
+        return ApiResponse.success(result)
+    except Exception as e:
+        logger.exception("统一决策视图查询失败")
         return ApiResponse.error(500, str(e))
 
 

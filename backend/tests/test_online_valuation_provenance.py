@@ -28,6 +28,8 @@ def test_active_query_preserves_cached_provider_and_date(monkeypatch):
         'index_code': '000300', 'metric_type': '市盈率', 'source': 'ttfund_online',
         'snapshot_date': None, 'current_value': 12, '_cached_at': datetime.now(),
     }})
+    # 日期未知的缓存现在必须先刷新；模拟来源失败，验证降级仍保留真实元数据。
+    monkeypatch.setattr(v, '_run_with_safe_timeout', lambda *a, **kw: None)
     result = v.fetch_online_valuation('000300', '市盈率')
     assert result['source'] == 'ttfund_online'
     assert result['cached'] is True

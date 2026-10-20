@@ -11,6 +11,9 @@ from typing import Optional
 
 from db.config import get_config, get_config_float
 from services.llm_service import _call_llm, MODEL
+from agent.core.answer_policy import (
+    has_attribution_intent, has_explicit_action_intent, order_attribution_specialists,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +179,8 @@ def _determine_primary_specialist(query: str, specialists: list) -> str:
     if not specialists:
         return ""
     _q = query or ""
+    if _classify_question_type(_q) == "attribution" and "market_analyst" in specialists:
+        return "market_analyst"
     for keywords, expert in _PRIMARY_SPECIALIST_KEYWORDS:
         if any(kw in _q for kw in keywords) and expert in specialists:
             return expert
@@ -307,10 +312,13 @@ def _classify_question_type(query: str) -> str:
     if not query:
         return "generic"
 
-    # action 优先级最高（操作类问题涉及真金白银决策）
-    for kw in _QUESTION_TYPE_KEYWORDS["action"]:
-        if kw in query:
-            return "action"
+    # 用户操作诉求优先；机构卖出/净买入属于行情证据，不能据此强制交易模板。
+    if has_explicit_action_intent(query):
+        return "action"
+
+    # 主谓间可以插入指数名或“持续/一直在”，不再依赖“为什么跌”相邻匹配。
+    if has_attribution_intent(query):
+        return "attribution"
 
     # attribution（归因类）
     for kw in _QUESTION_TYPE_KEYWORDS["attribution"]:
@@ -346,7 +354,7 @@ def _apply_question_type_routing(specialists: list, query: str) -> tuple[list, s
     if qtype == "attribution":
         # 归因类：强制 macro + market + industry_fundamentalist + fund_analyst
         # P0-4: 加入 fund_analyst 确保穿透分析（conv 129 "穿透看亏损原因"未路由 fund_analyst 的根因之一）
-        forced = {"macro_strategist", "market_analyst", "industry_fundamentalist", "fund_analyst"}
+        forced = {"macro_strategist", "market_analyst", "risk_assessor", "industry_fundamentalist", "fund_analyst"}
         missing = forced - specialist_set
         if missing:
             specialist_set.update(missing)
@@ -377,7 +385,10 @@ def _apply_question_type_routing(specialists: list, query: str) -> tuple[list, s
             specialist_set.update(missing)
             reason = f"对比类问题，追加 {','.join(missing)}"
 
-    return list(specialist_set), reason
+    ordered = sorted(specialist_set)
+    if qtype == "attribution":
+        ordered = order_attribution_specialists(ordered)
+    return ordered, reason
 
 
 def _is_high_risk_action(query: str) -> bool:
@@ -452,6 +463,7 @@ class SmartRouter:
         # 原因：澄清融合把"加仓"改写成"整体持仓配置分析"，丢失了"加仓"等动作关键词
         # 合并后路由器仍能从原始 query 识别 action/valuation 等语义
         combined_text = f"{query} {original_query}".strip() if original_query else query
+        question_type = _classify_question_type(combined_text)
         specialists = set()
         for keywords, agents in _KEYWORD_ROUTES:
             if any(kw in combined_text for kw in keywords):
@@ -477,7 +489,7 @@ class SmartRouter:
                 logger.info(f"[router] 问题类型感知: {qtype_reason}")
 
         # 持仓感知路由：根据持仓状况追加专家（零 LLM 成本）
-        if portfolio_summary and "无持仓" not in portfolio_summary:
+        if question_type != "attribution" and portfolio_summary and "无持仓" not in portfolio_summary:
             import re as _re
             # 重仓检测：某基金占比>25% → 追加风险专家
             pct_matches = _re.findall(r'([\d.]+)%', portfolio_summary)
@@ -501,8 +513,12 @@ class SmartRouter:
         # 限制最大专家数为 5（M2后从4提升至5，容纳新增的industry_fundamentalist/behavioral_advisor）
         # 高风险行动优先保留风控专家。
         specialists_list = list(specialists)
+        if question_type == "attribution":
+            specialists_list = order_attribution_specialists(specialists_list)
         if len(specialists_list) > 5:
-            if _is_high_risk_action(query):
+            if question_type == "attribution":
+                priority = {key: i for i, key in enumerate(specialists_list)}
+            elif _is_high_risk_action(query):
                 priority_order = [
                     "risk_assessor",
                     "allocation_advisor", "valuation_expert", "market_analyst",
@@ -553,8 +569,8 @@ class SmartRouter:
             "reason": " | ".join(reason_parts),
             "needs_arbitration": len(specialists_list) >= 2,
             "route_by": "rule",
-            "question_type": _classify_question_type(query),
-            "primary_specialist": _determine_primary_specialist(query, specialists_list),
+            "question_type": question_type,
+            "primary_specialist": _determine_primary_specialist(combined_text, specialists_list),
         }
 
     def _declarative_fallback_route(self, query: str) -> Optional[dict]:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import types
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -82,6 +83,64 @@ def test_async_table_parse_accepts_database_paths(kind, image_dirs, monkeypatch,
     from db.dd_tasks import get_dd_parse_task
     task = get_dd_parse_task(response.json()["task_id"])
     assert task["image_path"] == str(image)
+
+
+def test_stale_image_parse_task_is_not_returned_as_running(image_dirs):
+    """服务重载后遗留的 parsing 任务必须允许下一次点击重新提交。"""
+    from db.dd_tasks import create_dd_parse_task, find_running_task, get_dd_parse_task
+
+    image = image_dirs / "data/dd_images/stale.jpg"
+    image.write_bytes(b"image")
+    task_id = create_dd_parse_task(str(image), parse_type="dd")
+    stale_at = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_conn()
+    conn.execute("UPDATE dd_parse_tasks SET status='parsing', updated_at=? WHERE id=?", (stale_at, task_id))
+    conn.commit()
+    conn.close()
+
+    assert find_running_task(str(image), parse_type="dd") is None
+    assert get_dd_parse_task(task_id)["status"] == "error"
+
+
+def test_polling_expired_image_task_reports_failure_without_resubmission(client):
+    from db.dd_tasks import create_dd_parse_task
+    task_id = create_dd_parse_task('interrupted.jpg', parse_type='liuyi')
+    conn = _get_conn()
+    conn.execute("UPDATE dd_parse_tasks SET status='parsing', updated_at=? WHERE id=?",
+                 ((datetime.now() - timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S'), task_id))
+    conn.commit()
+    conn.close()
+    task = client.get(f'/api/valuation/parse-dd-task/{task_id}').json()
+    assert task['status'] == 'error'
+    assert '重新提交' in task['error_msg']
+
+
+def test_service_shutdown_marks_image_parse_as_interrupted(monkeypatch):
+    from scripts import dd_parse_worker
+    from db.dd_tasks import create_dd_parse_task, get_dd_parse_task
+    from infra.background_tasks import create_background_task, cancel_background_tasks
+
+    async def run():
+        entered = asyncio.Event()
+
+        async def pending(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        class PendingLoop:
+            run_in_executor = staticmethod(pending)
+
+        monkeypatch.setattr(dd_parse_worker.asyncio, 'get_event_loop', lambda: PendingLoop())
+        task_id = create_dd_parse_task('shutdown.jpg', parse_type='liuyi')
+        worker = create_background_task(dd_parse_worker.run_dd_parse(task_id, 'shutdown.jpg', 'liuyi'))
+        await entered.wait()
+        await cancel_background_tasks()
+        assert worker.cancelled()
+        task = get_dd_parse_task(task_id)
+        assert task['status'] == 'error'
+        assert '中断' in task['error_msg']
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("kind", ["dd", "liuyi"])

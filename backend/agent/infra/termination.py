@@ -82,7 +82,7 @@ class TerminationChecker:
             return True, reason
 
         # 2. 超时检查
-        timeout_sec = self._get_config_int_safe("conversation.abort_at_minutes", 8) * 60
+        timeout_sec = self._get_config_int_safe("conversation.abort_at_minutes", 15) * 60
         elapsed = time.time() - self.start_time
         if elapsed > timeout_sec:
             reason = f"执行超时 ({elapsed:.0f}s > {timeout_sec}s)"
@@ -240,6 +240,7 @@ def get_token_budget_for_complexity(complexity: str) -> dict:
             "info_gather": 1500,
             "planning": 500,
             "execution": 2000,
+            "review": 1000,
             "synthesis": 1500,
             "memory": 300,
             "max_total": 6000,
@@ -250,6 +251,7 @@ def get_token_budget_for_complexity(complexity: str) -> dict:
             "info_gather": 2500,
             "planning": 800,
             "execution": 4000,
+            "review": 1500,
             "synthesis": 2500,
             "memory": 500,
             "max_total": 10000,
@@ -260,6 +262,7 @@ def get_token_budget_for_complexity(complexity: str) -> dict:
             "info_gather": 3500,
             "planning": 1000,
             "execution": 6000,
+            "review": 2000,
             "synthesis": 3500,
             "memory": 800,
             "max_total": 15000,

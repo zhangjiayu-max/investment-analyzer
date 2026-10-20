@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timedelta
 
 from db._conn import _get_conn
+from db._utils import _add_column_if_not_exists
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,11 @@ def init_investment_decisions_table(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_inv_dec_review "
         "ON investment_decisions(review_at, reviewed_at)"
+    )
+    _add_column_if_not_exists(conn, "investment_decisions", "decision_record_id", "INTEGER")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_dec_archive_link "
+        "ON investment_decisions(decision_record_id) WHERE decision_record_id IS NOT NULL"
     )
 
 
@@ -168,6 +174,54 @@ def get_decision(decision_id: int) -> dict | None:
             "SELECT * FROM investment_decisions WHERE id = ?", (decision_id,)
         ).fetchone()
         return _row_to_decision(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_decision_by_archive_id(decision_record_id: int) -> dict | None:
+    """按用户决策档案 ID 查询关联的量化账本。"""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM investment_decisions WHERE decision_record_id = ?",
+            (decision_record_id,),
+        ).fetchone()
+        return _row_to_decision(row) if row else None
+    finally:
+        conn.close()
+
+
+def update_decision_record_link(decision_id: int, decision_record_id: int | None) -> bool:
+    """写入或清除量化账本到用户决策档案的关联。"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE investment_decisions SET decision_record_id = ?, "
+            "updated_at = datetime('now','localtime') WHERE id = ?",
+            (decision_record_id, decision_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def append_decision_note(decision_id: int, note: str) -> bool:
+    """向量化账本追加一条可审计备注。"""
+    note = (note or "").strip()
+    if not note:
+        return False
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE investment_decisions SET notes = CASE "
+            "WHEN COALESCE(notes, '') = '' THEN ? "
+            "ELSE notes || CHAR(10) || ? END, "
+            "updated_at = datetime('now','localtime') WHERE id = ?",
+            (note, note, decision_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

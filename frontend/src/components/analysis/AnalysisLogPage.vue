@@ -47,6 +47,13 @@ const detailLoading = ref(false)
 const detailData = ref(null)
 const detailResult = ref('')
 const evalFeedback = ref(null)
+const detailError = ref('')
+const diagnosticNote = ref('')
+const errorDetails = computed(() => detailData.value?.error_details || {})
+const STAGE_LABELS = { llm_request: '模型请求', model_analysis: '模型分析', background_analysis: '后台执行' }
+function causeText(causes) {
+  return (causes || []).map(cause => `${cause.type}: ${cause.message || '(无错误文本)'}`).join('\n→ ')
+}
 
 // ── 加载列表 ──
 async function loadLogs() {
@@ -77,12 +84,16 @@ async function viewDetail(logId) {
   detailData.value = null
   detailResult.value = ''
   evalFeedback.value = null
+  detailError.value = ''
+  diagnosticNote.value = ''
   try {
     const res = await getAnalysisLogDetail(logId)
     detailData.value = res.data.log
     detailResult.value = res.data.source_result || ''
     evalFeedback.value = res.data.eval_feedback || null
+    diagnosticNote.value = res.data.diagnostic_note || ''
   } catch (e) {
+    detailError.value = e.response?.data?.message || e.message || '加载详情失败，请重试'
     console.error('加载详情失败:', e)
   } finally {
     detailLoading.value = false
@@ -465,9 +476,34 @@ onMounted(async () => {
                 <div class="meta-row" v-if="detailData.completed_at"><span class="meta-label">完成时间</span><span class="meta-value">{{ detailData.completed_at }}</span></div>
                 <div class="meta-row" v-if="detailData.error_msg"><span class="meta-label">错误</span><span class="meta-value error-text">{{ detailData.error_msg }}</span></div>
               </div>
+              <div class="detail-section failure-diagnostics" v-if="errorDetails.summary || diagnosticNote">
+                <h4>失败诊断</h4>
+                <p class="error-text">{{ errorDetails.summary || diagnosticNote }}</p>
+                <template v-if="errorDetails.summary">
+                  <div class="meta-row" v-if="errorDetails.stage"><span class="meta-label">失败阶段</span><span class="meta-value">{{ STAGE_LABELS[errorDetails.stage] || errorDetails.stage }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.caller"><span class="meta-label">调用来源</span><span class="meta-value">{{ errorDetails.caller }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.model"><span class="meta-label">模型</span><span class="meta-value">{{ errorDetails.model }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.endpoint"><span class="meta-label">请求地址</span><span class="meta-value">{{ errorDetails.endpoint }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.attempt_count"><span class="meta-label">请求尝试</span><span class="meta-value">{{ errorDetails.attempt_count }} 次</span></div>
+                  <div class="meta-row" v-if="errorDetails.elapsed_ms != null"><span class="meta-label">阶段耗时</span><span class="meta-value">{{ formatDuration(errorDetails.elapsed_ms) }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.status_code"><span class="meta-label">HTTP 状态</span><span class="meta-value">{{ errorDetails.status_code }}</span></div>
+                  <div class="meta-row" v-if="errorDetails.request_id"><span class="meta-label">服务端请求 ID</span><span class="meta-value">{{ errorDetails.request_id }}</span></div>
+                  <h4>异常链</h4>
+                  <pre class="diagnostic-chain">{{ causeText(errorDetails.causes) }}</pre>
+                  <details v-if="errorDetails.attempts?.length">
+                    <summary>查看每次尝试</summary>
+                    <div v-for="attempt in errorDetails.attempts" :key="attempt.attempt" class="diagnostic-attempt">
+                      <strong>第 {{ attempt.attempt }} 次 · {{ formatDuration(attempt.elapsed_ms) }}</strong>
+                      <div>{{ attempt.endpoint }}</div>
+                      <pre class="diagnostic-chain">{{ causeText(attempt.causes) }}</pre>
+                    </div>
+                  </details>
+                </template>
+              </div>
               <div class="detail-section">
                 <h4>分析结果</h4>
-                <div class="detail-result" v-html="detailResult"></div>
+                <div v-if="detailResult" class="detail-result" v-html="detailResult"></div>
+                <p v-else>{{ detailData.status === 'error' ? '本次任务失败，未生成分析结果。' : '暂无分析结果。' }}</p>
               </div>
               <div class="detail-section" v-if="evalFeedback">
                 <h4>质量评估 <span class="eval-type-tag" v-if="evalFeedback.analysis_type">{{ evalFeedback.analysis_type }}</span></h4>
@@ -510,6 +546,7 @@ onMounted(async () => {
             <div class="drawer-body" v-else-if="detailLoading">
               加载中...
             </div>
+            <div class="drawer-body error-text" v-else-if="detailError" role="alert">{{ detailError }}</div>
           </div>
         </div>
       </Transition>
@@ -562,6 +599,10 @@ onMounted(async () => {
 
 <style scoped>
 .analysis-log-page { padding: 1rem; max-width: 1400px; margin: 0 auto; }
+.failure-diagnostics { overflow-wrap: anywhere; }
+.diagnostic-chain { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; line-height: 1.6; background: var(--color-bg-secondary); padding: 0.75rem; border-radius: 6px; }
+.diagnostic-attempt { margin-top: 0.75rem; font-size: 0.75rem; }
+.failure-diagnostics summary { cursor: pointer; }
 .page-header { margin-bottom: 1rem; }
 .page-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
 .page-sub { font-size: 0.8rem; color: var(--color-text-tertiary); }

@@ -58,7 +58,7 @@ class AllocationDashboardTests(unittest.TestCase):
 
     def test_allocation_dashboard_builds_rows_and_guardrails(self):
         self._seed_portfolio()
-        from allocation_dashboard import build_allocation_dashboard
+        from services.portfolio.allocation_dashboard import build_allocation_dashboard
 
         result = build_allocation_dashboard()
 
@@ -85,7 +85,7 @@ class AllocationDashboardTests(unittest.TestCase):
         response = client.get("/api/portfolio/allocation-dashboard")
 
         self.assertEqual(response.status_code, 200)
-        body = response.json()
+        body = response.json()["data"]
         self.assertEqual(body["status"], "ok")
         self.assertIn("allocation_rows", body)
         self.assertIn("goal_constraints", body)

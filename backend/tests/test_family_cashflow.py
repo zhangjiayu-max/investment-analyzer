@@ -16,6 +16,28 @@ def test_partial_expense_keeps_budget_and_profile(tmp_db):
     assert get_user_profile()['monthly_expense'] == 6000
 
 
+def test_cashflow_unknown_income_exposes_actionable_state(tmp_db):
+    update_user_profile(monthly_income=None, monthly_expense=None, monthly_surplus=None)
+    cf = get_cashflow(month='2026-10')
+    assert cf['income_known'] is False
+    assert cf['safe_to_spend'] is None
+    assert cf['investable_surplus'] == 0
+    assert cf['investable_surplus_known'] is False
+    assert cf['data_gaps'] == ['monthly_income', 'monthly_expense_or_month_complete']
+
+
+def test_cashflow_builds_three_month_forecast_from_recurring_obligations(tmp_db):
+    from db.recurring_expenses import create_recurring_template
+    from db.portfolio import set_cash_balance
+    update_user_profile(monthly_income=10000, monthly_expense=8000)
+    create_recurring_template('车贷', '车贷', 3000, 'monthly', '2026-10')
+    set_cash_balance('default', 10000)
+    forecast = get_cashflow(month='2026-10')['forecast_3m']
+    assert [item['month'] for item in forecast] == ['2026-10', '2026-11', '2026-12']
+    assert forecast[0]['fixed_obligation'] == 3000
+    assert forecast[0]['cash_balance'] == 2000
+
+
 def test_fixed_copy_preserves_equal_premiums_and_repeat_is_idempotent(tmp_db):
     for note in ['家人A', '家人B', '家人B']:
         create_expense('2026-09', '保险', 500, is_fixed=True, note=note)
@@ -123,6 +145,15 @@ def test_financial_diagnosis_uses_household_expense_and_never_infers_insurance_c
     assert result['insurance_status'] == 'unknown'
     assert result['liabilities_status'] == 'unknown'
     assert result['warnings']
+
+
+def test_household_actions_prioritize_missing_income_over_investment_actions(tmp_db):
+    from services.finance.household_finance import build_household_diagnosis
+    update_user_profile(monthly_income=None, monthly_expense=None, monthly_surplus=None)
+    result = build_household_diagnosis(cashflow=get_cashflow(month='2026-10'))
+    assert result['actions'][0]['category'] == 'data_gap'
+    assert result['actions'][0]['navigate_to'] == 'family-finance'
+    assert result['actions'][0]['evidence']['missing'] == ['monthly_income', 'monthly_expense_or_month_complete']
 
 
 def test_cash_deploy_action_respects_protected_household_cash(tmp_db, monkeypatch):

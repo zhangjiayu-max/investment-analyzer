@@ -51,3 +51,20 @@ def test_reasoning_only_length_limit_continues_until_visible_report():
     assert text == '完整报告。'
     assert tokens == 300
     assert call.call_args.kwargs['messages'][1]['reasoning_content'] == 'reasoning state'
+
+def test_sync_completion_continues_after_length_and_keeps_reasoning(monkeypatch):
+    from services.llm.text_completion import complete_text_analysis_sync
+    call = Mock(side_effect=[response('第一段', 'length', 10), response('第二段', 'stop', 20)])
+    text, tokens, status = complete_text_analysis_sync(call, messages=[{'role': 'user', 'content': '问题'}], caller='pipeline')
+    assert (text, tokens, status) == ('第一段第二段', 30, 'completed')
+    sent = call.call_args.kwargs['messages']
+    assert sent[-2]['reasoning_content'] == 'reasoning state'
+
+
+def test_sync_completion_reports_truncated_failure_after_bound(monkeypatch):
+    from services.llm.text_completion import complete_text_analysis_sync
+    call = Mock(return_value=response('半截', 'length', 10))
+    text, tokens, status = complete_text_analysis_sync(call, messages=[], max_continuations=1, caller='pipeline')
+    assert text == '半截半截'
+    assert tokens == 20
+    assert status == 'truncated'
