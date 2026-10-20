@@ -234,7 +234,7 @@ def test_invalid_primary_numbers_are_missing_evidence(route, monkeypatch, field,
     from models.analysis import AnalysisRunRequest
     row = {'metric_type': '市盈率', 'current_value': 12, 'percentile': 10,
            'snapshot_date': date.today().isoformat(), field: value}
-    monkeypatch.setattr(route, 'get_latest_valuation', lambda *a, **kw: row)
+    monkeypatch.setattr(route, 'get_best_valuation', lambda *a, **kw: row)
     monkeypatch.setattr(route, 'get_valuation_history', lambda *a, **kw: [row])
     evidence = route._collect_valuation_evidence(AnalysisRunRequest(index_code='000300', metric_type='市盈率'))
     assert evidence['data_quality'] == 'insufficient'
@@ -248,7 +248,7 @@ def test_zero_percentile_is_valid_primary_evidence(route, monkeypatch):
     from models.analysis import AnalysisRunRequest
     row = {'metric_type': '市盈率', 'current_value': 12, 'percentile': 0,
            'snapshot_date': date.today().isoformat()}
-    monkeypatch.setattr(route, 'get_latest_valuation', lambda *a, **kw: row)
+    monkeypatch.setattr(route, 'get_best_valuation', lambda *a, **kw: row)
     monkeypatch.setattr(route, 'get_valuation_history', lambda *a, **kw: [row])
     evidence = route._collect_valuation_evidence(AnalysisRunRequest(index_code='000300', metric_type='市盈率'))
     assert evidence['data_quality'] == 'sufficient'

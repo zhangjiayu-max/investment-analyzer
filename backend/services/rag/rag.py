@@ -2811,6 +2811,8 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         part = f"[{r['label']}] [引用: {r.get('evidence_id', '')}] [{relevance_tag}] {r['title']}"
         if r.get("time"):
             part += f" ({r['time']})"
+        if r.get("usage_scope"):
+            part += f" [usage_scope:{r['usage_scope']}; date_verified:{r.get('date_verified', False)}]"
         if r.get("source"):
             part += f" [来源: {r['source']}]"
         if r.get("limitations"):

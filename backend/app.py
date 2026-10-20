@@ -2,6 +2,7 @@
 
 import asyncio
 from infra.blocking import run_blocking
+from infra.background_tasks import create_background_task, cancel_background_tasks
 import json
 import logging
 
@@ -377,7 +378,7 @@ async def startup():
         if index_codes:
             logging.info(f"开始异步回填 {len(index_codes)} 个指数历史数据...")
             # 后台执行，不阻塞启动
-            asyncio.create_task(_async_fetch_index_history(list(index_codes)))
+            create_background_task(_async_fetch_index_history(list(index_codes)))
     except Exception as e:
         logging.warning(f"回填指数历史启动失败（不影响启动）: {e}")
 
@@ -445,40 +446,40 @@ async def startup():
             logging.warning(f"记忆维护失败: {e}")
 
     # 后台执行异步初始化
-    asyncio.create_task(run_blocking(_blocking_init))
+    create_background_task(run_blocking(_blocking_init))
     logging.info("后台初始化任务已启动")
 
     # 后台每日报告（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_report", "false") == "true":
-        asyncio.create_task(_auto_daily_report())
+        create_background_task(_auto_daily_report())
     else:
         logging.info("自动市场日报已关闭（llm_cost.auto_daily_report=false）")
 
     # 后台每日净值自动刷新（15:30 收盘后）
-    asyncio.create_task(_auto_refresh_nav())
+    create_background_task(_auto_refresh_nav())
 
     # 后台每日备份（启动时 + 每天凌晨 2 点）
-    asyncio.create_task(_auto_daily_backup())
+    create_background_task(_auto_daily_backup())
 
     # 后台每日清理（启动回填 + 每天凌晨 3 点：决策过期 + 结论清理，P0-4.1/3.3）
-    asyncio.create_task(_auto_daily_cleanup())
+    create_background_task(_auto_daily_cleanup())
 
     # 后台每周预警准确性回测（每周一 02:00，纯本地计算，P2-4.3）
     if get_config("alert.auto_weekly_backtest", "true") == "true":
-        asyncio.create_task(_auto_weekly_alert_backtest())
+        create_background_task(_auto_weekly_alert_backtest())
         logging.info("每周预警准确性回测任务已启动（alert.auto_weekly_backtest=true）")
     else:
         logging.info("每周预警准确性回测已关闭（alert.auto_weekly_backtest=false）")
 
     # 后台每日评测 Pipeline（LLM 调用，默认关闭）
     if get_config("llm_cost.auto_daily_eval", "false") == "true":
-        asyncio.create_task(_auto_daily_eval())
+        create_background_task(_auto_daily_eval())
     else:
         logging.info("每日评测 Pipeline 已关闭（llm_cost.auto_daily_eval=false）")
 
     # P0 主动提醒扫描（估值阈值/持仓风险/建议验证，默认开启）
     if get_config("alerts.proactive_scan_enabled", "true") == "true":
-        asyncio.create_task(_auto_periodic_scan())
+        create_background_task(_auto_periodic_scan())
         logging.info("主动提醒扫描任务已启动（alerts.proactive_scan_enabled=true）")
     else:
         logging.info("主动提醒扫描已关闭（alerts.proactive_scan_enabled=false）")
@@ -486,7 +487,7 @@ async def startup():
     # 预警自动清理任务（每日 03:00 执行，默认开启）
     # 清理 14 天前所有预警（含未读），info 级 7 天未处理自动标记 ignored
     if get_config("alerts.auto_cleanup_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_alerts())
+        create_background_task(_auto_cleanup_alerts())
         logging.info("预警自动清理任务已启动（alerts.auto_cleanup_enabled=true）")
     else:
         logging.info("预警自动清理已关闭（alerts.auto_cleanup_enabled=false）")
@@ -494,18 +495,18 @@ async def startup():
     # 功能使用埋点自动清理（每日 03:00 执行，默认开启）
     # 清理 90 天前的埋点数据，避免表无限膨胀
     if get_config("tracking.feature_usage_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_feature_usage())
+        create_background_task(_auto_cleanup_feature_usage())
         logging.info("功能使用埋点清理任务已启动（tracking.feature_usage_enabled=true）")
 
     # 编排检查点自动清理（每日 03:00 执行，默认开启）
     # 清理 7 天前的 checkpoint（含 llm_messages/blackboard_dict，单条约 50-150KB）
     if get_config("orchestrator.checkpoint_cleanup_enabled", "true") == "true":
-        asyncio.create_task(_auto_cleanup_checkpoints())
+        create_background_task(_auto_cleanup_checkpoints())
         logging.info("编排检查点清理任务已启动（orchestrator.checkpoint_cleanup_enabled=true）")
 
     # 前瞻性事件雷达（每晚 20:00，默认关闭，LLM 相关开关硬约束）
     if get_config("alerts.event_radar_enabled", "false") == "true":
-        asyncio.create_task(_auto_event_radar_scan())
+        create_background_task(_auto_event_radar_scan())
         logging.info("前瞻事件雷达任务已启动（alerts.event_radar_enabled=true）")
     else:
         logging.info("前瞻事件雷达已关闭（alerts.event_radar_enabled=false）")
@@ -516,7 +517,7 @@ async def startup():
     # 修复：解耦验证与扫描，独立定时任务每4小时（09:00/13:00/17:00/21:00）执行。
     # 开关：alerts.event_radar_verify_enabled（默认 true，非LLM相关）
     if get_config("alerts.event_radar_verify_enabled", "true") == "true":
-        asyncio.create_task(_auto_event_verification())
+        create_background_task(_auto_event_verification())
         logging.info("事件落地验证独立任务已启动（alerts.event_radar_verify_enabled=true，每4小时执行）")
     else:
         logging.info("事件落地验证独立任务已关闭（alerts.event_radar_verify_enabled=false）")
@@ -527,7 +528,7 @@ async def startup():
     #         改为 asyncio.create_task 后台执行，不阻塞 startup
     try:
         if get_config("alerts.event_backfill_verify_enabled", "true") == "true":
-            asyncio.create_task(_startup_event_backfill())
+            create_background_task(_startup_event_backfill())
     except Exception as e:
         logging.warning(f"[启动 backfill] 事件验证补全任务创建失败（不影响启动）: {e}")
 
@@ -573,7 +574,7 @@ async def startup():
         logging.warning(f"机会雷达 backfill 失败（不影响启动）: {e}")
 
     if get_config("alerts.opportunity_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_opportunity_backtest())
+        create_background_task(_auto_opportunity_backtest())
         logging.info("机会雷达每日回测任务已启动（alerts.opportunity_backtest_enabled=true）")
     else:
         logging.info("机会雷达每日回测已关闭（alerts.opportunity_backtest_enabled=false）")
@@ -582,7 +583,7 @@ async def startup():
     # 开关：opportunity.auto_daily_scan_enabled（默认 true）
     # 复用事件雷达 _collect_news() 三源新闻，避免重复采集
     if get_config("opportunity.auto_daily_scan_enabled", "true") == "true":
-        asyncio.create_task(_auto_daily_opportunity_scan())
+        create_background_task(_auto_daily_opportunity_scan())
         logging.info("主题机会每日扫描任务已启动（opportunity.auto_daily_scan_enabled=true，16:00 触发）")
     else:
         logging.info("主题机会每日扫描已关闭（opportunity.auto_daily_scan_enabled=false）")
@@ -591,28 +592,28 @@ async def startup():
     # 开关：health_v2.auto_daily_diagnosis_enabled（默认 true）
     # 确保历史快照连续，score_change_7d 计算准确
     if get_config("health_v2.auto_daily_diagnosis_enabled", "true") == "true":
-        asyncio.create_task(_auto_daily_health_diagnosis())
+        create_background_task(_auto_daily_health_diagnosis())
         logging.info("全账户诊断每日自动调度已启动（health_v2.auto_daily_diagnosis_enabled=true，18:00 触发）")
     else:
         logging.info("全账户诊断每日自动调度已关闭（health_v2.auto_daily_diagnosis_enabled=false）")
 
     # P0-3（2026-07-21）：关注列表信号回测定时任务
     if get_config("alerts.watchlist_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_watchlist_backtest())
+        create_background_task(_auto_watchlist_backtest())
         logging.info("关注列表信号回测任务已启动（alerts.watchlist_backtest_enabled=true）")
     else:
         logging.info("关注列表信号回测已关闭（alerts.watchlist_backtest_enabled=false）")
 
     # 三模块联动 P0-A3（2026-08-01）：决策账本每日回测（"越来越准"引擎）
     if get_config("decision_ledger.auto_backtest_enabled", "true") == "true":
-        asyncio.create_task(_auto_decision_backtest())
+        create_background_task(_auto_decision_backtest())
         logging.info("决策账本每日回测任务已启动（decision_ledger.auto_backtest_enabled=true，09:45 触发）")
     else:
         logging.info("决策账本每日回测已关闭（decision_ledger.auto_backtest_enabled=false）")
 
     # 三模块联动 P0-S2（2026-08-01）：止盈闭环定时扫描（每 60 分钟）
     if get_config("smartadd.exitloop.enabled", "true") == "true":
-        asyncio.create_task(_auto_exit_loop_scan())
+        create_background_task(_auto_exit_loop_scan())
         logging.info("止盈闭环扫描任务已启动（smartadd.exitloop.enabled=true，每 60 分钟）")
     else:
         logging.info("止盈闭环扫描已关闭（smartadd.exitloop.enabled=false）")
@@ -728,21 +729,20 @@ async def shutdown():
     except Exception:
         pass
 
-    # 3. 关闭数据库连接池
+    # 3. 等待正在执行的指数分析保存报告，再关闭资源。
+    from routers.analysis.index_analysis import drain_index_analysis_tasks
+    await drain_index_analysis_tasks()
+
+    # 4. 仅取消应用注册的常驻任务；不能取消 uvicorn/ASGI 生命周期任务。
+    count = await cancel_background_tasks()
+    logging.info(f"已取消 {count} 个应用后台任务")
+
+    # 5. 关闭数据库连接池
     try:
         from db import _get_conn
         conn = _get_conn()
         conn.close()
         logging.info("数据库连接已关闭")
-    except Exception:
-        pass
-
-    # 4. 取消后台任务
-    try:
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-        logging.info(f"已取消 {len(tasks)} 个后台任务")
     except Exception:
         pass
 
@@ -1711,7 +1711,7 @@ async def _auto_daily_report():
                     )
                 except Exception as e:
                     logging.warning(f"简报自动质量评估失败: {e}")
-            asyncio.create_task(_auto_eval_report())
+            create_background_task(_auto_eval_report())
         else:
             logging.info("简报自动质量评估已关闭（llm_cost.llm_judge_eval=false）")
     except Exception as e:
@@ -1795,122 +1795,9 @@ class ChatRequest(BaseModel):
 
 
 def _build_valuation_context(question: str) -> str:
-    """从用户问题中提取关键词，检索匹配的指数估值数据，格式化为上下文文本。"""
-    # 获取所有已入库的指数名称，用反向匹配（指数名→问题）解决中文分词难题
-    all_indexes = list_valuation_indexes()
-    # 去重得到唯一指数列表
-    unique_indexes = {}
-    for idx in all_indexes:
-        code = idx["index_code"]
-        if code not in unique_indexes:
-            unique_indexes[code] = idx["index_name"]
-
-    # 用指数名称（或其核心部分，如"白酒"匹配"中证白酒"）在问题中做子串匹配
-    _prefixes = ("中证", "国证", "沪", "深", "恒生")
-    _middles = ("全指", "综指", "50", "100", "200", "300", "500", "800", "1000")
-    seen_codes = set()
-    matched_indexes = []
-    for code, name in unique_indexes.items():
-        # 优先匹配完整名称
-        if name in question and code not in seen_codes:
-            seen_codes.add(code)
-            matched_indexes.append({"index_code": code, "index_name": name})
-            continue
-        # 去掉常见前缀后匹配
-        for prefix in _prefixes:
-            core = name.replace(prefix, "", 1)
-            if len(core) >= 2 and core in question and code not in seen_codes:
-                seen_codes.add(code)
-                matched_indexes.append({"index_code": code, "index_name": name})
-                break
-        else:
-            # 去掉前缀+中间词后匹配（如"中证全指半导体"→"半导体"）
-            for prefix in _prefixes:
-                core = name.replace(prefix, "", 1)
-                for mid in _middles:
-                    core2 = core.replace(mid, "", 1)
-                    if len(core2) >= 2 and core2 in question and code not in seen_codes:
-                        seen_codes.add(code)
-                        matched_indexes.append({"index_code": code, "index_name": name})
-                        break
-                if code in seen_codes:
-                    break
-
-    if not matched_indexes:
-        return ""
-
-    # 全局数据新鲜度摘要
-    from datetime import date as dt_date
-    freshness = list_index_freshness()
-    stale_summary = []
-    for f in freshness:
-        sd = f.get("stale_days")
-        if sd is not None and sd >= 5:
-            stale_summary.append(f"{f['index_name']}({sd:.0f}天)")
-    if stale_summary:
-        parts = [f"⚠️ 数据新鲜度警告: 以下指数估值数据超过5天未更新: {'; '.join(stale_summary[:6])}，分析时请注意数据可能滞后。"]
-    else:
-        parts = []
-
-    # 查询每个匹配指数的最新估值和近期趋势
-    for idx in matched_indexes:
-        code = idx["index_code"]
-        name = idx["index_name"]
-
-        index_metrics = [i for i in all_indexes if i["index_code"] == code]
-        if not index_metrics:
-            continue
-
-        lines = [f"【{name}（{code}）】"]
-        for metric in index_metrics:
-            mt = metric["metric_type"]
-            latest = get_latest_valuation(code, mt)
-            if not latest:
-                continue
-
-            val = latest.get("current_value")
-            pct = latest.get("percentile")
-            danger = latest.get("danger_value")
-            opp = latest.get("opportunity_value")
-            zscore = latest.get("zscore")
-            date = latest.get("snapshot_date", "")
-
-            # 估值水平描述
-            level = ""
-            if pct is not None:
-                if pct < 30:
-                    level = "低估"
-                elif pct < 70:
-                    level = "合理"
-                else:
-                    level = "高估"
-
-            line = f"  {mt}: 当前值={val}, 分位点={pct}%({level}), 危险值={danger}, 机会值={opp}"
-            if zscore is not None:
-                line += f", z-score={zscore}"
-            if date:
-                line += f" [{date}]"
-                # 数据新鲜度提示，超过10天标记为过期
-                from datetime import date as dt_date
-                try:
-                    d = dt_date.fromisoformat(str(date))
-                    stale_days = (dt_date.today() - d).days
-                    if stale_days >= 10:
-                        line += f" [数据已过期{stale_days}天]"
-                except Exception:
-                    pass
-            lines.append(line)
-
-            # 近5日趋势
-            history = get_valuation_history(code, 5, mt)
-            if len(history) >= 2:
-                trend_vals = [str(h["current_value"]) for h in reversed(history)]
-                lines.append(f"    近{len(history)}日趋势: {'→'.join(trend_vals)}")
-
-        if len(lines) > 1:
-            parts.append("\n".join(lines))
-
-    return "\n\n".join(parts)
+    """旧问答入口复用多来源选择与过期降级约束。"""
+    from services.valuation.context import build_question_valuation_context
+    return build_question_valuation_context(question)
 
 
 @app.post("/api/chat")

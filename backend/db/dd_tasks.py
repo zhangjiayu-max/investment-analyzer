@@ -8,6 +8,22 @@ from db._conn import _get_conn, _row_to_dict
 STALE_PARSE_TASK_MINUTES = 10
 
 
+def _expire_stale_tasks(conn):
+    """查询和提交都清理失联任务，避免页面永久轮询 parsing。"""
+    conn.execute(
+        """UPDATE dd_parse_tasks
+        SET status = 'error',
+            error_msg = CASE WHEN error_msg IS NULL OR error_msg = ''
+                             THEN '解析任务超时或服务已重启，请重新提交'
+                             ELSE error_msg END,
+            updated_at = datetime('now', 'localtime')
+        WHERE status IN ('pending', 'parsing')
+          AND updated_at < datetime('now', 'localtime', ?)""",
+        (f'-{STALE_PARSE_TASK_MINUTES} minutes',),
+    )
+    conn.commit()
+
+
 def create_dd_parse_task(image_path: str, image_name: str = "", parse_type: str = "dd") -> int:
     """创建解析任务，返回 task_id。"""
     conn = _get_conn()
@@ -40,6 +56,7 @@ def update_dd_parse_task(task_id: int, **fields):
 def get_dd_parse_task(task_id: int) -> dict | None:
     """获取任务详情。"""
     conn = _get_conn()
+    _expire_stale_tasks(conn)
     row = conn.execute("SELECT * FROM dd_parse_tasks WHERE id = ?", (task_id,)).fetchone()
     conn.close()
     if not row:
@@ -63,20 +80,7 @@ def find_running_task(image_path: str, parse_type: str | None = None) -> dict | 
     """
     conn = _get_conn()
     stale_cutoff = f"-{STALE_PARSE_TASK_MINUTES} minutes"
-    conn.execute(
-        """
-        UPDATE dd_parse_tasks
-        SET status = 'error',
-            error_msg = CASE WHEN error_msg IS NULL OR error_msg = ''
-                             THEN '解析任务超时或服务已重启，请重新提交'
-                             ELSE error_msg END,
-            updated_at = datetime('now', 'localtime')
-        WHERE status IN ('pending', 'parsing')
-          AND updated_at < datetime('now', 'localtime', ?)
-        """,
-        (stale_cutoff,),
-    )
-    conn.commit()
+    _expire_stale_tasks(conn)
     type_filter = " AND parse_type = ?" if parse_type else ""
     row = conn.execute(f"""
         SELECT * FROM dd_parse_tasks

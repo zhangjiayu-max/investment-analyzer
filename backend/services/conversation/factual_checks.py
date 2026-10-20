@@ -44,6 +44,55 @@ def _date(value):
         return None
 
 
+def _market_reasoning_issues(content, calls):
+    """保守拦截已明确矛盾的归因逻辑，不把规则匹配当成事实核验。"""
+    issues = []
+    missing_flow = re.search(r"(?:没有|缺少|缺乏|未取得|未获取)[^。\n]{0,16}(?:资金流|卖空|做空)[^。\n]{0,12}(?:数据|证据)", content)
+    for sentence in _sentences(content):
+        limited = re.search(r"不能|无法|不足以|不代表|不等于|待验证|待核验|待核实|仅为假设|只是.*假设|是否|[？?]", sentence)
+        if not limited:
+            if missing_flow and re.search(r"(?:更符合|更多指向|主要(?:由|是)|原因(?:是|在于))[^。]{0,30}(?:资金撤离|情绪踩踏|做空)", sentence):
+                issues.append("unsupported_market_causation")
+            if re.search(r"低估值|低分位|底部分位", sentence) and re.search(r"(?:而非|排除|不是|并非)基本面(?:恶化|问题)", sentence):
+                issues.append("unsupported_market_causation")
+            if (re.search(r"一年|近一年|年度|全年", sentence) and re.search(r"一月|一个月|月度|最近月", sentence)
+                    and re.search(r"所以|因此|说明|表明", sentence) and re.search(r"企稳|跌速放缓|跌幅.*收窄", sentence)
+                    and not re.search(r"折算|年化|同口径|等长窗口", sentence)):
+                issues.append("incomparable_return_windows")
+        if (re.search(r"假设|情景|再跌", sentence) and re.search(r"最大(?:可能)?(?:损失|亏损|回撤)", sentence)
+                and not re.search(r"不(?:是|代表|等于)|不能|并非|不应", sentence)):
+            issues.append("scenario_is_not_maximum_loss")
+
+    def quotes(value, inherited_name=""):
+        if isinstance(value, list):
+            for row in value:
+                yield from quotes(row, inherited_name)
+        elif isinstance(value, dict):
+            name = value.get("index_name") or value.get("名称") or value.get("name") or inherited_name
+            point = next((value[k] for k in ("current_point", "最新价", "最新点位", "最新", "last_price") if k in value), None)
+            stamp = value.get("as_of") or value.get("timestamp") or value.get("更新时间") or value.get("时间") or value.get("date")
+            try:
+                valid = not isinstance(point, bool) and math.isfinite(float(point)) and float(point) > 0
+            except (ValueError, TypeError):
+                valid = False
+            if name and valid and _date(stamp) == date.today():
+                yield re.sub(r"指数$", "", str(name))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    yield from quotes(child, name)
+    names = set()
+    for name, data, _ in calls:
+        if name in {"eastmoney_finance_data", "yingmi_latest_quotations"}:
+            names.update(quotes(data))
+    for sentence in _sentences(content):
+        if _qualified(sentence):
+            continue
+        if (any(name in sentence for name in names) and re.search(r"点位|行情", sentence)
+                and re.search(r"未取得|未获取|未返回|无数据|没有(?:取得|获取|返回)", sentence)):
+            issues.append("market_quote_falsely_missing")
+    return issues
+
+
 def _recent_counts(data, as_of):
     """仅完整窗口、完整结果或窗口内确定无成交可支持准确笔数。"""
     if not isinstance(data, dict) or not as_of:
@@ -93,6 +142,7 @@ def check_final_facts(content: str, snapshot: dict | None = None,
     sentences = _sentences(content)
     issues = []
     calls = list(_calls(tool_calls))
+    issues.extend(_market_reasoning_issues(content or "", calls))
     available_temperature = any(
         name == "get_bond_temperature" and isinstance(data, dict)
         and isinstance(data.get("temperature"), (int, float))

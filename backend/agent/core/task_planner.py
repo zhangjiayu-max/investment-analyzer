@@ -24,23 +24,9 @@ _PREDICTION_KEYWORDS = [
 
 
 def classify_question_type(query: str) -> str:
-    """将用户问题粗分成 5 类。"""
-    if not query:
-        return "generic"
-
-    for kw in _ACTION_KEYWORDS:
-        if kw in query:
-            return "action"
-    for kw in _ATTRIBUTION_KEYWORDS:
-        if kw in query:
-            return "attribution"
-    for kw in _COMPARISON_KEYWORDS:
-        if kw in query:
-            return "comparison"
-    for kw in _PREDICTION_KEYWORDS:
-        if kw in query:
-            return "prediction"
-    return "generic"
+    """与路由共用分类，避免计划阶段再次丢失归因意图。"""
+    from agent.core.router import _classify_question_type
+    return _classify_question_type(query)
 
 
 def build_shared_evidence_keys(question_type: str, complexity: str) -> list[str]:

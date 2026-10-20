@@ -710,6 +710,11 @@ export function deleteDdImage(path) {
 
 /** ── 六亿估值图片管理 ────────────────────────────────────── */
 
+/** 通过微信图片代理读取剪贴板 HTML 中的原图。 */
+export function getWechatClipboardImage(url) {
+  return api.get('/proxy-image', { params: { url }, responseType: 'blob' })
+}
+
 /** 上传六亿估值图片 */
 export function uploadLiuyiImage(file) {
   const form = new FormData()

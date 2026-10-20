@@ -20,6 +20,7 @@ import json
 import logging
 import time
 from typing import Optional, Any, Generator
+from openai import APIConnectionError, APITimeoutError
 
 from db.config import get_config_bool, get_config_int
 from db.agents import create_agent_run
@@ -433,7 +434,7 @@ def run_pipeline(
             logger.warning(f"[pipeline] 交叉审阅决策失败，回退专家数判断: {_cr_check_err}")
             _should_cross_review = cross_review_enabled_cfg and len(_phase3_originals) >= 2
 
-        if _should_cross_review and _followup_budget_exhausted(state):
+        if _should_cross_review and _followup_budget_exhausted(state, for_review=True):
             state.set_phase_result("cross_review_status", {"status": "budget_exhausted"})
             _should_cross_review = False
 
@@ -466,6 +467,8 @@ def run_pipeline(
             from infra.execution_budget import SPECIALIST_EXECUTOR
             from agent.core.multi_agent import run_cross_review_opinion as _run_cr_op
 
+            review_output_limit = _review_tokens_remaining(state) // max(1, len(_original_specialists))
+
             def _review_single_pipeline(sr):
                 peer = {k: v for k, v in _peer_analyses.items()
                         if k != sr.get("agent_key")}
@@ -473,6 +476,7 @@ def run_pipeline(
                     return sr, _run_cr_op(
                         sr.get("agent_key", ""), state.refined_query,
                         sr.get("analysis", ""), peer,
+                        max_output_tokens=max(1, review_output_limit),
                         trace_id=trace_id,
                         conversation_id=state.conversation_id,
                         message_id=state.message_id,
@@ -505,6 +509,7 @@ def run_pipeline(
                     sr = _original_specialists[index]
                     try:
                         _, cr_result = future.result()
+                        state.record_phase_tokens('cross_review', cr_result.get('tokens_used', 0))
                         _cr_results.append(cr_result)
                         # 追加到 phase3_result 让综合阶段能看到
                         phase3_result.setdefault("specialists", []).append(cr_result)
@@ -537,7 +542,9 @@ def run_pipeline(
             except Exception as cr_phase_err:
                 logger.warning(f"[pipeline] 交叉审阅阶段失败，继续综合: {cr_phase_err}")
 
-            if len(_cr_results) != len(_original_specialists):
+            if (_cr_results and _review_tokens_remaining(state) <= 0):
+                state.set_phase_result("cross_review_status", {"status": "budget_exhausted"})
+            elif len(_cr_results) != len(_original_specialists):
                 state.set_phase_result("cross_review_status", {"status": "failed"})
             elif _cr_results:
                 state.set_phase_result("cross_review_status", {"status": "completed"})
@@ -634,6 +641,12 @@ def run_pipeline(
         state.transition_to(PipelinePhase.FAILED)
         state.error = "execution_timeout"
         yield {"type": EVENT_TERMINATED, "reason": "执行超时，请稍后重试"}
+    except APIConnectionError as e:
+        state.transition_to(PipelinePhase.FAILED)
+        state.error = "model_connection_error"
+        logger.warning("[pipeline:%s] 模型连接失败，终止本轮，不再降级 ReAct: %s", trace_id, e)
+        reason = "模型请求超时，请稍后重试" if isinstance(e, APITimeoutError) else "模型服务连接失败，请检查网络及服务地址后重试"
+        yield {"type": EVENT_TERMINATED, "reason": reason}
     except Exception as e:
         logger.exception(f"[pipeline] 流水线异常: {e}")
         state.transition_to(PipelinePhase.FAILED)
@@ -867,6 +880,13 @@ def run_pipeline_from_checkpoint(
         state.transition_to(PipelinePhase.FAILED)
         state.error = "execution_timeout"
         yield {"type": EVENT_TERMINATED, "reason": "执行超时，请稍后重试"}
+    except APIConnectionError as e:
+        state.transition_to(PipelinePhase.FAILED)
+        state.error = "model_connection_error"
+        logger.warning("[pipeline:%s] 续答模型连接失败，终止本轮: %s", trace_id, e)
+        reason = "模型请求超时，请稍后重试" if isinstance(e, APITimeoutError) else "模型服务连接失败，请检查网络及服务地址后重试"
+        # 续答路由直接消费流水线事件，error 才会写入消息失败状态并结束 SSE。
+        yield {"type": EVENT_ERROR, "error": str(e), "message": reason, "terminal": True}
     except Exception as e:
         logger.exception(f"[pipeline] 续答恢复异常: {e}")
         state.transition_to(PipelinePhase.FAILED)
@@ -990,6 +1010,11 @@ def _phase_info_gather(
         "memory": "",
         "info_gaps": [],
     }
+    from agent.core.answer_policy import has_attribution_intent, has_explicit_action_intent
+    import re
+    original_query = state.original_query or state.refined_query
+    market_only = (has_attribution_intent(original_query) and not has_explicit_action_intent(original_query)
+                   and not re.search(r"我的?持仓|我的?基金|我买|我持有|对我|组合敞口|持仓影响", original_query))
 
     # 并行执行 RAG 检索 + 持仓 + 估值 + 记忆（省 3-5 秒串行等待）
     from infra.execution_budget import DATA_EXECUTOR
@@ -1047,12 +1072,12 @@ def _phase_info_gather(
 
             # 按分数排序
             deduped.sort(key=lambda x: float(x.get("_score", 0)), reverse=True)
+            from services.rag.evidence_quality import hydrate_evidence
+            from db._conn import _get_conn
+            hydrate_evidence(deduped, _get_conn)
 
             # 构建上下文
-            if sub_queries and len(sub_queries) == 1:
-                rag_context = rag_data.get("context", "") if isinstance(rag_data, dict) else ""
-            else:
-                rag_context = _build_rag_context_from_results(deduped[:8])
+            rag_context = _build_rag_context_from_results(deduped[:8])
 
             logger.info(
                 f"[pipeline] RAG 检索完成: {len(deduped)} 条结果 "
@@ -1131,6 +1156,8 @@ def _phase_info_gather(
 
         # 2. 修复：遍历持仓中的行业/主题指数，自动补全估值查询
         # 原问题：只查用户文本中提及的 targets（最多3个），持仓中的其他行业指数被遗漏
+        if market_only:
+            return valuations
         try:
             from db.portfolio import list_holdings
             holdings = list_holdings()
@@ -1166,6 +1193,8 @@ def _phase_info_gather(
 
     tasks = {'rag': _rag_task, 'portfolio': _portfolio_task,
              'valuations': _valuation_task, 'memory': _memory_task}
+    if market_only:
+        tasks = {'rag': _rag_task, 'valuations': _valuation_task}
     for key, future in _phase_futures(tasks, DATA_EXECUTOR,
                                       get_config_int('pipeline.info_gather_timeout', 60), cancel_event):
         value = future.result()
@@ -1242,6 +1271,7 @@ def _build_rag_context_from_results(results: list, max_chars: int = 3000) -> str
         part += f" [quality:{r.get('quality_status', 'unknown')}; semantic_score:{score}]"
         if source:
             part += f" [来源: {source}]"
+        part += f" [as_of:{r.get('as_of_date') or r.get('time') or 'unknown'}; usage_scope:{r.get('usage_scope', 'background_only')}]"
         part += f"\n{body}"
         for key in ("limitations", "counterpoints", "quality_issues"):
             if r.get(key):
@@ -1399,6 +1429,7 @@ def _phase_execution(
 
     specialists_result = []
     all_tool_calls = []
+    connection_error = None
 
     # 获取计划步骤
     plan_dict = plan_result.get("plan")
@@ -1475,6 +1506,7 @@ def _phase_execution(
         # 构建上下文（含黑板）
         ctx = build_specialist_context(
             agent=agent_config,
+            query=state.original_query or state.refined_query,
             history=[],  # 专家内部自己管理历史
             conversation_id=state.conversation_id,
             rag_context=rag_context,
@@ -1500,7 +1532,7 @@ def _phase_execution(
         # 执行专家
         step_start = time.time()
         try:
-            result = _run_pipeline_specialist(run_specialist, cancel_event,
+            result = _run_pipeline_specialist(run_specialist, cancel_event, budget_state=state,
                 agent_key=agent_key,
                 query=step_query,
                 prebuilt_context=ctx,
@@ -1572,6 +1604,8 @@ def _phase_execution(
             raise
         except Exception as e:
             logger.error(f"[pipeline] 专家 {agent_name} 执行失败: {e}")
+            if isinstance(e, APIConnectionError):
+                connection_error = e
             checker.record_failure(str(e))
             # P0: 失败也写入 agent_runs
             duration_ms_for_log = int((time.time() - step_start) * 1000)
@@ -1605,6 +1639,10 @@ def _phase_execution(
 
         completed_step_ids.add(step.get("step_id"))
 
+    if cancel_event and cancel_event.is_set():
+        raise _PipelineCancelled()
+    if connection_error and not any(s.get("status") not in {"failed", "error", "timeout"} for s in specialists_result):
+        raise connection_error
     return {
         "specialists": specialists_result,
         "tool_calls": all_tool_calls,
@@ -1653,9 +1691,32 @@ def _phase_futures(tasks, executor, timeout, cancel_event):
             future.cancel()
 
 
-def _run_pipeline_specialist(func, cancel_event, **kwargs):
-    """顺序及计划降级路径复用同一共享池与预算等待。"""
+def _specialist_output_limit(state, count=1):
+    """分摊输出额度；真实输入 usage 另行入账，避免严格输入预检拒绝所有首轮。"""
+    if not state.token_budget:
+        return get_config_int('llm.max_tokens_agent', 8000)
+    budget = state.token_budget
+    remaining = max(0, budget.get('execution', 4000) - state.tokens_used_by_phase.get('execution', 0))
+    if budget.get('max_total'):
+        reserved = budget.get('review', 1500) + budget.get('synthesis', 0)
+        remaining = min(remaining, max(0, budget['max_total'] - reserved - state.tokens_used))
+    return remaining // max(1, count)
+
+
+def _exhausted_specialist(agent_key):
+    return {'agent_key': agent_key, 'agent': agent_key, 'analysis': '专家预算已用尽，未执行追加分析。',
+            'status': 'budget_exhausted', 'completion_status': 'degraded', 'tokens_used': 0,
+            'verdict': 'unknown', 'confidence': 0.0, 'asset_actions': [], 'tool_calls': []}
+
+
+def _run_pipeline_specialist(func, cancel_event, budget_state=None, **kwargs):
+    """顺序及计划降级路径复用同一共享池、输出上限与预算等待。"""
     from infra.execution_budget import SPECIALIST_EXECUTOR
+    if budget_state is not None:
+        output_limit = _specialist_output_limit(budget_state)
+        if output_limit <= 0:
+            return _exhausted_specialist(kwargs.get('agent_key', ''))
+        kwargs['max_output_tokens'] = output_limit
     for _, future in _phase_futures({0: lambda: func(**kwargs)}, SPECIALIST_EXECUTOR,
                                     get_config_int('agent.specialist_timeout', 600), cancel_event):
         return future.result()
@@ -1666,7 +1727,7 @@ def _run_followup_phase(func, args, cancel_event, config_key):
     if cancel_event and cancel_event.is_set():
         raise _PipelineCancelled()
     state = args[0] if args else None
-    if isinstance(state, PipelineState) and _followup_budget_exhausted(state):
+    if isinstance(state, PipelineState) and _followup_budget_exhausted(state, for_review=True):
         return {"status": "budget_exhausted", "confidence_adjustment": -.2,
                 "quality_issues": ["预算已用尽，未执行追加审查"], "missing_perspectives": []}
     from infra.execution_budget import SPECIALIST_EXECUTOR
@@ -1732,6 +1793,7 @@ def _execute_steps_parallel(
 
         ctx = build_specialist_context(
             agent=agent_config,
+            query=state.original_query or state.refined_query,
             history=[],
             conversation_id=state.conversation_id,
             rag_context=rag_context,
@@ -1760,11 +1822,17 @@ def _execute_steps_parallel(
     # 并行工作由共享有界池限制总在途数量。
     specialists_result = []
     all_tool_calls = []
+    connection_error = None
+
+    output_limit = _specialist_output_limit(state, len(step_ctxs))
 
     def _run_one(step, ctx, agent_key):
+        if output_limit <= 0:
+            return _exhausted_specialist(agent_key)
         step_query = step.get("query", state.refined_query)
         return run_specialist(
             agent_key=agent_key,
+            max_output_tokens=output_limit,
             query=step_query,
             prebuilt_context=ctx,
             trace_id=trace_id,
@@ -1871,6 +1939,8 @@ def _execute_steps_parallel(
                 yield {"type": EVENT_SPECIALIST_DONE, **result, "error": True}
             except Exception as e:
                 logger.error(f"[pipeline-parallel] 专家 {agent_name} 执行失败: {e}")
+                if isinstance(e, APIConnectionError):
+                    connection_error = e
                 checker.record_failure(str(e))
                 duration_ms = int((time.time() - step_start) * 1000)
                 try:
@@ -1920,6 +1990,8 @@ def _execute_steps_parallel(
         raise _PipelineCancelled()
     if specialists_result and all(s.get("status") == "timeout" for s in specialists_result):
         raise TimeoutError("全部专家执行超时")
+    if connection_error and not any(s.get("status") not in {"failed", "error", "timeout"} for s in specialists_result):
+        raise connection_error
 
     return {
         "specialists": specialists_result,
@@ -1953,6 +2025,7 @@ def _fallback_execution(
 
     results = []
     tool_calls = []
+    connection_error = None
 
     # 最多取前 3 个专家
     for spec in specialists[:3]:
@@ -1969,6 +2042,7 @@ def _fallback_execution(
 
         ctx = build_specialist_context(
             agent=spec,
+            query=state.original_query or state.refined_query,
             history=[],
             conversation_id=state.conversation_id,
             rag_context=rag_context,
@@ -1990,7 +2064,7 @@ def _fallback_execution(
 
         step_start = time.time()
         try:
-            result = _run_pipeline_specialist(run_specialist, cancel_event,
+            result = _run_pipeline_specialist(run_specialist, cancel_event, budget_state=state,
                 agent_key=agent_key, query=query,
                 prebuilt_context=ctx, trace_id=trace_id,
                 from_pipeline=True,
@@ -1999,6 +2073,7 @@ def _fallback_execution(
                 message_id=state.message_id,
                 blackboard=blackboard,
             )
+            state.record_phase_tokens('execution', result.get('tokens_used', 0))
             results.append(result)
             tool_calls.extend(result.get("tool_calls", []))
 
@@ -2048,6 +2123,8 @@ def _fallback_execution(
             raise
         except Exception as e:
             logger.error(f"[pipeline] 降级执行 {agent_name} 失败: {e}")
+            if isinstance(e, APIConnectionError):
+                connection_error = e
             duration_ms_for_log = int((time.time() - step_start) * 1000)
             try:
                 create_agent_run(
@@ -2075,6 +2152,10 @@ def _fallback_execution(
                 "duration_ms": duration_ms,
             }
 
+    if cancel_event and cancel_event.is_set():
+        raise _PipelineCancelled()
+    if connection_error and not any(s.get("status") not in {"failed", "error", "timeout"} for s in results):
+        raise connection_error
     return {"specialists": results, "tool_calls": tool_calls}
 
 
@@ -2088,11 +2169,62 @@ def _find_agent_config(agent_key: str, specialists: list) -> Optional[dict]:
 
 # ── Phase 4: 综合 ──────────────────────────
 
-def _followup_budget_exhausted(state: PipelineState) -> bool:
+class _ReviewBudgetExhausted(RuntimeError):
+    """模型审查缺少额度；与完成审查后的无问题结果严格区分。"""
+
+
+def _review_tokens_remaining(state):
+    budget = state.token_budget
+    used = sum(state.tokens_used_by_phase.get(phase, 0) for phase in ('reflection', 'cross_review', 'debate'))
+    remaining = max(0, budget.get('review', 1500) - used)
+    if budget.get('max_total'):
+        remaining = min(remaining, max(0, budget['max_total'] - budget.get('synthesis', 0) - state.tokens_used))
+    return remaining
+
+
+def _call_review_model(state, phase, call, **kwargs):
+    """逐调用记完整 usage；输出有硬上限，总输入为软预算，超额禁止继续。
+
+    供应商 tokenization 与本地估算不同，无法承诺网络总 usage 不超额。
+    已完成请求仍必须入账；超出审查或综合保留额度时返回未完成状态。
+    """
+    remaining = _review_tokens_remaining(state)
+    if remaining <= 0:
+        raise _ReviewBudgetExhausted('模型审查预算已耗尽，确定性事实检查仍会运行')
+    kwargs['max_tokens'] = min(int(kwargs.get('max_tokens') or remaining), remaining)
+    response = call(**kwargs)
+    usage = getattr(response, 'usage', None)
+    def field(key):
+        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+    tokens = field('total_tokens')
+    if tokens is None:
+        prompt, completion = field('prompt_tokens'), field('completion_tokens')
+        if prompt is not None and completion is not None:
+            tokens = prompt + completion
+    if not tokens:
+        texts = [str(kwargs.get('messages') or '')]
+        for choice in getattr(response, 'choices', []) or []:
+            message = getattr(choice, 'message', None)
+            texts.extend(str(getattr(message, key, '') or '') for key in ('content', 'reasoning_content'))
+        tokens = max(1, (sum(map(len, texts)) + 2) // 3)
+    state.record_phase_tokens(phase, tokens)
+    review_used = sum(state.tokens_used_by_phase.get(p, 0) for p in ('reflection', 'cross_review', 'debate'))
+    total_limit = state.token_budget.get('max_total')
+    if (review_used > state.token_budget.get('review', 1500)
+            or (total_limit and state.tokens_used > total_limit - state.token_budget.get('synthesis', 0))):
+        raise _ReviewBudgetExhausted('实际审查 usage 超出剩余额度，停止追加模型调用')
+    return response
+
+
+def _followup_budget_exhausted(state: PipelineState, *, for_review=False) -> bool:
     total = state.token_budget.get("max_total")
     execution = state.token_budget.get("execution")
-    return bool((state.get_phase_result("execution_status") or {}).get("status") == "timeout" or
-                (total and state.tokens_used >= total) or
+    timed_out = (state.get_phase_result("execution_status") or {}).get("status") == "timeout"
+    if for_review:
+        # 专家额度耗尽只禁止追加专家；独立审查额度仍需留下综合空间。
+        return bool(timed_out or _review_tokens_remaining(state) <= 0)
+    return bool(timed_out or (total and state.tokens_used >= total) or
                 (execution and state.tokens_used_by_phase.get("execution", 0) >= execution))
 
 
@@ -2101,6 +2233,18 @@ def _validate_final_facts(state, answer, completion_status, confidence, tool_cal
     from services.conversation.quality_contract import calibrate_confidence_text, action_constraint_issues
     snapshot = (state.get_phase_result("info_gather") or {}).get("portfolio_snapshot")
     issues = check_final_facts(answer, snapshot, tool_calls) + action_constraint_issues(actions, tool_calls)
+    from agent.core.answer_policy import has_explicit_action_intent
+    if not has_explicit_action_intent(state.original_query or state.refined_query):
+        import re
+        actionable = any(isinstance(a, dict) and str(a.get("type") or a.get("action") or "").upper()
+                         in {"BUY", "ADD", "SELL", "REDUCE", "REDUCE_CONCENTRATION"} for a in actions or [])
+        trade_plan = any(re.search(r"建议|每月|每期|分批|立即|执行", s)
+                         and re.search(r"买入|卖出|加仓|减仓|补仓|定投", s)
+                         and re.search(r"\d+(?:\.\d+)?\s*(?:元|万元|%)", s)
+                         and not re.search(r"不建议|不要|不能|不应|未建议|历史|旧报告|假如|如果", s)
+                         for s in re.split(r"[。；\n]", answer or ""))
+        if actionable or trade_plan:
+            issues.append("unrequested_trade_plan")
     review_status = (state.get_phase_result("cross_review_status") or {}).get("status")
     if review_status in {"failed", "budget_exhausted", "degraded"}:
         issues.append("cross_review_" + review_status)
@@ -2115,6 +2259,12 @@ def _validate_final_facts(state, answer, completion_status, confidence, tool_cal
                   "kyc_single_limit_value_mismatch": "单基金上限与用户画像不一致",
                   "kyc_single_limit_denominator_mismatch": "单基金上限的资产口径不一致",
                   "recent_30d_trade_count_mismatch": "近30天交易笔数与原始记录不一致",
+                  "unsupported_market_causation": "资金或基本面归因超出已有证据",
+                  "incomparable_return_windows": "不同时间窗口的跌幅不能直接证明企稳",
+                  "scenario_is_not_maximum_loss": "情景损失被误写为最大损失",
+                  "market_quote_falsely_missing": "报告称点位缺失，但原始工具已有带时间的点位",
+                  "unrequested_trade_plan": "用户未请求交易方案，报告却给出了操作金额",
+                  "conflicting_asset_actions": "同一标的存在未消解的买卖方向冲突",
                   "asset_action_limit_violation": "操作金额超出用户配置上限、可用现金或持有金额"}
         answer += "\n\n质量校验未通过，以上分析仅供复核，暂不生成操作候选。待复核：" + "、".join(labels.get(i, "追加审查未完成") for i in issues)
         answer = calibrate_confidence_text(answer, confidence)
@@ -2214,6 +2364,7 @@ def _phase_synthesis(
             plan=plan,
             portfolio_context=(state.get_phase_result("info_gather") or {}).get("portfolio", ""),
             tool_calls=tool_calls,
+            state=state,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -2498,7 +2649,7 @@ def _maybe_rerun_specialist(
         rerun_context = "\n\n".join(str(part) for part in (agent_cfg.get("system_prompt", ""), info.get("portfolio", ""), info.get("rag_context", ""),
             json.dumps({"portfolio_snapshot": info.get("portfolio_snapshot"), "valuations": info.get("valuations", {})}, ensure_ascii=False)) if part)
         _rerun_model = _get_model_for_agent(agent_key) if _is_cost_routing_enabled() else _ORCH_MODEL
-        result = _run_pipeline_specialist(run_specialist, cancel_event,
+        result = _run_pipeline_specialist(run_specialist, cancel_event, budget_state=state,
             agent_key=agent_key,
             query=enhanced_query,
             trace_id=f"{trace_id}#rerun",
@@ -2508,6 +2659,8 @@ def _maybe_rerun_specialist(
             model=_rerun_model,
             blackboard=blackboard,
         )
+        if result:
+            state.record_phase_tokens('execution', result.get('tokens_used', 0))
         if result and validate_specialist_output(result)["valid"]:
             # 更新 blackboard 中的 entry
             if blackboard:
@@ -2564,6 +2717,7 @@ def _synthesize_multiple_specialists(
     plan: dict = None,
     portfolio_context: str = "",
     tool_calls: list = None,
+    state: PipelineState = None,
 ) -> tuple:
     """调用 LLM 综合多个专家的分析。
 
@@ -2575,6 +2729,8 @@ def _synthesize_multiple_specialists(
     from services.llm_service import _call_llm, MODEL
 
     # 构建综合 prompt
+    from agent.core.answer_policy import build_answer_policy, has_explicit_action_intent
+    action_requested = has_explicit_action_intent(query)
     parts = [f"## 用户问题\n{query}\n"]
     parts.append("## 各专家分析")
 
@@ -2691,7 +2847,7 @@ def _synthesize_multiple_specialists(
     except Exception:
         arb_enabled = True
 
-    if arb_enabled and len(specialists) >= 2:
+    if action_requested and arb_enabled and len(specialists) >= 2:
         try:
             from agent.core.arbitration import arbitrate_results
             arbitration_summary = arbitrate_results(
@@ -2746,7 +2902,9 @@ def _synthesize_multiple_specialists(
     except Exception:
         deep_synthesis = True
 
-    if deep_synthesis:
+    if not action_requested:
+        parts.append(build_answer_policy(query))
+    elif deep_synthesis:
         parts.append(
             "\n## 任务\n"
             "基于以上专家分析，生成综合回答，必须按以下 5 段结构组织，每段缺一不可：\n\n"
@@ -2794,6 +2952,8 @@ def _synthesize_multiple_specialists(
             "7. 使用 Markdown 格式，禁止 emoji 标题\n"
         )
 
+    if action_requested:
+        parts.append(build_answer_policy(query))
     prompt = "\n".join(parts)
 
     from services.llm.text_completion import complete_text_analysis_sync
@@ -2806,6 +2966,8 @@ def _synthesize_multiple_specialists(
         temperature=0.3,
         max_tokens=3000,
     )
+    if state is not None:
+        state.record_phase_tokens("synthesis", _tokens)
     if completion_status == "failed":
         raise RuntimeError("综合回答为空")
 
@@ -2986,7 +3148,7 @@ def _phase_debate(
         debate_model = MODEL
         if _is_cost_routing_enabled():
             debate_model = _get_model_for_agent("debate_arbitrator")
-        response = _call_llm(
+        response = _call_review_model(state, 'debate', _call_llm,
             caller="debate_argument",
             trace_id=trace_id,
             model=debate_model,
@@ -3002,6 +3164,8 @@ def _phase_debate(
             data = _json.loads(json_match.group(0))
             bull_arg = data.get("bull_argument", "")
             bear_arg = data.get("bear_argument", "")
+    except _ReviewBudgetExhausted as exc:
+        return {'status': 'budget_exhausted', 'error': str(exc), 'arbitration': None}
     except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
         raise
     except Exception as e:
@@ -3046,7 +3210,7 @@ def _phase_debate(
         arb_model = MODEL
         if _is_cost_routing_enabled():
             arb_model = _get_model_for_agent("debate_arbitrator")
-        response = _call_llm(
+        response = _call_review_model(state, 'debate', _call_llm,
             caller="debate_arbitrator",
             trace_id=trace_id,
             model=arb_model,
@@ -3060,6 +3224,8 @@ def _phase_debate(
         json_match = _re.search(r'\{.*\}', content, _re.DOTALL)
         if json_match:
             arbitration = _json.loads(json_match.group(0))
+    except _ReviewBudgetExhausted as exc:
+        return {'status': 'budget_exhausted', 'error': str(exc), 'arbitration': None}
     except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
         raise
     except Exception as e:
@@ -3159,7 +3325,7 @@ def _phase_reflection(
     last_error = "invalid_json"
     for attempt in range(2):
         try:
-            response = _call_llm(
+            response = _call_review_model(state, 'reflection', _call_llm,
                 caller="reflection", trace_id=trace_id, model=MODEL,
                 messages=[{"role": "user", "content": prompt + (
                     "\n上次输出无效，请压缩为简短、完整的 JSON 对象。" if attempt else "")}],
@@ -3175,6 +3341,8 @@ def _phase_reflection(
                 from services.conversation.quality_contract import reconcile_reflection_evidence
                 return reconcile_reflection_evidence(result, execution_result.get("tool_calls", []))
             last_error = "invalid_json"
+        except _ReviewBudgetExhausted as exc:
+            return {**_failed_reflection(str(exc)), 'status': 'budget_exhausted'}
         except (ExecutionCancelled, _PipelineCancelled, TimeoutError):
             raise
         except Exception as exc:

@@ -732,7 +732,7 @@ def _build_dca_rules() -> str:
 
 
 def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: list, blackboard=None,
-                                 cross_review_performed: bool = False, plan=None) -> str:
+                                 cross_review_performed: bool = False, plan=None, query=None) -> str:
     """构建最终综合提示，强制 LLM 只引用实际执行了的专家。
 
     Args:
@@ -740,6 +740,13 @@ def _build_final_synthesis_prompt(specialist_results: list, routed_specialists: 
                     关键数据汇总、冲突检测、风险否决约束、持仓影响汇总。
         cross_review_performed: 是否实际执行了交叉评审。用于防止 LLM 虚构交叉评审过程。
     """
+    from agent.core.answer_policy import build_answer_policy, has_explicit_action_intent
+    if query is not None and not has_explicit_action_intent(query):
+        from services.conversation.quality_contract import compact_tool_evidence
+        context = {"executed_specialists": [sr.get("agent_key") for sr in specialist_results],
+                   "cross_review_performed": cross_review_performed,
+                   "evidence": compact_tool_evidence([call for sr in specialist_results for call in sr.get("tool_calls", [])])}
+        return build_answer_policy(query) + "\n\n" + json.dumps(context, ensure_ascii=False)
     executed_keys = {sr.get("agent_key", "") for sr in specialist_results}
     executed_names = {sr.get("agent", "") for sr in specialist_results}
     routed_but_not_executed = [s for s in routed_specialists if s not in executed_keys]
@@ -4563,7 +4570,7 @@ def orchestrate(query: str, history: list, rag_context: str = "", cancel_event: 
         llm_messages.append({
             "role": "user",
             "content": _build_final_synthesis_prompt(
-                specialist_results, specialists, cross_review_performed=bool(cross_review_results), plan=active_plan),
+                specialist_results, specialists, cross_review_performed=bool(cross_review_results), plan=active_plan, query=query),
         })
         response = _call_llm(
             caller="orchestrator",
@@ -5666,7 +5673,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             "role": "user",
             "content": _build_final_synthesis_prompt(
                 specialist_results, specialists, blackboard=blackboard,
-                cross_review_performed=cross_review_performed, plan=plan),
+                cross_review_performed=cross_review_performed, plan=plan, query=query),
         })
         final_answer = ""
         try:

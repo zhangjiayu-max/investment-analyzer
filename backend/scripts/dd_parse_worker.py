@@ -78,6 +78,10 @@ async def run_dd_parse(task_id: int, image_path: str, parse_type: str = "dd"):
 
         logger.info(f"DD/六亿 解析任务 {task_id} 完成: {image_path}")
 
+    except asyncio.CancelledError:
+        # executor 中的同步请求可能尚未退出，但取消后不能再保存为成功。
+        update_dd_parse_task(task_id, status="error", error_msg="服务重启或任务取消，图片识别已中断，请重新提交")
+        raise
     except Exception as e:
         logger.error(f"DD/六亿 解析任务 {task_id} 失败: {e}")
         update_dd_parse_task(task_id, status="error", error_msg=str(e))

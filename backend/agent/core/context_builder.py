@@ -25,6 +25,7 @@ import logging
 from typing import Optional, Any
 
 from db.config import get_config_int, get_config_bool
+from agent.core.answer_policy import has_attribution_intent, has_explicit_action_intent
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,6 @@ def build_layer0_system(agent: dict) -> str:
             "1. 只使用上下文中明确提供的数据，禁止编造\n"
             "2. 基金代码必须通过工具验证\n"
             "3. 输出 Markdown 格式，禁止 emoji 标题\n"
-            "4. 结尾包含具体操作建议\n"
         )
 
     return "\n".join(parts)
@@ -321,6 +321,7 @@ def build_specialist_context(
     complexity: str = "medium",
     max_total_tokens: int = 8000,
     rag_low_quality: bool = False,
+    query: str = "",
 ) -> str:
     """组装专家可见的完整上下文（Layer 0+1+2+3+5+4）。
 
@@ -337,11 +338,16 @@ def build_specialist_context(
         tool_results: 该专家的工具调用结果（私有）
         complexity: 复杂度
         max_total_tokens: 总 token 预算
+        query: 当前用户原始问题；缺省时从历史中最近的用户消息识别意图
 
     Returns:
         组装好的上下文文本
     """
     parts = []
+    if not query:
+        query = next((msg.get("content", "") for msg in reversed(history or [])
+                      if msg.get("role") == "user"), "")
+    attribution_only = has_attribution_intent(query) and not has_explicit_action_intent(query)
 
     # Layer 0: System（~500 tokens）
     layer0 = build_layer0_system(agent)
@@ -349,7 +355,7 @@ def build_specialist_context(
         parts.append(layer0)
 
     # Layer 1: 用户画像（~200 tokens）
-    layer1 = build_layer1_user_profile(user_id)
+    layer1 = "" if attribution_only else build_layer1_user_profile(user_id)
     if layer1:
         parts.append(layer1)
 
@@ -368,7 +374,7 @@ def build_specialist_context(
     # Layer 3: 共享工作上下文（~1500 tokens）
     layer3 = build_layer3_shared_work(
         rag_context=rag_context,
-        portfolio_summary=portfolio_summary,
+        portfolio_summary="" if attribution_only else portfolio_summary,
         valuation_data=valuation_data,
         market_context=market_context,
         max_tokens=1500,

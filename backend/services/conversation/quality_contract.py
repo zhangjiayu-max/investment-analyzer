@@ -5,6 +5,7 @@ from copy import deepcopy
 import json
 import math
 import re
+import hashlib
 
 
 def tool_evidence(tool_calls: list[dict]) -> list[dict]:
@@ -23,7 +24,11 @@ def tool_evidence(tool_calls: list[dict]) -> list[dict]:
                 continue
         if not isinstance(value, (dict, list)) or not value or (isinstance(value, dict) and value.get("error")):
             continue
-        evidence.append({"evidence_id": call.get("evidence_id") or f"tool:{i}",
+        identity = json.dumps([call.get("name") or call.get("tool"),
+                               call.get("arguments", call.get("args", {})), value],
+                              sort_keys=True, ensure_ascii=False, default=str)
+        stable_id = "tool:" + hashlib.sha256(identity.encode()).hexdigest()[:20]
+        evidence.append({"evidence_id": call.get("evidence_id") or stable_id,
                          "tool": call.get("name") or call.get("tool"), "data": value})
     return evidence
 
@@ -41,7 +46,12 @@ def compact_tool_evidence(tool_calls: list[dict]) -> list[dict]:
         if isinstance(value, str) and len(value) > 1000:
             return {"preview": value[:1000], "preview_truncated": True}
         return value
-    return [{**entry, "data": compact(entry["data"])} for entry in tool_evidence(tool_calls)]
+    unique = {}
+    for entry in tool_evidence(tool_calls):
+        # 以工具+原始数据去重；不得把相同指标但数值/日期不同的证据合并。
+        key = json.dumps([entry["tool"], entry["data"]], sort_keys=True, ensure_ascii=False, default=str)
+        unique.setdefault(key, {**entry, "data": compact(entry["data"])})
+    return list(unique.values())
 
 
 def reconcile_reflection_evidence(reflection: dict, tool_calls: list[dict]) -> dict:
@@ -175,6 +185,7 @@ def action_constraint_issues(actions, tool_calls):
     """让报告验收和候选共用交易金额边界；未知金额不推断可执行规模。"""
     evidence = tool_evidence(tool_calls)
     buys = {}
+    directions = {}
     for action in actions or []:
         if not isinstance(action, dict) or action.get("status", "current") != "current":
             continue
@@ -186,6 +197,10 @@ def action_constraint_issues(actions, tool_calls):
         code = str(action.get("target_code") or action.get("target") or "")
         if not re.fullmatch(r"\d{6}", code):
             continue
+        side = "buy" if direction in {"BUY", "ADD"} else "sell"
+        directions.setdefault(code, set()).add(side)
+        if len(directions[code]) > 1:
+            return ["conflicting_asset_actions"]
         try:
             amount = action.get("amount", action.get("suggested_amount"))
             amount = None if amount is None else float(amount)

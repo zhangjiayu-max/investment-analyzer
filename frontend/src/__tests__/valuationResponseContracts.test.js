@@ -21,10 +21,13 @@ beforeEach(() => {
   showToast.mockClear()
   http.defaults.adapter = async config => {
     requestUrls.push(config.url)
+    if (config.url === '/proxy-image') {
+      return { data: new Blob(['image'], { type: 'image/jpeg' }), status: 200, statusText: 'OK', headers: {}, config }
+    }
     let data = { records: [], indexes: [], dates: [], images: [], history: [], latest: null, total: 0 }
     let code = 0
     let message = 'ok'
-    if (config.url.includes('/valuation/parse')) {
+    if (config.method === 'post' && config.url.includes('/valuation/parse')) {
       const body = JSON.parse(config.data)
       if (failedPaths.has(body.path)) {
         code = 400
@@ -38,9 +41,10 @@ beforeEach(() => {
         data = { id: 1, type: 'valuation', index_code: '000300' }
       }
     }
-    if (config.url.includes('/valuation/parse-dd-async')) data = { task_id: 7, status: 'pending' }
+    if (config.url.includes('/valuation/parse-dd-async') || config.url.includes('/valuation/parse-liuyi-async')) data = { task_id: 7, status: 'pending' }
     if (config.url.includes('/valuation/parse-dd-task/7')) data = { id: 7, status: 'done', result_json: { count: 1, data: [] } }
     if (config.url.includes('/dd-images/upload')) data = { ok: true, path: '2026-10-18/uploaded.png' }
+    if (config.url.includes('/liuyi-images/upload')) data = { ok: true, path: '2026-10-20/pasted.png' }
     if (config.url.includes('/valuation/online-query/')) data = { data: { source: 'akshare', percentile: 25 } }
     return { data: { code, message, data }, status: 200, statusText: 'OK', headers: {}, config }
   }
@@ -97,4 +101,80 @@ it('starts asynchronous parsing after uploading a screw valuation image', async 
 
   expect(requestUrls).toContain('/dd-images/upload')
   expect(requestUrls).toContain('/valuation/parse-dd-async')
+})
+
+it('accepts a clipboard image exposed only in the file list', async () => {
+  const state = render(ImageGallery)
+  await flushPromises()
+  state.activeTab = 'liuyi'
+  const preventDefault = vi.fn()
+  const file = new File(['image'], 'long-table.png', { type: 'image/png' })
+  await state.handlePaste({ clipboardData: { items: [], files: [file] }, preventDefault })
+  expect(preventDefault).toHaveBeenCalled()
+  expect(requestUrls.filter(url => url === '/liuyi-images/upload')).toHaveLength(1)
+})
+
+it('keeps a successfully parsed liuyi card and shows the result', async () => {
+  const wrapper = shallowMount(ImageGallery)
+  wrappers.push(wrapper)
+  const state = wrapper.vm.$.setupState
+  await flushPromises()
+  state.activeTab = 'liuyi'
+  await flushPromises()
+  state.liuyiImages = [{ path: '2026-10-20/table.png', name: '长表.png', date: '2026-10-20' }]
+  state.confirmLiuyiParseImage(state.liuyiImages[0])
+  await state.confirm.onConfirm()
+  await flushPromises()
+  expect(state.liuyiImages).toHaveLength(1)
+  expect(state.liuyiImages[0].parsed).toBe(true)
+  expect(wrapper.text()).toContain('识别完成')
+  expect(wrapper.text()).toContain('1 个指数')
+})
+
+it('uploads WeChat HTML clipboard images through the image proxy', async () => {
+  const state = render(ImageGallery)
+  await flushPromises()
+  state.activeTab = 'liuyi'
+  const preventDefault = vi.fn()
+  await state.handlePaste({
+    clipboardData: {
+      items: [], files: [],
+      getData: type => type === 'text/html' ? '<img src="https://mmbiz.qpic.cn/example/640?wx_fmt=jpeg">' : '',
+    },
+    preventDefault,
+  })
+  expect(preventDefault).toHaveBeenCalled()
+  expect(requestUrls).toContain('/proxy-image')
+  expect(requestUrls.filter(url => url === '/liuyi-images/upload')).toHaveLength(1)
+})
+
+it('zooms valuation image previews with bounded controls and resets pan on reopen', async () => {
+  const state = render(ImageGallery)
+  await flushPromises()
+
+  state.openPreview('/image.jpg')
+  state.zoomPreview(1)
+  expect(state.previewScale).toBe(1.25)
+  state.zoomPreview(-1)
+  expect(state.previewScale).toBe(1)
+  state.resetPreviewZoom()
+  state.zoomPreview(20)
+  expect(state.previewScale).toBe(5)
+  state.zoomPreview(-20)
+  expect(state.previewScale).toBe(1)
+
+  const wheelEvent = { deltaY: -1, clientX: 512, clientY: 384, preventDefault: vi.fn() }
+  state.handlePreviewWheel(wheelEvent)
+  expect(wheelEvent.preventDefault).toHaveBeenCalled()
+  expect(state.previewScale).toBe(1.25)
+
+  state.handlePreviewPointerDown({ button: 0, clientX: 10, clientY: 20, preventDefault: vi.fn() })
+  state.handlePreviewPointerMove({ clientX: 30, clientY: 50 })
+  expect(state.previewOffset).toEqual({ x: 20, y: 30 })
+  state.handlePreviewPointerUp()
+
+  state.closePreview()
+  state.openPreview('/next-image.jpg')
+  expect(state.previewScale).toBe(1)
+  expect(state.previewOffset).toEqual({ x: 0, y: 0 })
 })

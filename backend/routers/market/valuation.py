@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 from models.valuations import ParseAndSaveRequest, ParseBatchRequest, ParseDDRequest, ParseDDBatchRequest
 from services.valuation_parser import parse_single_valuation
 from services.valuation.image_paths import resolve_valuation_image, valuation_image_location
+from infra.background_tasks import create_background_task
 
 router = APIRouter(prefix="/api/valuation", tags=["valuation"])
 
@@ -106,7 +107,7 @@ async def parse_dd_image_async(req: ParseDDRequest):
 
     # 后台启动解析
     from scripts.dd_parse_worker import run_dd_parse
-    asyncio.create_task(run_dd_parse(task_id, str_path, "dd"))
+    create_background_task(run_dd_parse(task_id, str_path, "dd"))
 
     return {"task_id": task_id, "status": "pending"}
 
@@ -144,7 +145,7 @@ async def parse_dd_batch_async(req: ParseDDBatchRequest):
             continue
 
         task_id = create_dd_parse_task(str_path, name, parse_type="dd")
-        asyncio.create_task(run_dd_parse(task_id, str_path, "dd"))
+        create_background_task(run_dd_parse(task_id, str_path, "dd"))
         tasks.append({"task_id": task_id, "image_path": str_path, "status": "pending"})
 
     return {"tasks": tasks}
@@ -188,7 +189,7 @@ async def parse_liuyi_image_async(req: ParseDDRequest):
     task_id = create_dd_parse_task(str_path, Path(req.path).name, parse_type="liuyi")
 
     from scripts.dd_parse_worker import run_dd_parse
-    asyncio.create_task(run_dd_parse(task_id, str_path, "liuyi"))
+    create_background_task(run_dd_parse(task_id, str_path, "liuyi"))
 
     return {"task_id": task_id, "status": "pending"}
 
@@ -215,7 +216,7 @@ async def parse_liuyi_batch_async(req: ParseDDBatchRequest):
             continue
 
         task_id = create_dd_parse_task(str_path, name, parse_type="liuyi")
-        asyncio.create_task(run_dd_parse(task_id, str_path, "liuyi"))
+        create_background_task(run_dd_parse(task_id, str_path, "liuyi"))
         tasks.append({"task_id": task_id, "image_path": str_path, "status": "pending"})
 
     return {"tasks": tasks}

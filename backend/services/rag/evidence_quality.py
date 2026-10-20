@@ -5,6 +5,7 @@
 """
 import json
 import re
+from datetime import date
 
 KNOWLEDGE_TYPES = {"book", "note", "concept", "strategy", "bond", "knowledge"}
 _RETURN = re.compile(r"(下跌|下降|亏损|上涨|上升|增长)\s*([+-]?\d+(?:\.\d+)?)\s*%")
@@ -103,6 +104,29 @@ def hydrate_evidence(results: list[dict], get_conn) -> list[dict]:
                 item["retrieval_source"] = item.pop("source")
             item["limitations"] = _as_list(item.get("limitations"))
             item.setdefault("content_origin", "retrieval_index")
+            if ct == "author_article":
+                if conn is None:
+                    conn = get_conn()
+                article = conn.execute("SELECT title,content_text,publish_time,url FROM author_articles WHERE id=?", (ref,)).fetchone()
+                published = None
+                if article is not None:
+                    item.update(body=article["content_text"] or "", title=article["title"] or item.get("title", ""),
+                                source_url=article["url"], content_origin="source_record")
+                    try:
+                        published = date.fromisoformat(str(article["publish_time"])[:10])
+                    except (TypeError, ValueError):
+                        pass
+                item.update(time=published.isoformat() if published else None,
+                            as_of_date=published.isoformat() if published else None,
+                            date_verified=published is not None and published <= date.today())
+                # 入库时间/索引时间不是事件发生或文章发布日期。
+                age = (date.today() - published).days if published else None
+                item["usage_scope"] = "current_event_candidate" if age is not None and 0 <= age <= 30 else "background_only"
+                if item["usage_scope"] == "background_only":
+                    reason = "publication_date_unknown" if published is None else "outside_current_event_window"
+                    if reason not in item["limitations"]:
+                        item["limitations"].append(reason)
+                continue
             if ct not in KNOWLEDGE_TYPES:
                 continue
             if conn is None:

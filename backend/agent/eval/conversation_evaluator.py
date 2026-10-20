@@ -7,6 +7,7 @@
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -98,6 +99,7 @@ class ConversationQualityEvaluator:
                 metadata = json.loads(assistant_msg["metadata"])
             except Exception:
                 pass
+        metadata = self._evaluation_context(metadata, assistant_msg, agent_runs)
 
         # 评估各维度
         execution_dim = self._evaluate_execution(metadata, agent_runs)
@@ -117,9 +119,17 @@ class ConversationQualityEvaluator:
 
         # 计算总分
         auto_score = sum(d.score * d.weight for d in dimensions)
+        # 结构完整、专家成功不能覆盖交付失败或事实尚未核验。
+        statuses = {metadata.get("execution_status"), metadata.get("completion_status"), metadata.get("quality_status")}
+        accuracy_status = accuracy_dim.metrics.get("verification_status", "unverified")
+        score_cap = (0 if "cancelled" in statuses else 49 if "failed" in statuses or accuracy_status == "failed"
+                     else 59 if "degraded" in statuses else 69 if accuracy_status != "verified" else 100)
+        auto_score = min(auto_score, score_cap)
 
         # 生成改进建议
         suggestions = self._generate_suggestions(dimensions, metadata)
+        if score_cap < 100:
+            suggestions.append(f"整体评分上限{score_cap}分：交付状态或事实核验门槛未通过；规则评分仅作质量诊断。")
 
         result = ConversationEvaluation(
             conversation_id=conversation_id,
@@ -132,7 +142,12 @@ class ConversationQualityEvaluator:
             metadata={
                 "complexity": metadata.get("complexity", "unknown"),
                 "specialist_count": len(metadata.get("specialist_results", [])),
-                "duration_ms": metadata.get("duration_ms", 0),
+                "duration_ms": metadata.get("duration_ms"),
+                "duration_source": metadata.get("duration_source", "unknown"),
+                "verification_status": accuracy_status,
+                "score_cap": score_cap,
+                "execution_status": metadata.get("execution_status", "unknown"),
+                "completion_status": metadata.get("completion_status", "unknown"),
                 # 兼容两种字段：orchestrator 写入 cross_review(bool)，路由层落库为 cross_review_results(list)
                 "has_cross_review": bool(metadata.get("cross_review")) or bool(metadata.get("cross_review_results")),
                 "has_arbitration": bool(metadata.get("arbitration")),
@@ -169,6 +184,68 @@ class ConversationQualityEvaluator:
 
         return result
 
+    def _evaluation_context(self, metadata: dict, message: dict, runs: list) -> dict:
+        """仅补齐本消息的原问题、落库证据和实际trace耗时，不改写数据库。"""
+        from datetime import datetime
+        from db._conn import _get_conn
+        from db.agents import deserialize_agent_run_payload
+
+        metadata = dict(metadata)
+        specialists = list(metadata.get("specialist_results") or [])
+        calls = list(metadata.get("tool_calls") or [])
+        for run in runs:
+            tools, evidence = deserialize_agent_run_payload(run.get("tool_calls"))
+            calls.extend(tools)
+            if not metadata.get("specialist_results") and run.get("run_phase", "primary") == "primary":
+                specialists.append({"agent_key": run.get("agent_key"), "analysis": run.get("result", ""),
+                                    "evidence": evidence, "tool_calls": tools})
+        # 同源副本只保留一次，避免重复事实/工具成功率被抬高。
+        metadata["tool_calls"] = list({json.dumps(c, sort_keys=True, ensure_ascii=False, default=str): c
+                                       for c in calls if isinstance(c, dict)}.values())
+        metadata["specialist_results"] = specialists
+        value = metadata.get("duration_ms")
+        known_duration = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+        metadata["duration_source"] = "metadata" if known_duration else "unknown"
+        if not known_duration:
+            metadata["duration_ms"] = None
+        conn = _get_conn()
+        try:
+            query = conn.execute("SELECT content FROM messages WHERE conversation_id=? AND id<? AND role='user' ORDER BY id DESC LIMIT 1",
+                                 (message["conversation_id"], message["id"])).fetchone()
+            if query:
+                metadata.setdefault("original_query", query["content"])
+            if not known_duration:
+                trace = metadata.get("trace_id")
+                row = conn.execute("SELECT total_ms,started_at,finished_at FROM execution_traces WHERE trace_id=? AND conversation_id=?",
+                                   (trace, message["conversation_id"])).fetchone() if trace else None
+                if row:
+                    recorded = row["total_ms"]
+                    if not isinstance(recorded, (int, float)) or recorded <= 0:
+                        try:
+                            recorded = (datetime.fromisoformat(row["finished_at"]) - datetime.fromisoformat(row["started_at"])).total_seconds() * 1000
+                        except (ValueError, TypeError):
+                            recorded = None
+                    if recorded and recorded > 0:
+                        metadata.update(duration_ms=recorded, duration_source="execution_traces")
+                if metadata["duration_ms"] is None:
+                    rows = conn.execute("SELECT started_at,finished_at FROM stream_channels WHERE conversation_id=? AND message_id=? "
+                                        "AND (? IS NULL OR trace_id=?)",
+                                        (message["conversation_id"], message["id"], trace, trace)).fetchall()
+                    intervals = []
+                    for channel in rows:
+                        try:
+                            start, end = datetime.fromisoformat(channel["started_at"]), datetime.fromisoformat(channel["finished_at"])
+                            if end > start:
+                                intervals.append((start, end))
+                        except (ValueError, TypeError):
+                            continue
+                    if intervals:
+                        duration = (max(end for _, end in intervals) - min(start for start, _ in intervals)).total_seconds() * 1000
+                        metadata.update(duration_ms=duration, duration_source="stream_channels")
+        finally:
+            conn.close()
+        return metadata
+
     def _evaluate_execution(self, metadata: dict, agent_runs: list) -> EvalDimension:
         """评估执行效率"""
         metrics = {}
@@ -176,8 +253,9 @@ class ConversationQualityEvaluator:
         score = 100.0
 
         # 1. 总耗时评估
-        duration_ms = metadata.get("duration_ms", 0)
-        duration_s = duration_ms / 1000
+        duration_ms = metadata.get("duration_ms")
+        duration_s = (duration_ms / 1000 if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool)
+                      and math.isfinite(duration_ms) and duration_ms > 0 else None)
         complexity = metadata.get("complexity", "medium")
 
         # 根据复杂度设定合理的耗时阈值
@@ -188,7 +266,9 @@ class ConversationQualityEvaluator:
         }
         thresholds = time_thresholds.get(complexity, time_thresholds["medium"])
 
-        if duration_s <= thresholds["good"]:
+        if duration_s is None:
+            time_score = 50
+        elif duration_s <= thresholds["good"]:
             time_score = 100
         elif duration_s <= thresholds["ok"]:
             time_score = 80
@@ -199,7 +279,10 @@ class ConversationQualityEvaluator:
 
         metrics["duration_score"] = time_score
         metrics["duration_seconds"] = duration_s
-        details.append(f"耗时 {duration_s:.0f}s（{complexity}复杂度阈值: 良好<{thresholds['good']}s）")
+        metrics["duration_status"] = "unknown" if duration_s is None else "recorded"
+        metrics["duration_source"] = metadata.get("duration_source", "metadata" if duration_s is not None else "unknown")
+        details.append("耗时未知，未计为0ms或快速响应" if duration_s is None else
+                       f"耗时 {duration_s:.0f}s（{complexity}复杂度阈值: 良好<{thresholds['good']}s）")
 
         # 2. 重复调用检测
         duplicate_count = self._detect_duplicate_calls(agent_runs)
@@ -574,9 +657,8 @@ class ConversationQualityEvaluator:
             if not tc_str:
                 continue
             try:
-                calls = json.loads(tc_str) if isinstance(tc_str, str) else tc_str
-                if not isinstance(calls, list):
-                    continue
+                from db.agents import deserialize_agent_run_payload
+                calls, _ = deserialize_agent_run_payload(tc_str)
                 for c in calls:
                     if not isinstance(c, dict):
                         continue
@@ -613,78 +695,76 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        # 主文本：完整 assistant 回答（修复 conv#195：不被仲裁片段替换）
+        from services.conversation.factual_checks import check_final_facts
+        from services.conversation.quality_contract import action_constraint_issues, selected_asset_actions
+
         content = message.get("content", "") or ""
-        specialist_results = metadata.get("specialist_results", [])
-
-        # 补充：仲裁片段仅作补充检测
-        arbitration_text = ""
-        if specialist_results:
-            for sr in reversed(specialist_results):
-                if sr.get("is_arbitration"):
-                    arbitration_text = sr.get("analysis", "") or ""
-                    break
-        detect_text = content + "\n" + arbitration_text
-
-        # 1. 数据交叉验证：检查多个专家是否引用了相同数据
-        data_points = []
-        for sr in specialist_results:
-            analysis = sr.get("analysis", "")
-            # 提取数字+百分号
-            import re as _re
-            numbers = _re.findall(r'\d+\.?\d*%', analysis)
-            data_points.extend(numbers)
-
-        # 去重统计
-        unique_data = set(data_points)
-        cross_validated = len(data_points) - len(unique_data)
-        metrics["total_data_points"] = len(data_points)
-        metrics["cross_validated_count"] = cross_validated
-        metrics["unique_data_points"] = len(unique_data)
-        if cross_validated > 0:
-            details.append(f"✓ {cross_validated} 个数据点被多专家交叉引用")
-
-        # 2. 数据来源标注（用 detect_text 覆盖完整回答+仲裁）
-        has_source = bool(re.search(r'(根据|来源|数据源|来自|《.*?》)', detect_text))
-        metrics["has_source_attribution"] = has_source
-        if has_source:
-            details.append("✓ 标注了数据来源")
+        specialists = metadata.get("specialist_results") or []
+        calls = [c for c in metadata.get("tool_calls", []) if isinstance(c, dict)]
+        complete_calls = [c for c in calls if not c.get("result_truncated")]
+        points = [number for sr in specialists for number in re.findall(r"\d+(?:\.\d+)?%", sr.get("analysis", "") or "")]
+        metrics.update(total_data_points=len(points), unique_data_points=len(set(points)),
+                       repeated_mentions=len(points) - len(set(points)), cross_validated_count=0,
+                       has_source_attribution=bool(re.search(r"来源|数据源|根据|来自", content)),
+                       incomplete_tool_results=len(calls) - len(complete_calls))
+        # 相同字符串既不能识别标的/单位/窗口，也不能证明来源独立；一律不奖励。
+        details.append("重复引用不构成交叉核验，规则检查不能证明全部事实正确。")
+        snapshot = metadata.get("portfolio_snapshot") or metadata.get("snapshot") or {}
+        issues = check_final_facts(content, snapshot, complete_calls)
+        actions = selected_asset_actions(metadata.get("arbitration"), specialists)
+        issues.extend(action_constraint_issues(actions, complete_calls))
+        reported = metadata.get("quality_issues") or []
+        if isinstance(reported, list):
+            issues.extend(str(issue) for issue in reported)
+        validation = metadata.get("factual_validation") or {}
+        validation = validation if isinstance(validation, dict) else {}
+        checks = validation.get("checks") or {}
+        checks = checks if isinstance(checks, dict) else {}
+        # 状态必须来自明确的事实核验记录；日期新鲜/工具成功/排版齐全均不代替核验。
+        gates = {key: checks.get(key, "unverified") for key in
+                 ("source_type", "metric_type", "unit", "date", "causal_evidence", "intent")}
+        gates = {key: value if isinstance(value, str) and value in {"verified", "failed", "not_applicable"} else "unverified"
+                 for key, value in gates.items()}
+        required = {"source_type", "intent"}
+        if re.search(r"\d|PE|PB|PS|分位|估值|行情", content, re.I):
+            required.update({"metric_type", "unit", "date"})
+        for key in required:
+            if gates[key] == "not_applicable":
+                gates[key] = "unverified"
+        if validation.get("status") == "failed":
+            issues.append("factual_validation_failed")
+        query = metadata.get("original_query", "") or ""
+        is_attribution = bool(re.search(r"为什么|为何|原因|做空|归因", query))
+        if not is_attribution and gates["causal_evidence"] == "unverified":
+            gates["causal_evidence"] = "not_applicable"
+        # 因果问题需要机制证据；不因其他数值已核验而豁免。
+        if is_attribution and gates["causal_evidence"] == "not_applicable":
+            gates["causal_evidence"] = "unverified"
+        if is_attribution and not re.search(r"买|卖|加仓|减仓|定投|操作|配置|交易", query):
+            clauses = re.split(r"[。\n，,；;]", content)
+            if any(re.search(r"(?:建议|每期|每月)[^。\n]{0,24}(?:加仓|减仓|定投|买入|卖出|\d+元)", clause)
+                   and not re.search(r"不建议|不应|不宜|禁止|不要|无须|无需|不提供|不涉及|旧报告|误称", clause)
+                   for clause in clauses):
+                issues.append("unrequested_trading_plan")
+                gates["intent"] = "failed"
+        if metadata.get("unresolved_disagreements"):
+            issues.append("unresolved_disagreements")
+        issues = list(dict.fromkeys(issues))
+        if issues or "failed" in gates.values():
+            status, score = "failed", 40
+        elif (isinstance(validation, dict) and validation.get("status") == "verified"
+              and all(value in {"verified", "not_applicable"} for value in gates.values())
+              and not metrics["incomplete_tool_results"]):
+            status, score = "verified", 90
         else:
-            details.append("⚠ 未标注数据来源")
-
-        # 3. 数据一致性：检查是否存在矛盾数据
-        # 简化实现：检查是否有同一指标的不同值
-        has_contradiction = False
-        if len(specialist_results) >= 2:
-            # 检查 PE/PB 值是否一致
-            pe_values = set()
-            for sr in specialist_results:
-                analysis = sr.get("analysis", "")
-                pe_match = re.findall(r'PE[：:]\s*(\d+\.?\d*)', analysis)
-                if pe_match:
-                    pe_values.add(pe_match[0])
-            if len(pe_values) > 1:
-                has_contradiction = True
-                details.append("⚠ 检测到 PE 数据不一致")
-
-        metrics["has_data_contradiction"] = has_contradiction
-
-        # 综合分数
-        score = 70  # 基础分
-        if has_source:
-            score += 15
-        if cross_validated > 0:
-            score += 10
-        if has_contradiction:
-            score -= 20
-
-        return EvalDimension(
-            name="accuracy",
-            score=min(100, max(0, score)),
-            weight=self.WEIGHTS["accuracy"],
-            metrics=metrics,
-            details=details,
-        )
+            status, score = "unverified", 60 if metrics["has_source_attribution"] else 50
+        metrics.update(verification_status=status, quality_gates=gates, factual_issues=issues,
+                       has_data_contradiction=bool(issues))
+        details.append({"verified": "已记录必要事实核验；得分仍不代表统计准确率。",
+                        "unverified": "事实未核验：来源类型、指标类型、单位、日期、因果与意图需要明确核验记录。",
+                        "failed": "事实或意图门槛未通过：" + "、".join(issues or [k for k,v in gates.items() if v == "failed"])}[status])
+        return EvalDimension(name="accuracy", score=score, weight=self.WEIGHTS["accuracy"],
+                             metrics=metrics, details=details)
 
     def _evaluate_completeness(self, message: dict, metadata: dict) -> EvalDimension:
         """评估完整性：是否覆盖了用户问题的各个方面"""

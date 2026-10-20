@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from functools import wraps
-from openai import OpenAI, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
+from openai import OpenAI, DefaultHttpxClient, RateLimitError, APIStatusError, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception, before_sleep_log
 from config import get_llm_config, get_llm_fallback_config
 from db.config import get_config_float, get_config_int
@@ -49,7 +49,8 @@ def _sleep_retry(seconds):
 
 _llm_retry = retry(
     retry=retry_if_exception(_is_retryable),
-    stop=stop_after_attempt(2),
+    # 连接被拒绝/传输中断通常数秒内自愈，多一次退避重试可显著降低瞬时网络抖动导致的失败。
+    stop=stop_after_attempt(3),
     wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     sleep=_sleep_retry,
@@ -58,7 +59,9 @@ _llm_retry = retry(
 
 _api_key, _base_url, _model = get_llm_config()
 # 超时保护：3 分钟，避免 MIMO API hang 住导致 pipeline 死锁（对话 99 案例）
-client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0, max_retries=0)
+# MIMO 国内接口直连：httpx 默认还会读取 macOS 系统代理，代理退出会导致全站模型连接失败。
+client = OpenAI(api_key=_api_key, base_url=_base_url, timeout=180.0, max_retries=0,
+                http_client=DefaultHttpxClient(trust_env=False))
 MODEL = _model
 
 # ── 分级模型常量（供独立分析路由使用）────
@@ -69,7 +72,8 @@ MODEL_AUX = MODEL
 
 # 兜底客户端（主用失败时切换）
 _fallback_config = get_llm_fallback_config()
-_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0, max_retries=0) if _fallback_config else None
+_fallback_client = OpenAI(api_key=_fallback_config[0], base_url=_fallback_config[1], timeout=180.0, max_retries=0,
+                         http_client=DefaultHttpxClient(trust_env=False)) if _fallback_config else None
 _fallback_model = _fallback_config[2] if _fallback_config else None
 
 # 仲裁 Agent 复用主客户端（统一 mimo-v2.6-pro，可通过 system_config 'arbitration.model' 覆盖模型名）

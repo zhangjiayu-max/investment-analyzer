@@ -35,12 +35,12 @@ logger = logging.getLogger(__name__)
 # 占位符前缀（匹配所有 ⏳ 开头的临时状态文本）
 _PLACEHOLDER_PREFIX = "⏳"
 
-# 专家已完成提示文本（有专家结果，仅综合报告未生成）
-# 修复 conv#140：专家全部成功时不应标记为"中断失败"，应标为"已完成（专家分析）"
+# 专家运行成功不代表报告通过事实与一致性验收。
 _EXPERTS_DONE_NOTICE = (
-    "✅ 专家分析已完成（综合报告因服务重启未生成）。"
-    "如需综合报告，可点击「重新生成」。\n\n"
-    "---\n\n以下为已完成的专家分析：\n\n"
+    "⚠️ 降级恢复：综合报告未完成或未通过校验。以下为专家原稿，供复核。"
+    "专家间分歧尚未消解，观点和操作条件不能视为统一结论。"
+    "如需重新综合，可点击「重新生成」。\n\n"
+    "---\n\n以下保留各专家原始分析及证据限制：\n\n"
 )
 
 # 中断提示文本（专家未执行时）
@@ -65,6 +65,9 @@ def _finalize_recovery(msg_id: int, conv_id: int, content: str, metadata: dict |
     from db._conn import _get_conn
     import uuid
 
+    if metadata and (metadata.get("completion_status", "completed") != "completed"
+                     or metadata.get("quality_status") in {"failed", "degraded"}):
+        return {"ok": False, "reason": "synthesis_not_validated"}
     conn = _get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -81,7 +84,9 @@ def _finalize_recovery(msg_id: int, conv_id: int, content: str, metadata: dict |
             return {"ok": False, "reason": "cancelled"}
         merged = dict(meta)
         merged.update(metadata or {})
-        merged.update({"execution_status": "completed", "recovered": True, "recovery_type": "synthesis"})
+        merged.update({"execution_status": "completed", "completion_status": "completed", "recovered": True,
+                       "recovery_type": "synthesis", "unresolved_disagreements": False,
+                       "quality_status": (metadata or {}).get("quality_status", "unverified")})
         cur = conn.execute(
             "UPDATE messages SET content=?, metadata=? WHERE id=? "
             "AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,'$.execution_status'),'') != 'cancelled'",
@@ -330,9 +335,10 @@ def resume_synthesis_only(msg_id: int, conv_id: int = None) -> dict:
         )
 
         answer = synthesis_result.get("answer", "")
-        if synthesis_result.get("completion_status", "completed") != "completed":
+        if (synthesis_result.get("completion_status", "completed") != "completed"
+                or synthesis_result.get("quality_status") in {"degraded", "failed"}):
             return {"success": False, "answer": answer, "specialist_count": len(specialists),
-                    "reason": synthesis_result.get("completion_status"), "synthesis_result": synthesis_result}
+                    "reason": synthesis_result.get("quality_status") or synthesis_result.get("completion_status"), "synthesis_result": synthesis_result}
         if not answer:
             return {
                 "success": False,
@@ -404,6 +410,7 @@ def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict)
 
     # 2. 调用 orchestrate_stream，消费事件并持久化（与首次对话相同）
     answer = ""
+    answer_metadata = {}
     specialist_results = []
     all_tool_calls = []
     try:
@@ -455,6 +462,9 @@ def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict)
             # answer 事件：收集最终答案
             if et == "answer":
                 answer = event.get("content", "")
+                answer_metadata = {key: event[key] for key in (
+                    "completion_status", "quality_status", "quality_issues", "reflection", "arbitration",
+                    "cross_review_results") if key in event}
                 specialist_results = event.get("specialist_results", [])
                 all_tool_calls = event.get("tool_calls", [])
 
@@ -462,10 +472,12 @@ def _recover_via_orchestrate_stream(msg_id: int, conv_id: int, checkpoint: dict)
             fail_stream_channel(channel_id, "恢复未返回完整回答")
             return ""
         finalized = _finalize_recovery(msg_id, conv_id, answer, {
+            **answer_metadata,
             "recovery_method": "orchestrate_stream", "specialist_count": len(specialist_results),
             "specialist_results": specialist_results, "tool_calls": all_tool_calls,
         })
         if not finalized["ok"]:
+            fail_stream_channel(channel_id, finalized.get("reason", "恢复未通过校验"))
             return ""
         complete_stream_channel(channel_id)
 
@@ -487,12 +499,14 @@ def _merge_runs_to_answer(runs) -> str | None:
     1. 只合并 primary 阶段的专家结果（cross_review 是中间步骤，不应作为最终答案）。
        因 run_phase 字段有时未正确区分，按 agent_name 去重保留首次出现的结果
        （交叉审阅是同一专家的第二次调用，去重后自然只保留首轮分析）。
-    2. 用"专家分析已完成"文案替代误导性的"服务重启中断"。
+    2. 明示综合未完成或未通过校验，保留全部原文及尚未消解的分歧。
     """
     # 按 agent_name 去重，保留首次出现（首轮 primary 分析）
     seen_agents = set()
     primary_runs = []
     for r in runs:
+        if dict(r).get("run_phase") in ("cross_review", "arbitration"):
+            continue
         name = r["agent_name"] or "专家分析"
         if name in seen_agents:
             continue
@@ -506,9 +520,26 @@ def _merge_runs_to_answer(runs) -> str | None:
     parts = []
     for r in primary_runs:
         text = r["result"] or ""
-        # 去掉 JSON 块，从第一个 markdown 标题开始取
-        idx = text.find("\n## ")
-        body = text[idx + 1:] if idx >= 0 else text
+        # 只剥离可解析且含专家协议字段的前缀，普通Markdown/资料JSON全部保留。
+        body = text
+        candidate = text.lstrip()
+        fenced = candidate.startswith("```json\n") or candidate.startswith("```\n")
+        if fenced:
+            candidate = candidate.split("\n", 1)[1]
+        try:
+            prefix, end = json.JSONDecoder().raw_decode(candidate)
+            if isinstance(prefix, dict) and any(k in prefix for k in ("verdict", "confidence", "asset_actions", "portfolio_stance")):
+                tail = candidate[end:]
+                if fenced:
+                    tail = tail.lstrip()
+                    if not tail.startswith("```"):
+                        tail = ""
+                    else:
+                        tail = tail[3:]
+                if tail.strip():
+                    body = tail.lstrip("\r\n")
+        except (ValueError, TypeError):
+            pass
         agent_name = r["agent_name"] or "专家分析"
         parts.append(f"\n## {agent_name}\n")
         parts.append(body.strip())
@@ -529,19 +560,29 @@ def _apply_recovery(conn, msg_id: int, content: str, has_expert_results: bool = 
         meta = {}
     if meta.get("execution_status") == "cancelled":
         return False
-    if synthesis_result and synthesis_result.get("completion_status", "completed") == "completed":
+    if (synthesis_result and synthesis_result.get("completion_status", "completed") == "completed"
+            and synthesis_result.get("quality_status") not in {"degraded", "failed"}):
         conn.commit()
         result = _finalize_recovery(msg_id, row["conversation_id"], content, {
             "completion_status": "completed", "reflection": synthesis_result.get("reflection"),
             "arbitration": synthesis_result.get("arbitration"),
             "cross_review_results": synthesis_result.get("cross_review_results", []),
+            "quality_status": synthesis_result.get("quality_status", "unverified"),
+            "quality_issues": synthesis_result.get("quality_issues", []),
         })
         return result["ok"]
+    if synthesis_result:
+        for key in ("reflection", "arbitration", "cross_review_results", "quality_issues", "quality_status"):
+            if key in synthesis_result:
+                meta[key] = synthesis_result[key]
     meta.update({"execution_status": "failed", "completion_status": "degraded" if has_expert_results else "failed",
                  "recovered": True, "recovery_type": "experts_only" if has_expert_results else "no_expert",
-                 "error_message": "专家结果可用，完整综合报告尚未完成" if has_expert_results else "服务中断，未生成有效结果"})
-    conn.execute("UPDATE messages SET content=?,metadata=? WHERE id=?", (content, json.dumps(meta, ensure_ascii=False), msg_id))
-    return True
+                 "quality_status": "degraded", "unresolved_disagreements": bool(has_expert_results),
+                 "error_message": "专家原稿可用，综合报告未完成或未通过校验；分歧尚未消解" if has_expert_results else "服务中断，未生成有效结果"})
+    cur = conn.execute("UPDATE messages SET content=?,metadata=? WHERE id=? "
+                       "AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,'$.execution_status'),'') != 'cancelled'",
+                       (content, json.dumps(meta, ensure_ascii=False), msg_id))
+    return cur.rowcount == 1
 
 
 def recover_message(message_id: int) -> str:
@@ -863,7 +904,8 @@ def _auto_retry_one(item: dict) -> bool:
     # 2. 更新占位符为"自动重试中"（避免并发重复触发）
     conn = _get_conn()
     try:
-        _apply_recovery(conn, msg_id, _RETRYING_NOTICE)
+        if not _apply_recovery(conn, msg_id, _RETRYING_NOTICE):
+            return False
         conn.commit()
     finally:
         conn.close()
@@ -889,6 +931,7 @@ def _auto_retry_one(item: dict) -> bool:
             # 调用 orchestrate（generator，消费到 type=answer 事件）
             from agent.orchestrator import orchestrate
             answer = ""
+            answer_event = {}
             specialist_results = []
             try:
                 for event in orchestrate(
@@ -902,6 +945,7 @@ def _auto_retry_one(item: dict) -> bool:
                     if not isinstance(event, dict):
                         continue
                     if event.get("type") == "answer":
+                        answer_event = event
                         answer = event.get("content") or ""
                         specialist_results = event.get("specialist_results") or []
                         break  # 拿到最终答案即可
@@ -911,23 +955,22 @@ def _auto_retry_one(item: dict) -> bool:
             conn = _get_conn()
             try:
                 if answer:
-                    # 成功：写回结果，标记 completed
-                    import json as _json2
-                    row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (msg_id,)).fetchone()
-                    meta = {}
-                    if row and row["metadata"]:
-                        try:
-                            meta = _json2.loads(row["metadata"])
-                        except Exception:
-                            meta = {}
-                    meta["execution_status"] = "completed"
-                    meta["auto_retried"] = True
-                    conn.execute(
-                        "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
-                        (answer, _json2.dumps(meta, ensure_ascii=False), msg_id),
-                    )
-                    conn.commit()
-                    logger.info(f"[auto_retry] msg {msg_id} 自动重试成功 (answer len={len(answer)})")
+                    completion = answer_event.get("completion_status", "completed")
+                    quality = answer_event.get("quality_status", "unverified")
+                    if completion == "completed" and quality not in {"degraded", "failed"}:
+                        saved = _finalize_recovery(msg_id, conv_id, answer, {
+                            "completion_status": completion, "quality_status": quality,
+                            "quality_issues": answer_event.get("quality_issues", []),
+                            "specialist_results": specialist_results, "auto_retried": True,
+                            "tool_calls": answer_event.get("tool_calls", []),
+                            "reflection": answer_event.get("reflection"),
+                        })
+                        if saved["ok"]:
+                            logger.info(f"[auto_retry] msg {msg_id} 自动重试完成 (answer len={len(answer)})")
+                    else:
+                        _apply_recovery(conn, msg_id, _EXPERTS_DONE_NOTICE + answer,
+                                        has_expert_results=True, synthesis_result={**answer_event, "completion_status": "degraded"})
+                        conn.commit()
                 else:
                     # 失败：标记中断提示重发
                     _apply_recovery(conn, msg_id, _NO_RESULT_NOTICE)

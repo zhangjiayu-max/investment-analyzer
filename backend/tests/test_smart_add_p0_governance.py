@@ -4,18 +4,19 @@ from db import valuations
 from services.advisor import position_sizing, smart_add_planner
 
 
-def test_percentile_contract_and_best_valuation_output(monkeypatch):
-    assert valuations._normalize_percentile(0.4274) == 42.74
+def test_percentile_contract_and_best_valuation_output(monkeypatch, tmp_path):
+    assert valuations._normalize_percentile(0.4274, fractional=True) == 42.74
     assert valuations._normalize_percentile(0) == 0
     assert valuations._normalize_percentile(1) == 1
     assert valuations._normalize_percentile("84.71%") == 84.71
 
-    # 输入小数在保存边界转为百分制；用真实读取避免模拟不可能的二次归一化输入。
+    # 显式 ratio 输入在保存边界转为百分制；用真实读取避免模拟不可能的二次归一化输入。
     valuations.save_valuation({
         "index_code": "TEST",
         "index_name": "测试指数",
         "current_value": 10,
         "percentile": 0.4274,
+        "percentile_unit": "ratio",
     })
     monkeypatch.setattr(valuations, "_log_valuation_query", lambda *args, **kwargs: None)
 
@@ -34,8 +35,11 @@ def test_percentile_contract_and_best_valuation_output(monkeypatch):
     )
     conn.commit()
     dry_run = migrate_percentile_scale(conn, apply=False)
-    assert dry_run["index_valuations"]["candidates"] == 1
-    applied = migrate_percentile_scale(conn, apply=True)
+    assert dry_run["index_valuations"]["candidates"] == 0
+    ratio_id = conn.execute("SELECT id FROM index_valuations WHERE index_code='RATIO'").fetchone()[0]
+    applied = migrate_percentile_scale(conn, apply=True,
+        evidence={'index_valuations': [{'id': ratio_id, 'unit': 'ratio', 'value': 0.25, 'source': 'verified-test-contract'}]},
+        backup_path=tmp_path / 'percentile-before.sqlite')
     value = conn.execute(
         "SELECT percentile FROM index_valuations WHERE index_code = 'RATIO'"
     ).fetchone()["percentile"]

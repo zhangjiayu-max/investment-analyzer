@@ -1227,17 +1227,42 @@ def deserialize_agent_run_payload(raw) -> tuple[list, dict]:
 
 
 def serialize_agent_run_payload(tool_calls, evidence: dict | None = None) -> str:
-    """逐字段压缩工具记录，始终保留完整 JSON 结构与可恢复的专家证据。"""
+    """保存有界完整结果；超限显式标记缺失，并保留原值长度与摘要。
+
+    单结果字段最多128KiB，每次专家运行的结果字段合计最多1MiB。
+    沿用旧工具列表/证据封装，读取方无需解压或访问额外存储。
+    """
+    import hashlib
+
     tools, previous_evidence = deserialize_agent_run_payload(tool_calls)
     compact = []
+    remaining_bytes = 1024 * 1024
     for item in tools:
         tool = dict(item)
-        # 摘要字段可以压缩，参数/证据引用保持结构完整；不可对最终 JSON 切片。
+        storage = dict(tool.get("result_storage") or {})
         for key in ("result", "result_preview", "output"):
             value = tool.get(key)
-            if isinstance(value, str) and len(value) > 1500:
-                tool[key] = value[:1500]
+            if value is None:
+                continue
+            raw = (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)).encode("utf-8")
+            limit = min(128 * 1024, remaining_bytes)
+            stored = raw[:limit].decode("utf-8", errors="ignore")
+            stored_bytes = len(stored.encode("utf-8"))
+            remaining_bytes -= stored_bytes
+            # 再次保存已截断记录时，不能将片段冒充完整原值或重写原值hash。
+            previous = storage.get(key) or {}
+            if previous.get("status") == "truncated":
+                storage[key] = {**previous, "stored_bytes": stored_bytes}
+            else:
+                storage[key] = {"status": "complete" if len(raw) <= limit and not tool.get("result_truncated") else "truncated",
+                                "original_bytes": len(raw), "stored_bytes": stored_bytes,
+                                "sha256": hashlib.sha256(raw).hexdigest(),
+                                "hash_scope": "stored_legacy_fragment" if tool.get("result_truncated") else "original"}
+            if len(raw) > limit:
+                tool[key] = stored
                 tool["result_truncated"] = True
+        if storage:
+            tool["result_storage"] = storage
         compact.append(tool)
     merged = dict(previous_evidence)
     merged.update(evidence or {})

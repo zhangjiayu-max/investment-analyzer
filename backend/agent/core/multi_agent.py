@@ -12,6 +12,9 @@ from db.agents import load_specialist_agents, create_agent_run
 from db.config import get_config_int, get_config_bool
 from agent.infra.output_quality import has_raw_toolcall_tags, is_valid_analysis, validate_specialist_output
 from services.llm.text_completion import complete_text_analysis_sync
+from agent.core.answer_policy import (
+    build_answer_policy, has_attribution_intent, has_explicit_action_intent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +142,7 @@ _UNIVERSAL_DATA_CONSTRAINT = """
 ## ⚠️ 数据真实性约束（强制遵守）
 1. **只使用上下文中明确提供的数据**，包括持仓、估值、新闻等
 2. **绝对禁止编造**任何基金名称、基金代码、金额、收益率、持仓比例等数据
-3. 如果上下文中没有持仓数据或显示"无持仓"，**必须明确告知用户**"未获取到持仓信息"，不得自行补充
+3. 当用户要求持仓分析或操作方案时，若上下文中没有持仓数据或显示"无持仓"，必须说明"未获取到持仓信息"；行情解释不要求私人持仓，不得自行补充
 4. 如果某个数据在上下文中缺失，直接说明"暂无该数据"，不要猜测或杜撰
 5. 所有数字必须来自上下文或工具返回结果，不得凭记忆或推测给出具体数值
 
@@ -422,7 +425,66 @@ def _get_message_reasoning(message):
     return extra.get("reasoning_content") or getattr(message, "reasoning_content", None)
 
 
-def _complete_specialist_text(*, messages, first_response=None, **kwargs):
+class _SpecialistBudgetExhausted(RuntimeError):
+    """显式专家预算无法容纳下一次调用。"""
+
+
+class _SpecialistUsage:
+    """逐次累计已返回的模型用量；无 usage 的响应单独估算并标记。"""
+
+    def __init__(self, token_budget=None, max_output_tokens=None):
+        self.reported = 0
+        self.estimated = 0
+        self.reported_calls = 0
+        self.estimated_calls = 0
+        self.token_budget = token_budget
+        self.max_output_tokens = max_output_tokens
+        self.exhausted = False
+
+    def call(self, **kwargs):
+        cap = kwargs.get("max_tokens")
+        if self.max_output_tokens is not None:
+            cap = min(cap, self.max_output_tokens) if cap is not None else self.max_output_tokens
+        if self.token_budget is not None:
+            remaining = self.token_budget - self.reported - self.estimated
+            prompt_estimate = _estimate_specialist_tokens(kwargs.get("messages", []), "", [])
+            cap = min(cap, remaining - prompt_estimate) if cap is not None else remaining - prompt_estimate
+        if cap is not None:
+            if cap <= 0:
+                self.exhausted = True
+                raise _SpecialistBudgetExhausted("专家预算不足以容纳下一轮输入和输出")
+            kwargs = {**kwargs, "max_tokens": int(cap)}
+        response = _call_llm(**kwargs)
+        usage = getattr(response, "usage", None)
+        total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
+        if isinstance(total, (int, float)) and total >= 0:
+            self.reported += int(total)
+            self.reported_calls += 1
+        else:
+            message = response.choices[0].message
+            text = (getattr(message, "content", None) or "") + (_get_message_reasoning(message) or "")
+            for tool in getattr(message, "tool_calls", None) or []:
+                text += getattr(getattr(tool, "function", None), "arguments", "") or ""
+            self.estimated += _estimate_specialist_tokens(kwargs.get("messages", []), text, [])
+            self.estimated_calls += 1
+        if self.token_budget is not None and self.reported + self.estimated > self.token_budget:
+            # 输入估计与供应商实际计费可能有差异；完整首包也必须显式降级。
+            self.exhausted = True
+        return response
+
+    def fields(self):
+        source = "mixed" if self.reported_calls and self.estimated_calls else (
+            "reported" if self.reported_calls else "estimated"
+        )
+        fields = {"tokens_used": self.reported + self.estimated, "tokens_source": source}
+        if self.exhausted:
+            fields.update({"budget_exhausted": True, "status": "budget_exhausted",
+                           "completion_status": "degraded", "verdict": "unknown", "confidence": 0.0,
+                           "action_signals": [], "asset_actions": [], "portfolio_stance": "unknown"})
+        return fields
+
+
+def _complete_specialist_text(*, messages, first_response=None, call_llm=None, **kwargs):
     """有限续写文本；适配 MIMO model_extra，并保留最近一次响应供反思回传。"""
     last_message = None
     last_finish_reason = None
@@ -433,7 +495,7 @@ def _complete_specialist_text(*, messages, first_response=None, **kwargs):
         if original_response is not None:
             response, original_response = original_response, None
         else:
-            response = _call_llm(**call_kwargs)
+            response = (call_llm or _call_llm)(**call_kwargs)
         last_message = response.choices[0].message
         last_finish_reason = getattr(response.choices[0], "finish_reason", None)
         reasoning = _get_message_reasoning(last_message)
@@ -450,7 +512,8 @@ def _complete_specialist_text(*, messages, first_response=None, **kwargs):
 def run_specialist(agent_key: str, query: str, context: str = "",
                    prebuilt_context: str = "", model: str = None, trace_id: str = "",
                    from_pipeline: bool = False, conversation_id: int = None, message_id: int = None,
-                   blackboard=None, system_prompt_override: str = None) -> dict:
+                   blackboard=None, system_prompt_override: str = None,
+                   token_budget: int = None, max_output_tokens: int = None) -> dict:
     """
     运行单个专家 Agent。
 
@@ -463,6 +526,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     Args:
         from_pipeline: Pipeline 路径标记。True 时 prebuilt_context 已含 Layer 0-5
                       （含 system_prompt/KYC/持仓），跳过重复注入，并交由 Pipeline 统一反思。
+        token_budget: 显式严格总用量预算（含输入估算）；默认不启用
+        max_output_tokens: 每次模型输出上限，不改变现有更低配置；默认不启用
 
     返回:
         {"agent": "估值专家", "icon": "📊", "analysis": "...", "tool_calls": [...], "duration_ms": 1234}
@@ -472,11 +537,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         import uuid as _uuid
         trace_id = f"spec-{_uuid.uuid4().hex[:8]}"
     agent = load_specialist_agents()[agent_key]
+    action_requested = has_explicit_action_intent(query)
+    attribution_only = has_attribution_intent(query) and not action_requested
     if system_prompt_override is not None:
         agent = {**agent, "system_prompt": system_prompt_override}
     start_time = time.time()
     _caller = f"specialist:{agent_key}"
     _model = model or MODEL  # 增强6: 成本路由 — 支持外部传入模型
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     logger.info(f"[trace:{trace_id}] 专家开始: {agent['name']} ({agent_key}) query={query[:50]}...")
 
     # 只给该专家分配它的专属工具
@@ -505,7 +574,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # 注入持仓上下文（优先使用预构建的，避免重复 DB 查询）
         if prebuilt_context:
             system_content += f"\n\n{prebuilt_context}"
-        else:
+        elif not attribution_only:
             try:
                 from services.portfolio_context import build_portfolio_context
                 portfolio_ctx = build_portfolio_context()
@@ -514,7 +583,8 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 pass
 
         # 注入 KYC 理财画像（按专家职责裁剪维度）
-        system_content = _inject_kyc_profile(system_content, agent)
+        if not attribution_only:
+            system_content = _inject_kyc_profile(system_content, agent)
 
         # 追加主动检索指令（仅当专家有 search_knowledge 工具时）
         if "search_knowledge" in agent.get("tools", []) and get_config_bool("agent.agentic_rag_enabled", True):
@@ -527,17 +597,20 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
 
     # P0 全局视角指令：强制看全局再分析
-    system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
+    if action_requested:
+        system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
 
     # 追加分析模板约束（根据用户问题自动检测分析类型）
-    analysis_type = _detect_analysis_type(query)
+    analysis_type = "general" if attribution_only else _detect_analysis_type(query)
     template_constraint = _get_template_constraint(analysis_type)
     if template_constraint:
         system_content += template_constraint
 
     # 追加通用可执行性约束 + 数据约束（含emoji禁令）
-    system_content += _ACTIONABILITY_CONSTRAINT
+    if action_requested:
+        system_content += _ACTIONABILITY_CONSTRAINT
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+    system_content += build_answer_policy(query)
 
     # 注入幻觉防御 Prompt（事实约束 + 类型专用约束）
     try:
@@ -618,7 +691,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # 方案3：caller 增加 turn 后缀，便于 token_usage 排查
         _caller_turn = f"{_caller}#turn{turn}"
         try:
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller_turn,
                 trace_id=trace_id,
                 model=_model,
@@ -628,13 +701,18 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
+        except _SpecialistBudgetExhausted:
+            completion_status = "degraded"
+            output_source = "budget_exhausted"
+            answer = "本轮模型调用预算不足，未完成专家分析；已取得证据保留待复核。"
+            break
         except Exception as e:
             err_msg = str(e)
             logger.error(f"[trace:{trace_id}] [{agent['name']}] LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
                 logger.warning(f"[trace:{trace_id}] [{agent['name']}] 模型不兼容，回退到普通模式")
                 # 回退：不带 tools 调用
-                response = _call_llm(
+                response = call_llm(
                     caller=_caller_turn,
                     trace_id=trace_id,
                     model=_model,
@@ -675,6 +753,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
             if getattr(response.choices[0], "finish_reason", None) == "length":
                 try:
                     answer, answer_message, completion_status = _complete_specialist_text(
+                        call_llm=call_llm,
                         first_response=response, messages=llm_messages,
                         caller=f"{_caller}#continue", trace_id=trace_id, model=_model,
                         temperature=get_config_float('llm.temperature_agent', 0.3),
@@ -774,7 +853,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     # 方案2：合并"强制总结 + 重新生成"为单次收口调用
     # 原逻辑：answer 为空 → 强制总结（1次LLM）→ <200字 → 重新生成（1次LLM）= 最多2次
     # 新逻辑：answer 为空或 <200 字 → 单次收口调用（1次LLM），prompt 直接要求 ≥200 字
-    _needs_closure = completion_status != "truncated" and not is_valid_analysis(answer, min_chars=200)
+    _needs_closure = not usage.exhausted and completion_status != "truncated" and not is_valid_analysis(answer, min_chars=200)
     if _needs_closure:
         prior_answer = answer if is_valid_analysis(answer, completion_status=completion_status) else ""
         prior_message, prior_completion_status = answer_message, completion_status
@@ -796,6 +875,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                     "content": "请基于以上工具调用结果，给出你的专业分析结论。要求：不调用工具，直接输出分析，至少 200 字。",
                 })
                 _closure_answer, _closure_message, _closure_status = _complete_specialist_text(
+                    call_llm=call_llm,
                     caller=f"{_caller}#summary",
                     trace_id=trace_id,
                     model=_model,
@@ -840,7 +920,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         # Pipeline 在全部专家返回后统一反思和补跑；此处再评估并全文重写会
         # 把已完成初稿卡在专家阶段，耗尽共享截止时间（对话 204）。
         pipeline_reviews = from_pipeline and get_config_bool("pipeline.reflection_enabled", True)
-        if not pipeline_reviews and is_self_reflection_enabled() and is_valid_analysis(answer, completion_status=completion_status):
+        if not usage.exhausted and not pipeline_reviews and is_self_reflection_enabled() and is_valid_analysis(answer, completion_status=completion_status):
             # M7：从黑板获取其他专家结论，供跨专家盲点检查（开关关闭时不传，无额外成本）
             peer_conclusions = ""
             if blackboard:
@@ -875,6 +955,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
                         ]
                         try:
                             retry_answer, retry_message, retry_status = _complete_specialist_text(
+                                call_llm=call_llm,
                                 caller=f"{agent_key}#self_reflection_retry",
                                 trace_id=trace_id,
                                 model=_retry_model,
@@ -898,15 +979,15 @@ def run_specialist(agent_key: str, query: str, context: str = "",
     except Exception as e:
         logger.warning(f"[self_reflection] {agent['name']} 反思异常: {e}")
 
-    # Pipeline Phase C：估算 token 消耗（用于预算追踪）
-    tokens_used = _estimate_specialist_tokens(llm_messages, answer, tool_calls_log)
-
     # 失败检测：兜底文本或过短内容标记为 failed
     quality = validate_specialist_output({"analysis": answer, "completion_status": completion_status,
                                           "output_source": output_source,
                                           "closure_failed": closure_failed,
                                           "self_reflection": self_reflection_result})
     status = quality["status"]
+    if usage.exhausted:
+        status = "budget_exhausted"
+        completion_status = "degraded"
 
     # 剥离 A2A JSON 块，analysis 字段只保留纯 Markdown 给用户
     import re as _re
@@ -934,7 +1015,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         "structured": _parse_structured_output(answer, agent_key, agent["name"], trace_id, tool_calls_log, duration_ms),
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
-        "tokens_used": tokens_used,
+        **usage.fields(),
         "self_reflection": self_reflection_result,
     }
     try:
@@ -1097,7 +1178,8 @@ def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,
 def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict, trace_id: str = "",
                                 max_turns: int = 2, prebuilt_context: str = "",
                                 model: str = None,
-                                conversation_id: int = 0, message_id: int = 0) -> dict:
+                                conversation_id: int = 0, message_id: int = 0,
+                                token_budget: int = None, max_output_tokens: int = None) -> dict:
     """
     交叉审阅模式：专家拿到其他专家的分析结果后进行二次审阅。
 
@@ -1114,9 +1196,13 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         prebuilt_context: 预构建的持仓+估值上下文，避免重复 DB 查询
     """
     agent = load_specialist_agents()[agent_key]
+    action_requested = has_explicit_action_intent(query)
+    attribution_only = has_attribution_intent(query) and not action_requested
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
     _model = model or MODEL
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     # 兜底：trace_id 为空时自动生成
     if not trace_id:
         import uuid as _uuid
@@ -1130,7 +1216,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
     # 注入持仓上下文（优先使用预构建的）
     if prebuilt_context:
         system_content += f"\n\n{prebuilt_context}"
-    else:
+    elif not attribution_only:
         try:
             from services.portfolio_context import build_portfolio_context
             portfolio_ctx = build_portfolio_context()
@@ -1140,17 +1226,21 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
             pass
 
     # 注入 KYC 理财画像（按专家职责裁剪维度）
-    system_content = _inject_kyc_profile(system_content, agent)
+    if not attribution_only:
+        system_content = _inject_kyc_profile(system_content, agent)
 
     # 追加分析模板约束（交叉审阅也需要结构化输出）
-    analysis_type = _detect_analysis_type(query)
+    analysis_type = "general" if attribution_only else _detect_analysis_type(query)
     template_constraint = _get_template_constraint(analysis_type)
     if template_constraint:
         system_content += template_constraint
 
     # 追加通用可执行性约束 + 数据约束（含emoji禁令）
-    system_content += _ACTIONABILITY_CONSTRAINT
+    if action_requested:
+        system_content += _ACTIONABILITY_CONSTRAINT
+        system_content += _UNIVERSAL_CONTEXT_INSTRUCTION
     system_content += _UNIVERSAL_DATA_CONSTRAINT
+    system_content += build_answer_policy(query)
 
     # 追加禁止原始 tool_call 文本约束
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
@@ -1190,7 +1280,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         # P3 优化：历史 tool 消息压缩
         _maybe_compress_tool_history(llm_messages)
         try:
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller,
                 trace_id=trace_id,
                 model=_model,
@@ -1200,11 +1290,14 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 temperature=get_config_float('llm.temperature_agent', 0.3),
                 max_tokens=get_config_int('llm.max_tokens_agent', 8000),
             )
+        except _SpecialistBudgetExhausted:
+            answer = "交叉审阅预算不足，未完成复核。"
+            break
         except Exception as e:
             err_msg = str(e)
             logger.error(f"[trace:{trace_id}] [{agent['name']}] 交叉审阅 LLM 调用异常 (turn {turn}): {err_msg}")
             if any(kw in err_msg.lower() for kw in ["tool", "function", "reasoning", "thinking"]):
-                response = _call_llm(
+                response = call_llm(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1272,13 +1365,13 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 "content": result,
             })
 
-    if not answer:
+    if not answer and not usage.exhausted:
         try:
             llm_messages.append({
                 "role": "user",
                 "content": "请根据以上信息，给出你的交叉审阅结论。",
             })
-            response = _call_llm(
+            response = call_llm(
                 caller=_caller,
                 trace_id=trace_id,
                 model=_model,
@@ -1303,7 +1396,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                     "role": "user",
                     "content": "请基于以上信息和其他专家的分析结果，给出你的交叉审阅结论（不要调用工具，直接输出分析）。",
                 })
-                _regen_resp = _call_llm(
+                _regen_resp = call_llm(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1333,7 +1426,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
                 tool_calls=tool_calls_log,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
-                status="success",
+                status="budget_exhausted" if usage.exhausted else "success",
                 run_phase="cross_review",
             )
         except Exception as log_err:
@@ -1346,6 +1439,7 @@ def run_specialist_with_context(agent_key: str, query: str, peer_analyses: dict,
         "analysis": answer,
         "tool_calls": tool_calls_log,
         "duration_ms": duration_ms,
+        **usage.fields(),
         "is_cross_review": True,
     })
 
@@ -1371,7 +1465,8 @@ def _normalize_cross_review_result(result: dict) -> dict:
 def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                               peer_analyses: dict, trace_id: str = "",
                               model: str = None,
-                              conversation_id: int = 0, message_id: int = 0) -> dict:
+                              conversation_id: int = 0, message_id: int = 0,
+                              token_budget: int = None, max_output_tokens: int = None) -> dict:
     """交叉审阅单轮意见模式（不调用工具，仅 1 次 LLM 调用）。
 
     与 run_specialist_with_context 的区别：
@@ -1399,6 +1494,8 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
     start_time = time.time()
     _caller = f"specialist:{agent_key}:cross_review"
     _model = model or MODEL
+    usage = _SpecialistUsage(token_budget, max_output_tokens)
+    call_llm = usage.call
     if not trace_id:
         import uuid as _uuid
         trace_id = f"cross-{_uuid.uuid4().hex[:8]}"
@@ -1429,6 +1526,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         "}\n"
         "只输出 JSON，不要其他文字。"
     )
+    system_content += build_answer_policy(query)
 
     user_content = (
         f"原始问题：{query}\n\n"
@@ -1437,7 +1535,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
     )
 
     try:
-        response = _call_llm(
+        response = call_llm(
             caller=_caller,
             trace_id=trace_id,
             model=_model,
@@ -1506,12 +1604,13 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 "\"reason\": \"反驳理由\"}], \"summary\": \"魔鬼代言人总结\"}\n"
                 "只输出 JSON，必须包含至少 1 条 disagreement。"
             )
+            retry_system += build_answer_policy(query)
             retry_user = (
                 f"原始问题：{query}\n\n"
                 f"其他专家分析：\n{peer_text[:6000]}"
             )
             try:
-                retry_resp = _call_llm(
+                retry_resp = call_llm(
                     caller=_caller + ":devil",
                     trace_id=trace_id,
                     model=devil_model or _model,
@@ -1565,7 +1664,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         analysis_text = "\n".join(parts) if parts else raw[:8000]
 
     if not analysis_text:
-        analysis_text = "交叉审阅完成，请参考其他专家分析。"
+        analysis_text = "交叉审阅预算不足，未完成复核。" if usage.exhausted else "交叉审阅完成，请参考其他专家分析。"
 
     duration_ms = int((time.time() - start_time) * 1000)
 
@@ -1582,7 +1681,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
                 tool_calls="",
                 duration_ms=duration_ms,
                 trace_id=trace_id,
-                status="success",
+                status="budget_exhausted" if usage.exhausted else "success",
                 run_phase="cross_review",
             )
         except Exception as log_err:
@@ -1596,6 +1695,7 @@ def run_cross_review_opinion(agent_key: str, query: str, self_analysis: str,
         "opinion": opinion,
         "tool_calls": [],  # 空数组，保持字段兼容
         "duration_ms": duration_ms,
+        **usage.fields(),
         "is_cross_review": True,
     })
 
@@ -1771,6 +1871,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
 
             _caller = f"specialist:{agent_key}:phase_c"
             _model = model or MODEL
+            usage = _SpecialistUsage()
             system_content = (
                 f"你是{agent['name']}。在圆桌讨论中，其他专家对你的分析提出了以下质疑：\n\n"
                 f"{challenge_text}\n\n"
@@ -1779,9 +1880,10 @@ def run_round_table_discussion(query: str, specialist_results: list,
                 f"2. 如果质疑不合理，用数据或逻辑反驳\n"
                 f"3. 给出修正后的最终结论\n"
             )
+            system_content += build_answer_policy(query)
 
             try:
-                response = _call_llm(
+                response = usage.call(
                     caller=_caller,
                     trace_id=trace_id,
                     model=_model,
@@ -1801,6 +1903,7 @@ def run_round_table_discussion(query: str, specialist_results: list,
                         "analysis": revised,
                         "tool_calls": [],
                         "duration_ms": 0,
+                        **usage.fields(),
                         "is_cross_review": True,
                         "is_phase_c_revision": True,
                     })
