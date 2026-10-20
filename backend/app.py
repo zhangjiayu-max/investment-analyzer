@@ -183,6 +183,8 @@ app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(tasks_router)
 app.include_router(articles_router)
+from routers.portfolio.decision_risk import router as portfolio_decision_risk_router
+app.include_router(portfolio_decision_risk_router)
 app.include_router(portfolio_router)
 
 # 注册其他路由

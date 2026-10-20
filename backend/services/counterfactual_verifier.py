@@ -1,240 +1,136 @@
-"""反事实验证引擎 — 跟踪假设补仓操作的后续盈亏。
-
-复用 master_decision_backtest._get_fund_price_at_date() 的净值取数逻辑。
-
-验证维度：
-1. 单笔假设交易的独立盈亏（买入价 vs 当前价）
-2. 摊薄效果（假设补仓后该标的新平均成本 vs 当前价 → 是否回本）
-3. 假设组合 vs 真实组合对比（如果当时都按建议补了，整体改善多少）
-"""
+"""建议跟踪：下一可知净值、有限现金顺序扣款，不与真实组合叠加。"""
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 logger = logging.getLogger(__name__)
 
 
 def _get_fund_price_at_date(fund_code: str, target_date: str) -> float | None:
-    """获取基金在指定日期的净值（复用 master_decision_backtest 逻辑）。"""
+    """仅返回指定净值日，禁止用更早的旧价格伪造该日成交。"""
+    from db._conn import _get_conn
+    conn = _get_conn()
     try:
-        from db._conn import _get_conn
-        conn = _get_conn()
-        row = conn.execute(
-            """SELECT nav FROM fund_nav_history
-               WHERE fund_code = ? AND nav_date <= ?
-               ORDER BY nav_date DESC LIMIT 1""",
-            (fund_code, target_date),
-        ).fetchone()
+        row = conn.execute('SELECT nav FROM fund_nav_history WHERE fund_code=? AND nav_date=? AND nav_date<=?', (fund_code, target_date, date.today().isoformat())).fetchone()
+        return float(row['nav']) if row and row['nav'] else None
+    finally:
         conn.close()
-        if row:
-            return float(row["nav"])
-    except Exception as e:
-        logger.debug(f"[counterfactual] 取净值失败 {fund_code}@{target_date}: {e}")
-    return None
+
+
+def _get_next_nav_after(fund_code, recommendation_date):
+    # 情景成交仅在建议后最多三个工作日内；不能等几个月再用后来的价格假装执行。
+    try:
+        end = date.fromisoformat(recommendation_date[:10])
+    except (ValueError, TypeError):
+        return None, None
+    for _ in range(3):
+        end += timedelta(days=1)
+        while end.weekday() >= 5:
+            end += timedelta(days=1)
+    end = min(end, date.today())
+    from db._conn import _get_conn
+    conn = _get_conn()
+    try:
+        row = conn.execute('SELECT nav, nav_date FROM fund_nav_history WHERE fund_code=? AND nav_date>? AND nav_date<=? AND nav>0 ORDER BY nav_date LIMIT 1', (fund_code, recommendation_date[:10], end.isoformat())).fetchone()
+        return (float(row['nav']), row['nav_date']) if row else (None, None)
+    finally:
+        conn.close()
 
 
 def _get_latest_fund_price(fund_code: str) -> tuple[float | None, str | None]:
-    """获取基金最新净值和净值日期。"""
+    from db._conn import _get_conn
+    conn = _get_conn()
     try:
-        from db._conn import _get_conn
-        conn = _get_conn()
-        row = conn.execute(
-            """SELECT nav, nav_date FROM fund_nav_history
-               WHERE fund_code = ?
-               ORDER BY nav_date DESC LIMIT 1""",
-            (fund_code,),
-        ).fetchone()
+        row = conn.execute('SELECT nav, nav_date FROM fund_nav_history WHERE fund_code=? AND nav_date<=? AND nav>0 ORDER BY nav_date DESC LIMIT 1', (fund_code, date.today().isoformat())).fetchone()
+        return (float(row['nav']), row['nav_date']) if row else (None, None)
+    finally:
         conn.close()
-        if row:
-            return float(row["nav"]), row["nav_date"]
-    except Exception as e:
-        logger.debug(f"[counterfactual] 取最新净值失败 {fund_code}: {e}")
-    return None, None
 
 
-def _calc_holding_days(buy_date: str, end_date: str) -> int:
-    """计算持有天数。"""
+def _calc_holding_days(buy_date, end_date):
     try:
-        b = datetime.strptime(buy_date[:10], "%Y-%m-%d")
-        e = datetime.strptime(end_date[:10], "%Y-%m-%d")
-        return max(0, (e - b).days)
-    except Exception:
+        return max(0, (datetime.fromisoformat(end_date[:10]) - datetime.fromisoformat(buy_date[:10])).days)
+    except (ValueError, TypeError):
         return 0
 
 
-def verify_hypothetical_tx(tx: dict) -> dict:
-    """验证单条假设交易的后续盈亏。
-
-    Args:
-        tx: portfolio_transactions 行（is_hypothetical=1），含 snapshot 关联字段
-
-    Returns:
-        验证结果 dict
-    """
-    tx_id = tx["id"]
-    fund_code = tx.get("fund_code", "")
-    fund_name = tx.get("fund_name", "")
-    buy_date = tx.get("transaction_date", "")
-    buy_amount = tx.get("amount", 0) or 0
-    buy_price_recorded = tx.get("price", 0) or 0  # 快照时记录的买入价
-    buy_shares_recorded = tx.get("shares", 0) or 0
-
-    # 优先用净值表的实际净值（更准确），快照价只是备份
-    buy_price = _get_fund_price_at_date(fund_code, buy_date)
-    nav_date_lag = None
-    if not buy_price:
-        buy_price = buy_price_recorded if buy_price_recorded > 0 else None
-        nav_date_lag = "no_nav_history"
-
-    # 当前净值
-    current_price, current_nav_date = _get_latest_fund_price(fund_code)
-    if not current_price:
-        return {
-            "tx_id": tx_id,
-            "fund_code": fund_code,
-            "fund_name": fund_name,
-            "buy_date": buy_date,
-            "buy_amount": buy_amount,
-            "status": "no_nav_data",
-            "message": "无法获取净值数据（新基金或净值缺失）",
-        }
-
-    # 计算假设买入份额（用实际净值重算，避免快照价不准）
-    buy_shares = buy_amount / buy_price if buy_price > 0 else 0
-    current_value = round(buy_shares * current_price, 2)
-    profit_loss = round(current_value - buy_amount, 2)
-    profit_rate = round(profit_loss / buy_amount, 4) if buy_amount > 0 else 0
-
-    holding_days = _calc_holding_days(buy_date, current_nav_date or datetime.now().strftime("%Y-%m-%d"))
-    is_breakeven = current_price >= buy_price
-
-    # 摊薄效果：假设补仓后该标的的新平均成本
-    # 需要查询快照时刻的真实持仓（成本/份额），从快照表取 profit_rate_at_snapshot 推算
-    avg_cost_improvement = None
-    snapshot_profit_rate = tx.get("profit_rate_at_snapshot")
-    if snapshot_profit_rate is not None and buy_price > 0:
-        # 快照时的成本价 = buy_price / (1 + profit_rate_at_snapshot)
-        # （profit_rate = (current - cost)/cost → cost = current/(1+profit_rate)）
-        old_cost_price = buy_price / (1 + snapshot_profit_rate) if (1 + snapshot_profit_rate) != 0 else buy_price
-        # 假设补仓后的新平均成本（简化：按金额1:1摊薄，实际份额比取决于 old_shares）
-        # 这里用金额加权近似：new_cost ≈ (old_cost + buy_amount) / (old_shares + new_shares)
-        # 由于无 old_shares 快照，用比例近似：如果补仓金额 = 原仓位的 X%，则新成本 = old_cost*(1-X) + buy_price*X
-        # 简化展示：直接对比"假设补仓的独立盈亏"即可，摊薄效果在 summary 层面体现
-        avg_cost_improvement = {
-            "old_cost_price": round(old_cost_price, 4),
-            "current_price": round(current_price, 4),
-            "breakeven_needed_pct": round((old_cost_price - current_price) / old_cost_price * 100, 2) if old_cost_price > 0 else 0,
-        }
-
-    # 匹配建议金额
-    snapshot_suggested = tx.get("snapshot_suggested_amount")
-    matched_suggestion = (
-        snapshot_suggested is not None
-        and abs(snapshot_suggested - buy_amount) < 1.0
-    )
-
-    return {
-        "tx_id": tx_id,
-        "fund_code": fund_code,
-        "fund_name": fund_name,
-        "buy_date": buy_date,
-        "buy_amount": buy_amount,
-        "buy_price": round(buy_price, 4),
-        "buy_shares": round(buy_shares, 4),
-        "current_price": round(current_price, 4),
-        "current_nav_date": current_nav_date,
-        "current_value": current_value,
-        "profit_loss": profit_loss,
-        "profit_rate": profit_rate,
-        "profit_rate_pct": round(profit_rate * 100, 2),
-        "holding_days": holding_days,
-        "is_breakeven": is_breakeven,
-        "nav_date_lag": nav_date_lag,
-        "matched_suggestion": matched_suggestion,
-        "snapshot_suggested_amount": snapshot_suggested,
-        "snapshot_profit_rate": snapshot_profit_rate,
-        "avg_cost_analysis": avg_cost_improvement,
-        "status": "verified",
-        "verified_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-def verify_all_hypothetical(user_id: str = "default") -> dict:
-    """验证所有假设交易 + 汇总对比。
-
-    Returns:
-        {
-            "hypothetical_txs": [...],   # 每条验证结果
-            "summary": {...},            # 假设组合汇总
-            "comparison": {...},         # 假设vs真实对比
-        }
-    """
-    from db.smart_add_snapshots import list_hypothetical_txs
-    from db.portfolio import get_portfolio_summary
-
-    txs = list_hypothetical_txs(user_id=user_id)
-    verified = []
-    for tx in txs:
-        try:
-            result = verify_hypothetical_tx(tx)
-            verified.append(result)
-        except Exception as e:
-            logger.warning(f"[counterfactual] 验证失败 tx_id={tx.get('id')}: {e}")
-            verified.append({
-                "tx_id": tx.get("id"),
-                "fund_code": tx.get("fund_code", ""),
-                "fund_name": tx.get("fund_name", ""),
-                "buy_date": tx.get("transaction_date", ""),
-                "status": "error",
-                "message": str(e),
-            })
-
-    # 汇总假设组合
-    valid_results = [v for v in verified if v.get("status") == "verified"]
-    total_invested = round(sum(v["buy_amount"] for v in valid_results), 2)
-    total_value = round(sum(v["current_value"] for v in valid_results), 2)
-    total_profit_loss = round(total_value - total_invested, 2)
-    total_profit_rate = round(total_profit_loss / total_invested, 4) if total_invested > 0 else 0
-    breakeven_count = sum(1 for v in valid_results if v.get("is_breakeven"))
-    matched_count = sum(1 for v in valid_results if v.get("matched_suggestion"))
-    suggestion_match_rate = round(matched_count / len(valid_results), 4) if valid_results else 0
-
-    summary = {
-        "total_hypothetical_invested": total_invested,
-        "total_hypothetical_value": total_value,
-        "total_profit_loss": total_profit_loss,
-        "total_profit_rate": total_profit_rate,
-        "total_profit_rate_pct": round(total_profit_rate * 100, 2),
-        "breakeven_count": breakeven_count,
-        "total_count": len(valid_results),
-        "suggestion_match_rate": suggestion_match_rate,
-    }
-
-    # 真实组合对比
-    comparison = {"real_portfolio_profit_rate": None, "improvement": None}
+def _metadata(tx):
     try:
-        real_summary = get_portfolio_summary(user_id=user_id)
-        # 兼容字段名：total_profit_rate 或 total_profit_loss / total_cost 推算
-        real_profit_rate = real_summary.get("total_profit_rate")
-        real_profit_loss = real_summary.get("total_profit") or 0
-        real_total_cost = real_summary.get("total_cost") or 0
-        if real_profit_rate is None:
-            real_profit_rate = (real_profit_loss / real_total_cost) if real_total_cost > 0 else None
-        if real_profit_rate is not None:
-            comparison["real_portfolio_profit_rate"] = round(real_profit_rate, 4)
-            comparison["hypothetical_profit_rate"] = total_profit_rate
-            # 修复8：改善口径修正
-            # 原口径：improvement = 假设部分独立收益率 - 真实组合整体收益率（分母不同，不严谨）
-            # 新口径：模拟"真实盈亏+假设盈亏"与"真实成本+假设投入"的对比，反映"如果当时补了的整体效果"
-            combined_profit = real_profit_loss + total_profit_loss
-            combined_cost = real_total_cost + total_invested
-            combined_profit_rate = (combined_profit / combined_cost) if combined_cost > 0 else 0
-            comparison["improvement"] = round(combined_profit_rate - real_profit_rate, 4)
-            comparison["combined_profit_rate"] = round(combined_profit_rate, 4)
-    except Exception as e:
-        logger.debug(f"[counterfactual] 真实组合对比失败: {e}")
+        return json.loads(tx.get('notes') or '{}')
+    except (ValueError, TypeError):
+        return {}
 
-    return {
-        "hypothetical_txs": verified,
-        "summary": summary,
-        "comparison": comparison,
-    }
+
+def verify_hypothetical_tx(tx: dict) -> dict:
+    """从建议日之后的首个已存在净值评估，缺未来数据则待评估。"""
+    fund, day = tx.get('fund_code', ''), tx.get('transaction_date', '')
+    amount = float(tx.get('amount') or 0)
+    result = dict(tx_id=tx['id'], fund_code=fund, fund_name=tx.get('fund_name', ''), buy_date=day,
+                  buy_amount=amount, status='pending_evaluation', message='等待建议日之后首个可知净值；未真实成交',
+                  mode='suggestion_tracking')
+    buy_price, execution_day = _get_next_nav_after(fund, day)
+    price, nav_day = _get_latest_fund_price(fund)
+    if not buy_price or not price or not nav_day or nav_day < execution_day:
+        return result
+    fee_rate = float(_metadata(tx).get('fee_rate', 0) or 0)
+    shares = amount / (1 + fee_rate) / buy_price
+    value = round(shares * price, 2)
+    pnl = round(value - amount, 2)
+    result.update(status='verified', message='有限现金账本内的建议情景；非真实成交', execution_date=execution_day,
+        buy_price=round(buy_price, 6), buy_shares=round(shares, 4), current_price=price, current_nav_date=nav_day,
+        current_value=value, profit_loss=pnl, profit_rate=pnl / amount if amount else 0,
+        profit_rate_pct=pnl / amount * 100 if amount else 0, holding_days=_calc_holding_days(execution_day, nav_day),
+        is_breakeven=pnl >= 0, matched_suggestion=abs((tx.get('snapshot_suggested_amount') or amount) - amount) < .01,
+        snapshot_suggested_amount=tx.get('snapshot_suggested_amount'), snapshot_profit_rate=tx.get('profit_rate_at_snapshot'),
+        fees=round(amount * fee_rate / (1 + fee_rate), 2), avg_cost_analysis=None,
+        verified_at=datetime.now().isoformat(timespec='seconds'))
+    return result
+
+
+def verify_all_hypothetical(user_id: str = 'default') -> dict:
+    """同一用户固定期初虚拟现金；顺序扣除、事件去重，不重复叠加真实仓位。"""
+    from db.smart_add_snapshots import list_hypothetical_txs
+    txs = sorted(list_hypothetical_txs(user_id=user_id), key=lambda tx: (tx.get('transaction_date', ''), tx['id']))
+    initial_cash, cash, verified, seen, waiting = None, None, [], set(), False
+    for tx in txs:
+        metadata = _metadata(tx)
+        if initial_cash is None and metadata.get('shadow_cash_budget') is not None:
+            initial_cash = max(0., float(metadata['shadow_cash_budget']))
+            cash = initial_cash
+        result = verify_hypothetical_tx(tx)
+        event = metadata.get('event_key') or f"legacy:{tx['id']}"
+        if metadata.get('mode') != 'suggestion_tracking' or metadata.get('shadow_cash_budget') is None:
+            result.update(status='missing_budget_evidence', message='旧记录缺少期初资金证据，仅保留建议，未计入账本')
+        elif event in seen:
+            result.update(status='duplicate_event', message='同一策略事件已登记，不重复执行')
+        elif waiting:
+            result.update(status='pending_evaluation', message='较早建议尚无成交净值，等待完整顺序时间线')
+        elif result['status'] != 'verified':
+            waiting = True
+        elif result['buy_amount'] > cash:
+            result.update(status='insufficient_shadow_cash', message='固定期初虚拟现金不足，不追加资金')
+        else:
+            cash = round(cash - result['buy_amount'], 2)
+            seen.add(event)
+        verified.append(result)
+    valid = [r for r in verified if r['status'] == 'verified']
+    invested = round(sum(r['buy_amount'] for r in valid), 2)
+    value = round(sum(r['current_value'] for r in valid), 2)
+    wealth = round(value + (cash or 0), 2) if initial_cash is not None else None
+    pnl = round(wealth - initial_cash, 2) if wealth is not None else 0
+    summary = dict(total_hypothetical_invested=invested, total_hypothetical_value=value,
+        initial_shadow_cash=initial_cash, remaining_shadow_cash=cash, total_shadow_wealth=wealth,
+        total_profit_loss=pnl, total_profit_rate=pnl / initial_cash if initial_cash else 0,
+        total_profit_rate_pct=pnl / initial_cash * 100 if initial_cash else 0,
+        total_count=len(valid), pending_count=sum(r['status'] == 'pending_evaluation' for r in verified),
+        breakeven_count=sum(r.get('is_breakeven', False) for r in valid), suggestion_match_rate=1 if valid else 0,
+        fees=round(sum(r.get('fees', 0) for r in valid), 2), valuation_dates=sorted(set(r['current_nav_date'] for r in valid)),
+        note='建议跟踪使用固定期初虚拟现金，未计分红/现金利息；不代表真实组合收益，也不与真实持仓相加')
+    summary['status'] = 'evaluated' if valid else 'pending_evaluation'
+    if len(summary['valuation_dates']) > 1:
+        summary.update(status='waiting_common_valuation_date', total_shadow_wealth=None,
+                       total_hypothetical_value=None, total_profit_loss=None,
+                       total_profit_rate=None, total_profit_rate_pct=None)
+        summary['note'] += '；各基金净值日期不同，组合财富与收益等待同日数据后评价'
+    return dict(hypothetical_txs=list(reversed(verified)), summary=summary,
+                comparison=dict(real_portfolio_profit_rate=None, improvement=None, reason='建议跟踪与真实成交分开；无共同财富及同日起点不计算改善率'))

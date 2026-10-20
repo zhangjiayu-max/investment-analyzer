@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed, onMounted, onActivated } from 'vue'
+import PortfolioRiskOverview from '../portfolio/PortfolioRiskOverview.vue'
+import { ref, computed, watch } from 'vue'
 import {
   listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, scanPortfolioAlerts,
   dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation, acknowledgeAlert,
@@ -13,7 +14,7 @@ import { renderMarkdown } from '../../composables/useMarkdown'
 const emit = defineEmits(['navigate'])
 
 // ── Tab 切换 ──
-const activeTab = ref('advice') // 'advice' | 'alerts' | 'merged'
+const activeTab = ref('alerts') // 'advice' | 'alerts' | 'merged'
 
 // ── 每日持仓提示 state ──
 const dailyAdvice = ref(null)
@@ -29,6 +30,16 @@ const comprehensiveError = ref(null)
 
 // ── 风险预警 state ──
 const alerts = ref([])
+const alertsError = ref(null)
+const alertsLoading = ref(false)
+const alertScanResult = ref(null)
+const lastSuccessfulReadAt = ref(null)
+const lastScan = ref(null)
+const alertOffset = ref(0)
+const alertTotal = ref(0)
+const activeRiskCount = ref(0)
+const riskView = ref('active')
+const actionDialog = ref({ visible: false, alert: null, status: '', reason: '', review_date: '' })
 const unreadAlertCount = ref(0)
 const alertScanning = ref(false)
 const alertHistoryMap = ref({})  // alertId -> { loading, history, show }
@@ -38,7 +49,7 @@ const ackLoading = ref({})  // alertId -> loading（业务确认状态更新中�
 // 筛选器（方案 E）
 const severityFilter = ref('all')  // 'all' | 'danger_warning' | 'danger' | 'ignored'
 const typeFilter = ref('all')       // 'all' | 具体 alert_type
-const hideIgnoredInfo = ref(true)  // 默认隐藏已忽略的 info 级预警
+const hideIgnoredInfo = ref(false)  // 默认隐藏已忽略的 info 级预警
 
 // ── ConfirmDialog ──
 const confirmState = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
@@ -155,45 +166,58 @@ function adviceSummaryClass(headline) {
 
 // ── 风险预警函数 ──
 async function loadAlerts() {
+  alertsLoading.value = true
+  alertsError.value = null
   try {
-    const { data } = await listAlerts(true, 50)
+    const { data } = await listAlerts(false, 50, {
+      active_only: riskView.value === 'active', offset: alertOffset.value,
+      severity: ['danger', 'warning', 'info', 'danger_warning'].includes(severityFilter.value) ? severityFilter.value : undefined,
+      alert_type: typeFilter.value === 'all' ? undefined : typeFilter.value,
+    })
     alerts.value = data.alerts || []
+    alertTotal.value = data.total ?? alerts.value.length
+    activeRiskCount.value = data.active_count ?? alerts.value.filter(a => a.risk_status !== 'resolved').length
+    lastScan.value = data.last_scan || null
+    if (!alertScanResult.value && data.last_scan) alertScanResult.value = data.last_scan
     const { data: cnt } = await getUnreadAlertCount()
     unreadAlertCount.value = cnt.count
-  } catch (e) { /* silently ignore */ }
+    lastSuccessfulReadAt.value = new Date().toLocaleString('zh-CN')
+  } catch (e) {
+    alertsError.value = e?.response?.data?.detail || e?.message || '风险读取失败'
+  } finally {
+    alertsLoading.value = false
+  }
 }
 
-async function handleMarkAlertRead(alertId, title, severity) {
+async function refreshAll() {
+  await Promise.all([loadAlerts(), loadDailyAdvice()])
+}
+
+async function handleMarkAlertRead(alertId) {
+  const target = alerts.value.find(a => a.latest_id === alertId)
+  if (!target) return
   try {
-    // P0-1: 改为按 alert_type + related_fund_code + severity 分组（跨日合并后用 fund_code 而非 title）
-    const target = alerts.value.find(a => a.latest_id === alertId)
-    if (!target) return
-    const sameGroup = alerts.value.filter(a =>
-      a.alert_type === target.alert_type
-      && (a.related_fund_code || '') === (target.related_fund_code || '')
-      && a.severity === target.severity
-    )
-    for (const a of sameGroup) {
-      await markAlertRead(a.latest_id)
-    }
-    alerts.value = alerts.value.filter(a =>
-      !(a.alert_type === target.alert_type
-        && (a.related_fund_code || '') === (target.related_fund_code || '')
-        && a.severity === target.severity)
-    )
-    const cnt = sameGroup.reduce((s, a) => s + (a.cnt || 1), 0)
-    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - cnt)
+    await markAlertRead(alertId)
+    const count = target.unread_count ?? (target.is_read ? 0 : target.cnt || 1)
+    // 阅读只更新通知，活动风险事实继续展示。
+    target.is_read = 1
+    target.unread_count = 0
+    unreadAlertCount.value = Math.max(0, unreadAlertCount.value - count)
   } catch (e) {
-    useToast().showToast('操作失败', 'error')
+    useToast().showToast(e?.response?.data?.detail || e?.message || '操作失败', 'error')
   }
 }
 
 function handleDeleteAlert(alertId, title, severity) {
   const target = alerts.value.find(a => a.latest_id === alertId)
   if (!target) return
+  if (target.risk_status !== 'resolved') {
+    useToast().showToast('活动风险需完整巡检确认恢复后才能清理', 'info')
+    return
+  }
   confirmState.value = {
     visible: true,
-    title: '删除预警',
+    title: '删除已恢复预警',
     message: `确定删除「${title}」${target.cnt > 1 ? `（共 ${target.cnt} 条）` : ''}？该操作不可恢复。`,
     danger: true,
     onConfirm: async () => {
@@ -226,34 +250,74 @@ async function handleScanAlerts() {
   alertScanning.value = true
   try {
     const { data } = await scanPortfolioAlerts()
-    if (data.generated > 0) {
-      useToast().showToast(`巡检完成，发现 ${data.generated} 条新预警`, 'success')
-      await loadAlerts()
-    } else {
-      useToast().showToast('巡检完成，未发现新的风险', 'success')
-    }
+    alertScanResult.value = data
+    const incomplete = data.status !== 'complete' || data.failed > 0 || data.skipped > 0
+    useToast().showToast(
+      `${incomplete ? '检查未完成' : '巡检完成'}：新增 ${data.generated || 0}、更新 ${data.updated || 0}、恢复 ${data.resolved || 0}；失败 ${data.failed || 0}、未覆盖 ${data.skipped || 0}`,
+      incomplete ? 'info' : 'success',
+    )
   } catch (e) {
-    useToast().showToast('巡检失败：' + (e.response?.data?.detail || e.message), 'error')
+    alertScanResult.value = { status: 'failed', failed: 1, coverage: {}, error: e?.response?.data?.detail || e?.message || '巡检失败' }
+    useToast().showToast('巡检失败：' + alertScanResult.value.error, 'error')
   } finally {
+    await refreshAll()
     alertScanning.value = false
   }
 }
 
-// 业务确认状态：采纳/忽略（用于后续回测用户决策质量）
-async function handleAcknowledgeAlert(alert, status) {
-  const id = alert.latest_id
-  if (!id) return
-  ackLoading.value[id] = true
-  try {
-    await acknowledgeAlert(id, status)
-    alert.acknowledged_status = status
-    useToast().showToast(status === 'acknowledged' ? '已采纳' : '已忽略', 'info')
-  } catch (e) {
-    useToast().showToast('操作失败', 'error')
-  } finally {
-    ackLoading.value[id] = false
+function handleAcknowledgeAlert(alert, status) {
+  if (!alert.latest_id) return
+  actionDialog.value = { visible: status === 'ignored', alert, status, reason: '', review_date: '' }
+  if (status === 'acknowledged') confirmRiskAction()
+}
+
+function confirmRiskAction() {
+  const { alert, status, reason, review_date } = actionDialog.value
+  if (!alert) return
+  if (status === 'ignored' && (!reason.trim() || !review_date)) {
+    useToast().showToast('请填写忽略原因和复查日期', 'info')
+    return
+  }
+  if (status === 'ignored' && review_date < new Date().toLocaleDateString('en-CA')) {
+    useToast().showToast('复查日期不能早于今天', 'info')
+    return
+  }
+  actionDialog.value.visible = false
+  confirmState.value = {
+    visible: true, title: status === 'acknowledged' ? '记录采纳' : '记录暂时忽略', danger: false,
+    message: status === 'acknowledged'
+      ? `将「${alert.title}」标记为处理中。此记录不代表已成交或风险已恢复。`
+      : `忽略原因：${reason}；复查日期：${review_date}。活动风险继续展示，恶化时会重新提醒。`,
+    onConfirm: async () => {
+      confirmState.value.visible = false
+      ackLoading.value[alert.latest_id] = true
+      try {
+        const details = status === 'ignored' ? { reason: reason.trim(), review_date } : {}
+        await acknowledgeAlert(alert.latest_id, status, details)
+        alert.acknowledged_status = status
+        alert.action_reason = reason
+        alert.review_date = review_date
+        if (status === 'acknowledged' && alert.risk_status !== 'resolved') alert.risk_status = 'in_progress'
+        actionDialog.value.visible = false
+        useToast().showToast(status === 'acknowledged' ? '已记录采纳，成交请另行登记' : '已记录忽略及复查时间', 'info')
+      } catch (e) {
+        useToast().showToast(e?.response?.data?.detail || e?.message || '操作失败', 'error')
+      } finally {
+        ackLoading.value[alert.latest_id] = false
+      }
+    },
   }
 }
+
+function reviewIsDue(alert) {
+  return alert.acknowledged_status === 'ignored' && alert.review_date && alert.review_date <= new Date().toLocaleDateString('en-CA')
+}
+
+function lifecycleLabel(status) {
+  return { active: '持续风险', in_progress: '处理中（未确认成交）', recurred: '再次触发', resolved: '已恢复' }[status] || '待评估'
+}
+
+const incompleteCoverage = computed(() => Object.entries(alertScanResult.value?.coverage || {}).filter(([, item]) => item.status !== 'complete'))
 
 // P1-3.1 预警历史对比
 async function loadAlertHistory(alertId) {
@@ -281,10 +345,10 @@ async function loadAlertHistory(alertId) {
 // P1-3.2 预警→交易联动
 function alertActionLabel(alertType) {
   const map = {
-    buy_drop_alert: ['查看持仓', '快速补仓', '快速卖出'],
+    buy_drop_alert: ['查看持仓', '损失复核'],
     drawdown_alert: ['查看持仓', '止损评估'],
     concentration_alert: ['查看持仓', '调仓建议'],
-    valuation_opportunity: ['一键买入', '查看估值图'],
+    valuation_opportunity: ['查看估值图', '投前评估'],
     valuation_alert: ['查看持仓', '减仓复核'],
     cash_idle: ['查看持仓'],
     stale_data: ['刷新净值'],
@@ -352,7 +416,7 @@ const sortedAlerts = computed(() => {
 
   // 排序：danger > warning > info
   const order = { danger: 0, warning: 1, info: 2 }
-  return list.sort((a, b) => (order[a.severity] || 3) - (order[b.severity] || 3))
+  return list.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3))
 })
 
 // 类型筛选下拉选项
@@ -361,41 +425,21 @@ const typeOptions = computed(() => {
   return [{ value: 'all', label: '全部类型' }, ...[...types].map(t => ({ value: t, label: t }))]
 })
 
-// 一键忽略全部未处理 info 预警
-async function ignoreAllInfoAlerts() {
-  const infoAlerts = alerts.value.filter(a =>
-    a.severity === 'info' && a.acknowledged_status !== 'acknowledged' && a.acknowledged_status !== 'ignored'
-  )
-  if (infoAlerts.length === 0) {
-    useToast().showToast('没有可忽略的 info 预警', 'info')
-    return
-  }
-  confirmState.value = {
-    visible: true,
-    title: '批量忽略',
-    message: `确定忽略 ${infoAlerts.length} 条 info 级预警？忽略后不再展示（仍可在"已忽略"筛选中查看）。`,
-    danger: false,
-    onConfirm: async () => {
-      confirmState.value.visible = false
-      let okCnt = 0
-      for (const a of infoAlerts) {
-        try {
-          await acknowledgeAlert(a.latest_id, 'ignored')
-          // 本地同步状态
-          a.acknowledged_status = 'ignored'
-          okCnt++
-        } catch (e) { /* continue */ }
-      }
-      useToast().showToast(`已忽略 ${okCnt} 条 info 预警`, 'success')
-    },
-  }
+watch([severityFilter, typeFilter, riskView], () => {
+  alertOffset.value = 0
+  loadAlerts()
+})
+function changeAlertPage(delta) {
+  alertOffset.value = Math.max(0, alertOffset.value + delta * 50)
+  loadAlerts()
 }
 
-usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
+usePageRefresh(refreshAll)
 </script>
 
 <template>
   <div class="alert-center bg-mesh">
+    <PortfolioRiskOverview :refresh-key="alerts" />
     <!-- 页头 -->
     <header class="ac-header">
       <div class="ac-header-left">
@@ -418,7 +462,7 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
           </svg>
           {{ alertScanning ? '巡检中...' : '巡检' }}
         </button>
-        <button class="btn-ghost btn-sm" :class="{ 'btn-loading': dailyAdviceLoading }" :disabled="dailyAdviceLoading" @click="loadDailyAdvice" title="刷新提示">
+        <button class="btn-ghost btn-sm" :class="{ 'btn-loading': dailyAdviceLoading }" :disabled="dailyAdviceLoading" @click="refreshAll" title="刷新风险与提示">
           <svg :class="['icon-spin', { 'spinning': dailyAdviceLoading }]" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4.93 9a8 8 0 0113.14 0M19.07 15a8 8 0 01-13.14 0"/>
           </svg>
@@ -592,7 +636,7 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
         <svg class="title-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
-        <strong class="title">风险预警</strong>
+        <strong class="title">活动风险 {{ activeRiskCount }} · 通知未读 {{ unreadAlertCount }}</strong>
         <span v-if="unreadAlertCount > 0" class="alert-badge has-unread font-jet">{{ unreadAlertCount }}</span>
         <span v-if="dangerAlertCount > 0" class="danger-tag">
           <span class="terminal-label">DANGER</span>
@@ -603,13 +647,34 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
       </div>
 
       <div class="alert-list">
-        <div v-if="alerts.length === 0" class="alert-empty">
-          <span>暂无预警</span>
-          <span class="alert-empty-hint">点击「巡检」主动扫描持仓风险</span>
+        <div class="risk-status-panel">
+          <p>已读、采纳或暂时忽略后，活动风险仍会展示；只有完整巡检确认触发条件消失才自动恢复。</p>
+          <p v-if="lastSuccessfulReadAt">最后成功读取 {{ lastSuccessfulReadAt }}</p>
+          <p v-if="lastScan">最近巡检 {{ lastScan.last_scan || lastScan.scanned_at || '时间未知' }}</p>
+          <label>风险范围
+            <select v-model="riskView" class="filter-select">
+              <option value="active">所有活动风险（含已读）</option>
+              <option value="all">全部风险（含已恢复）</option>
+            </select>
+          </label>
+        </div>
+        <div v-if="alertsError" class="comprehensive-error" role="alert">风险读取失败：{{ alertsError }}。保留上次已读取事实，请重试。</div>
+        <div v-if="alertScanResult" class="risk-status-panel" :class="{ 'scan-incomplete': alertScanResult.status !== 'complete' }" role="status">
+          <strong>{{ alertScanResult.status === 'complete' ? '巡检完成' : '检查未完成' }}</strong>
+          · 新增 {{ alertScanResult.generated || 0 }} · 更新 {{ alertScanResult.updated || 0 }} · 恢复 {{ alertScanResult.resolved || 0 }}
+          · 失败 {{ alertScanResult.failed || 0 }} · 未覆盖 {{ alertScanResult.skipped || 0 }}
+          <p v-if="alertScanResult.error">{{ alertScanResult.error }}</p>
+          <p v-for="[name, item] in incompleteCoverage" :key="name">{{ name }}：{{ item.reason || item.status }}<span v-if="item.details"> {{ JSON.stringify(item.details) }}</span></p>
+          <p v-if="alertScanResult.status !== 'complete'">未覆盖的检查不能判断安全，既有风险继续保留。</p>
+        </div>
+        <div v-if="alertsLoading" class="alert-empty">读取风险中…</div>
+        <div v-else-if="alerts.length === 0 && !alertsError" class="alert-empty">
+          <span>当前范围暂无已记录风险</span>
+          <span class="alert-empty-hint">结合最近巡检覆盖情况判断，未覆盖项目仍待核对。</span>
         </div>
 
         <!-- 筛选器工具条（方案 E） -->
-        <div v-if="alerts.length > 0" class="alert-filters">
+        <div class="alert-filters">
           <div class="filter-group">
             <button :class="['filter-chip', { active: severityFilter === 'all' }]" @click="severityFilter = 'all'">全部</button>
             <button :class="['filter-chip', { active: severityFilter === 'danger_warning' }]" @click="severityFilter = 'danger_warning'">仅高优</button>
@@ -619,13 +684,7 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
           <select v-model="typeFilter" class="filter-select">
             <option v-for="opt in typeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
-          <button
-            v-if="alerts.some(a => a.severity === 'info' && a.acknowledged_status !== 'ignored')"
-            class="btn-ghost btn-xs ignore-all-btn"
-            @click="ignoreAllInfoAlerts"
-          >
-            一键忽略 INFO
-          </button>
+
         </div>
 
         <div v-if="sortedAlerts.length === 0 && alerts.length > 0" class="alert-empty">
@@ -653,7 +712,9 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
               <span v-else class="severity-mark info terminal-label">INFO</span>
               {{ a.title }}
               <span v-if="a.cnt > 1" class="alert-count-badge font-jet">×{{ a.cnt }}</span>
-              <span v-if="a.acknowledged_status === 'acknowledged'" class="alert-ack-tag ack-acknowledged">已采纳</span>
+              <span class="alert-ack-tag">{{ lifecycleLabel(a.risk_status) }}</span>
+              <span v-if="a.is_read" class="alert-ack-tag">通知已读</span>
+              <span v-if="a.acknowledged_status === 'acknowledged'" class="alert-ack-tag ack-acknowledged">已采纳（未确认成交）</span>
               <span v-else-if="a.acknowledged_status === 'ignored'" class="alert-ack-tag ack-ignored">已忽略</span>
             </div>
 
@@ -690,6 +751,14 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
               <span v-else class="alert-time font-jet">{{ a.latest_at }}</span>
             </div>
 
+            <div class="risk-facts">
+              <p>事实日期：{{ a.fact_date || '未提供，待核对' }} · 首次发现：{{ a.first_detected_at || a.first_at || '未知' }}</p>
+              <p>最后确认：{{ a.last_confirmed_at || a.latest_at || '未知' }} · 恶化版本 {{ a.revision || 1 }} · 第 {{ a.episode || 1 }} 次触发</p>
+              <p>恢复条件：{{ a.recovery_condition || '需要完整覆盖该类别的成功巡检确认，不以已读或采纳代替' }}</p>
+              <p v-if="a.review_date">忽略原因：{{ a.action_reason }}；复查日期：{{ a.review_date }} <strong v-if="reviewIsDue(a)">复查已到期，请重新评估</strong></p>
+              <p v-if="a.resolved_at">恢复确认：{{ a.resolved_at }}</p>
+            </div>
+
             <!-- P1-3.1 历史对比 -->
             <div v-if="a.related_fund_code" class="alert-history-section">
               <button class="btn-ghost btn-xs history-btn" @click="loadAlertHistory(a.latest_id)">
@@ -700,12 +769,12 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
                 <div v-else-if="alertHistoryMap[a.latest_id]?.error" class="history-error">{{ alertHistoryMap[a.latest_id].error }}</div>
                 <div v-else-if="alertHistoryMap[a.latest_id]?.history?.length">
                   <div class="history-summary">
-                    近30天共 <strong class="font-jet">{{ alertHistoryMap[a.latest_id].history.length }}</strong> 次同类预警
+                    生命周期记录 <strong class="font-jet">{{ alertHistoryMap[a.latest_id].history.length }}</strong> 次同类预警
                   </div>
                   <div v-for="h in alertHistoryMap[a.latest_id].history.slice(0, 5)" :key="h.id" class="history-item">
-                    <span :class="['history-sev', 'terminal-label', `sev-${h.severity}`]">{{ h.severity }}</span>
+                    <span :class="['history-sev', 'terminal-label', `sev-${h.severity}`]">{{ h.event_type || h.severity }}</span>
                     <span class="history-time font-jet">{{ h.created_at }}</span>
-                    <span class="history-title">{{ h.title }}</span>
+                    <span class="history-title">{{ h.title || h.evidence }}</span>
                   </div>
                 </div>
                 <div v-else class="history-empty">暂无历史记录</div>
@@ -745,23 +814,44 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
           <div class="alert-actions">
             <button
               class="btn-ghost btn-sm ack-adopt-btn"
-              :disabled="!!a.acknowledged_status || ackLoading[a.latest_id]"
+              :disabled="a.risk_status === 'resolved' || ackLoading[a.latest_id]"
               @click="handleAcknowledgeAlert(a, 'acknowledged')"
-              title="采纳"
-            >采纳</button>
+              title="采纳进入处理中，不代表成交"
+            >记录采纳</button>
             <button
               class="btn-ghost btn-sm ack-ignore-btn"
-              :disabled="!!a.acknowledged_status || ackLoading[a.latest_id]"
+              :disabled="a.risk_status === 'resolved' || ackLoading[a.latest_id]"
               @click="handleAcknowledgeAlert(a, 'ignored')"
-              title="忽略"
-            >忽略</button>
-            <button class="btn-ghost btn-sm" @click="handleMarkAlertRead(a.latest_id, a.title, a.severity)" title="标记已读">✔</button>
-            <button class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.latest_id, a.title, a.severity)" title="删除">✕</button>
+              title="记录原因与复查日期，风险继续保留"
+            >暂时忽略</button>
+            <button class="btn-ghost btn-sm" :disabled="!!a.is_read" @click="handleMarkAlertRead(a.latest_id)" title="仅标记通知已读">已读</button>
+            <button v-if="a.risk_status === 'resolved'" class="btn-ghost btn-sm btn-danger-text" @click="handleDeleteAlert(a.latest_id, a.title, a.severity)" title="清理已恢复通知">清理</button>
           </div>
         </div>
       </div>
     </section>
 
+    <div class="alert-filters" v-if="alertTotal > 50 || alertOffset > 0">
+      <button class="btn-secondary btn-sm" :disabled="alertOffset === 0 || alertsLoading" @click="changeAlertPage(-1)">上一页</button>
+      <span>{{ alertOffset + 1 }}–{{ Math.min(alertOffset + 50, alertTotal) }} / {{ alertTotal }} 条</span>
+      <button class="btn-secondary btn-sm" :disabled="alertOffset + 50 >= alertTotal || alertsLoading" @click="changeAlertPage(1)">下一页</button>
+    </div>
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="actionDialog.visible" class="risk-action-backdrop" @click.self="actionDialog.visible = false">
+          <form class="risk-action-dialog editorial-card" @submit.prevent="confirmRiskAction">
+            <h3>暂时忽略 · {{ actionDialog.alert?.title }}</h3>
+            <p>此记录保留活动风险。恶化或再次触发会重新提醒。</p>
+            <label>原因<textarea v-model="actionDialog.reason" required maxlength="500" rows="3" placeholder="说明暂不处理的依据" /></label>
+            <label>复查日期<input v-model="actionDialog.review_date" type="date" required /></label>
+            <div class="alert-action-buttons">
+              <button class="btn-secondary" type="button" @click="actionDialog.visible = false">取消</button>
+              <button class="btn-primary" type="submit">核对并记录</button>
+            </div>
+          </form>
+        </div>
+      </Transition>
+    </Teleport>
     <ConfirmDialog
       :visible="confirmState.visible"
       :title="confirmState.title"
@@ -774,6 +864,15 @@ usePageRefresh(() => Promise.all([loadAlerts(), loadDailyAdvice()]))
 </template>
 
 <style scoped>
+.risk-status-panel, .risk-facts { padding: 0.6rem 1rem; color: var(--color-text-secondary); font-size: 0.76rem; line-height: 1.6; overflow-wrap: anywhere; }
+.risk-status-panel p, .risk-facts p { margin: 0.25rem 0; }
+.risk-facts { padding: 0.4rem 0; }
+.scan-incomplete { background: var(--color-warning-bg); border-left: 3px solid var(--color-warning); }
+.risk-action-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 1rem; background: rgba(0,0,0,.55); }
+.risk-action-dialog { width: min(100%, 30rem); padding: 1.5rem; background: var(--color-bg-card); }
+.risk-action-dialog label { display: grid; gap: .4rem; margin: 1rem 0; }
+.risk-action-dialog textarea, .risk-action-dialog input { width: 100%; padding: .6rem; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-input); color: var(--color-text-primary); }
+
 .alert-center {
   display: flex;
   flex-direction: column;

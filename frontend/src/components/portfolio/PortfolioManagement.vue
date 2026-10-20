@@ -1,4 +1,5 @@
 <script setup>
+import PortfolioRiskOverview from './PortfolioRiskOverview.vue'
 import { whatIfScenarios, buildWhatIfRequest } from '../../utils/whatIfScenarios.js'
 import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick, onUnmounted } from 'vue'
 
@@ -81,7 +82,7 @@ import {
   refreshPortfolioPrice,
   getDcaSuggestion,
   previewSell,
-  autoConfirmTransaction,
+  previewTransactionNav,
   calcTransactionFee,
   listTransactionsWithFilter,
   lookupFundInfo, getFundHoldings,
@@ -466,6 +467,8 @@ const dcaSuggestion = ref(null)
 const dcaSuggestionLoading = ref(false)
 const addPurchaseForm = ref({
   amount: 0,
+  funding_source: '',
+  cash_account: '',
   transaction_date: new Date().toISOString().slice(0, 10),
   transaction_time: new Date().toTimeString().slice(0, 5),
   notes: '',
@@ -486,6 +489,7 @@ const newBuyForm = ref({
   transaction_time: new Date().toTimeString().slice(0, 5),
   notes: '',
   account: '花无缺',
+  funding_source: '',
   // 4%定投法配置（建仓时可选启用，雷牛牛方法论）
   dip_4pct_enabled: false,
   dip_4pct_max_amount: 50000,    // 投资上限（用户填写，根据总额计算占比）
@@ -978,6 +982,7 @@ async function openNewBuy() {
     transaction_time: new Date().toTimeString().slice(0, 5),
     notes: '',
     account: '花无缺',
+    funding_source: '',
     // 4%定投法默认配置（建仓时可选启用）
     dip_4pct_enabled: false,
     dip_4pct_max_amount: 50000,
@@ -1007,6 +1012,7 @@ async function lookupNewBuyFund() {
 async function submitNewBuy() {
   const f = newBuyForm.value
   if (!f.fund_code.trim()) { showToast('请输入基金代码', 'error'); return }
+  if (!['internal', 'external'].includes(f.funding_source)) { showToast('请选择买入资金来源', 'error'); return }
   if (f.amount <= 0) { showToast('买入金额必须大于 0', 'error'); return }
   // 4%定投法配置校验
   if (f.dip_4pct_enabled) {
@@ -1032,6 +1038,8 @@ async function submitNewBuy() {
       status: 'pending',
       submitted_amount: f.amount,
       account: f.account,
+      funding_source: f.funding_source,
+      cash_account: f.account,
     })
     // 4%定投法配置：建仓同步创建plan（启用时）
     if (f.dip_4pct_enabled) {
@@ -1178,6 +1186,7 @@ const batchConfirmLoading = ref(false)
 
 // Pending transactions reminder
 const pendingTxs = ref([])
+const pendingTxError = ref('')
 const actionCandidates = ref([])
 const actionDecisions = ref([])
 const dueReviews = ref([])
@@ -1208,7 +1217,7 @@ async function clearAllData() {
         loadData()
         unreadAlertCount.value = 0
       } catch (e) {
-        showToast('清空失败: ' + e.message, 'error')
+        showToast('清空失败: ' + (e.response?.data?.detail || e.message), 'error')
       }
     }
   }
@@ -1644,9 +1653,9 @@ async function loadPendingTxs() {
       }
     }
     pendingTxs.value = allPending
+    pendingTxError.value = ''
   } catch (e) {
-    console.error('加载待确认交易失败:', e)
-    pendingTxs.value = []
+    pendingTxError.value = '待确认交易加载失败: ' + (e.response?.data?.detail || e.message)
   }
 }
 
@@ -2598,7 +2607,7 @@ async function deleteAiAnalysisRecord(recordId) {
     }
     showToast('已删除')
   } catch (e) {
-    showToast('删除失败', 'error')
+    showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -3102,7 +3111,7 @@ async function handleImportCsv(event) {
     const { data } = await importPortfolioCsv(file)
     if (data.ok) {
       alert(`导入完成：新增 ${data.imported} 条，跳过 ${data.skipped} 条${data.errors?.length ? '，错误 ' + data.errors.length + ' 条' : ''}`)
-      refreshAll()
+      await loadData({ skipAutoConfirm: true, force: true })
     } else {
       alert('导入失败: ' + (data.error || '未知错误'))
     }
@@ -3291,6 +3300,8 @@ function openAddPurchase(h) {
   const now = new Date()
   addPurchaseForm.value = {
     amount: 0,
+    funding_source: '',
+    cash_account: ['花无缺', '小鱼儿'].includes(h.account) ? h.account : '',
     transaction_date: now.toISOString().slice(0, 10),
     transaction_time: now.toTimeString().slice(0, 5),
     notes: '',
@@ -3313,6 +3324,7 @@ function applyDcaSuggestion() {
 
 async function submitAddPurchase() {
   const f = addPurchaseForm.value
+  if (!['internal', 'external'].includes(f.funding_source) || !f.cash_account) { showToast('请选择买入资金来源及所属现金账户', 'error'); return }
   if (f.amount <= 0) {
     showToast('买入金额必须大于 0', 'error')
     return
@@ -3332,6 +3344,8 @@ async function submitAddPurchase() {
       notes: f.notes,
       status: 'pending',
       submitted_amount: f.amount,
+      funding_source: f.funding_source,
+      cash_account: f.cash_account,
     })
     const confirmDate = txResult?.expected_confirm_date
     showToast(confirmDate ? `已提交买入 ¥${f.amount}，预计 ${confirmDate} 确认` : `已提交买入 ¥${f.amount}，待 T+1 确认`)
@@ -3473,7 +3487,7 @@ async function fetchAutoNav() {
   if (!tx?.id) return
   autoConfirmLoading.value = true
   try {
-    const { data } = await autoConfirmTransaction(tx.id)
+    const { data } = await previewTransactionNav(tx.id)
     confirmTxPrice.value = data.confirmed_price
     if (data.fee > 0) {
       confirmTxFee.value = data.fee
@@ -3494,7 +3508,10 @@ async function batchAutoConfirm() {
   batchConfirmLoading.value = true
   try {
     const { data } = await autoConfirmPortfolioTransactions()
-    showToast(`批量确认完成：${data.result?.confirmed || 0} 笔成功`, data.result?.failed ? 'warning' : 'success')
+    const result = data.result || data
+    const failed = (result.errors || []).length || result.failed || 0
+    const skipped = (result.skipped || []).length
+    showToast(`批量确认完成：${result.confirmed || 0} 笔成功，${failed} 笔失败，${skipped} 笔等待净值`, failed ? 'warning' : 'success')
     loadData()
   } catch (e) {
     showToast('批量确认失败: ' + (e.response?.data?.detail || e.message), 'error')
@@ -3655,6 +3672,7 @@ function txDisplayAmount(tx) {
 
 <template>
   <div class="portfolio-page">
+    <PortfolioRiskOverview :refresh-key="summary" />
     <div class="page-header">
       <div>
         <h2 class="page-title editorial-title-lg">持仓管理</h2>
@@ -3701,7 +3719,7 @@ function txDisplayAmount(tx) {
     <section class="portfolio-workbench">
       <article class="workbench-cell overview editorial-metric reveal-stagger" @click="switchAnalysisTab('holdings')">
         <div class="workbench-label label">今日概览</div>
-        <strong class="value font-jet-lg">{{ formatMoney((summary.total_value || 0) + totalCash) }}</strong>
+        <strong class="value font-jet-lg">{{ formatMoney(summary.total_assets ?? ((summary.total_value || 0) + totalCash)) }}</strong>
         <span class="delta">{{ holdings.length }} 只持仓 · 现金 {{ formatMoney(totalCash) }}</span>
       </article>
       <article class="workbench-cell diagnosis editorial-metric reveal-stagger" @click="emit('navigate', 'alert-center')" title="前往风险与提示中心">
@@ -5229,7 +5247,8 @@ function txDisplayAmount(tx) {
         </div>
       </template>
     </div>
-    <div v-if="activeAnalysisTab === 'holdings'" class="summary-cards">
+<p v-if="pendingTxError" role="alert">{{ pendingTxError }} <button class="btn-sm btn-secondary" @click="loadPendingTxs">重试</button></p>
+        <div v-if="activeAnalysisTab === 'holdings'" class="summary-cards">
       <div class="summary-card">
         <div class="summary-label">持仓数量</div>
         <div class="summary-value">{{ summary.holding_count }}</div>
@@ -5237,7 +5256,7 @@ function txDisplayAmount(tx) {
       <div class="summary-card summary-card-cost">
         <div class="summary-label">总成本</div>
         <div class="summary-value cost-value font-jet-lg">{{ formatMoney(summary.total_cost) }}</div>
-        <div class="summary-sub">总资产 {{ formatMoney((summary.total_value || 0) + totalCash) }}</div>
+        <div class="summary-sub">总资产 {{ formatMoney(summary.total_assets ?? ((summary.total_value || 0) + totalCash)) }}</div>
       </div>
       <div class="summary-card">
         <div class="summary-label">总市值</div>
@@ -5252,17 +5271,26 @@ function txDisplayAmount(tx) {
           {{ todayTotalProfit >= 0 ? '+' : '' }}{{ formatMoney(todayTotalProfit) }}
         </div>
         <div v-if="todayTotalProfit != 0" class="today-profit-sub">
-          累计 {{ summary.total_profit >= 0 ? '+' : '' }}{{ formatMoney(summary.total_profit) }}
+          持仓浮盈亏 {{ summary.total_profit != null && summary.total_profit >= 0 ? '+' : '' }}{{ formatMoney(summary.total_profit) }}
         </div>
       </div>
       <div class="summary-card summary-card-pl">
-        <div class="summary-label">总盈亏</div>
+        <div class="summary-label">持仓浮盈亏</div>
         <div :class="['summary-value', 'font-jet-lg', profitClass(summary.total_profit)]" style="font-size:0.9rem">
           {{ formatMoney(summary.total_profit) }}
         </div>
         <div :class="['summary-sub', profitClass(summary.profit_rate)]">
-          收益率 {{ formatRate(summary.profit_rate) }}
+          持仓收益率 {{ formatRate(summary.profit_rate) }}
+          <span v-if="summary.valuation_complete === false"> · 净值覆盖不足</span>
         </div>
+      </div>
+      <div v-if="summary.performance" class="summary-card">
+        <div class="summary-label">累计投资收益</div>
+        <div :class="['summary-value', profitClass(summary.performance.cumulative_investment_profit)]">{{ formatMoney(summary.performance.cumulative_investment_profit) }}</div>
+        <div class="summary-sub">已实现 {{ formatMoney(summary.performance.realized_profit) }} · 分红 {{ formatMoney(summary.performance.cash_dividends) }}</div>
+        <div class="summary-sub">手续费 {{ formatMoney(summary.performance.fees) }}（已含于成交收益）</div>
+        <div class="summary-sub">资金加权收益 {{ formatRate(summary.performance.xirr?.value) }}<span v-if="summary.performance.xirr?.value == null"> · {{ summary.performance.xirr?.reason || '历史不足' }}</span></div>
+        <div v-if="summary.performance.history_complete === false" class="summary-sub">历史记录不完整，累计收益仅覆盖已登记成交</div>
       </div>
       <div class="summary-card summary-card-cash" @click="showCashModal = true" style="cursor:pointer">
         <div class="summary-label">
@@ -5270,6 +5298,7 @@ function txDisplayAmount(tx) {
           <span style="font-size:0.65rem;opacity:0.6;margin-left:4px">✎</span>
         </div>
         <div class="summary-value cash-value font-jet-lg">{{ formatMoney(totalCash) }}</div>
+        <div class="summary-sub">可用 {{ formatMoney(summary.available_cash ?? totalCash) }} · 冻结 {{ formatMoney(summary.frozen_cash ?? 0) }} · 应收 {{ formatMoney(summary.receivable_cash ?? 0) }}</div>
         <div class="cash-accounts">
           <span class="cash-account-tag">🐟 {{ formatMoney(cashBalances['小鱼儿']) }}</span>
           <span class="cash-account-tag">🌸 {{ formatMoney(cashBalances['花无缺']) }}</span>
@@ -5796,6 +5825,14 @@ function txDisplayAmount(tx) {
                   </select>
                 </div>
                 <div class="form-group">
+                  <label>买入资金来源</label>
+                  <select v-model="newBuyForm.funding_source" class="input-field" required>
+                    <option disabled value="">请选择资金来源</option>
+                    <option value="internal">账户内现金（提交后冻结，确认后扣款）</option>
+                    <option value="external">外部新增资金（独立记录入金）</option>
+                  </select>
+                </div>
+                <div class="form-group">
                   <label>买入金额</label>
                   <input v-model.number="newBuyForm.amount" type="number" step="0.01" class="input-field" placeholder="如 10000" required />
                   <span v-if="newBuyForm.amount > 0" class="field-hint">预估手续费 ¥{{ (newBuyForm.amount * 0.0015).toFixed(2) }}（0.15%），T+1 确认时扣除</span>
@@ -6109,6 +6146,20 @@ function txDisplayAmount(tx) {
               <p v-if="dcaSuggestion.suggestion.already_added_today" class="dca-warning">今日已加仓，请谨慎操作</p>
             </div>
             <form @submit.prevent="submitAddPurchase" class="modal-form">
+              <div class="form-group">
+                <label>买入资金来源</label>
+                <select v-model="addPurchaseForm.funding_source" class="input-field" required>
+                  <option disabled value="">请选择资金来源</option>
+                  <option value="internal">账户内现金（提交后冻结，确认后扣款）</option>
+                  <option value="external">外部新增资金（独立记录入金）</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>所属现金账户</label>
+                <select v-model="addPurchaseForm.cash_account" class="input-field" required>
+                  <option disabled value="">请选择账户</option><option>花无缺</option><option>小鱼儿</option>
+                </select>
+              </div>
               <div class="form-group">
                 <label>买入金额（元）*</label>
                 <input v-model.number="addPurchaseForm.amount" type="number" step="0.01" class="input-field" placeholder="如 10000" required />

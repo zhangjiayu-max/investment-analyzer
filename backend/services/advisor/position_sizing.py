@@ -176,22 +176,12 @@ def calc_target_position(
     except Exception:
         user_max_pct = 25.0
 
-    # 维度2穿透余量（软约束：未超限时用余量作为约束，超限时仍用上限不硬截）
-    exposure_room = exposure_warning.get("room_pct")
-    if exposure_room is None or exposure_room <= 0:
-        # 超限或无数据时不通过此约束硬截（软提示）
-        exposure_constraint = user_max_pct
-    else:
-        exposure_constraint = exposure_room
-
-    # 维度6资金余量（软约束：资金不足时约束目标仓位）
-    cash_room_pct = cash_constraint.get("position_room_pct")
-    if not cash_constraint.get("data_available", False):
-        cash_constraint_val = user_max_pct
-    elif cash_room_pct is None or cash_room_pct <= 0:
-        cash_constraint_val = 0.0
-    else:
-        cash_constraint_val = cash_room_pct
+    # 指数、现金字段均为新增余量，不得当作总目标；已知零余量始终禁止增加。
+    exposure_room = exposure_warning.get('room_pct')
+    exposure_constraint = max(0., float(exposure_room)) if exposure_room is not None else 0.
+    cash_room_pct = cash_constraint.get('position_room_pct')
+    cash_constraint_val = max(0., float(cash_room_pct or 0)) if cash_constraint.get('data_available') else 0.
+    max_increment_pct = min(exposure_constraint, cash_constraint_val)
 
     # 用户风险偏好调节
     risk_mult = _get_user_risk_multiplier(user_id)
@@ -215,17 +205,20 @@ def calc_target_position(
         pass
 
     target_pct = min(
+        kelly_limit_pct,
         kelly_adjusted * risk_mult * horizon_mult,
         type_hard_cap,
         user_max_pct,
-        exposure_constraint,
-        cash_constraint_val,
+
     )
     # 目标仓位最低 0（高估时可能为 0）
     target_pct = max(0.0, target_pct)
+    if cash_constraint.get('data_available') and cash_constraint.get('position_room_pct') == 0:
+        target_pct = 0.0
 
     return {
         "target_pct": round(target_pct, 2),
+        "max_increment_pct": round(max_increment_pct, 2),
         "valuation_coeff": valuation_coeff,
         "bucket": bucket,
         "adjust_months": adjust_months,
@@ -742,7 +735,7 @@ def generate_position_sizing_plan(
     elasticity = calc_return_elasticity(holding, valuation, total_assets)
 
     # 计算目标驱动月度金额
-    gap_pct = target_pct - current_position_pct
+    gap_pct = min(target_pct - current_position_pct, target_position["max_increment_pct"])
     target_driven_monthly = 0.0
     reduce_amount = 0.0
 
@@ -770,7 +763,7 @@ def generate_position_sizing_plan(
                           "reason": "家庭收支数据不足，暂不生成首次仓补足金额"}
     else:
         # 单标的也不能展示超过整月可用资金的金额，组合层会继续分摊预算。
-        monthly_budget = cash_constraint.get("usable_cash", 0) + cash_constraint.get("monthly_inflow", 0)
+        monthly_budget = cash_constraint.get("usable_cash", 0)
         target_driven_monthly = min(target_driven_monthly, max(0.0, monthly_budget))
 
     # 生成一句话建议

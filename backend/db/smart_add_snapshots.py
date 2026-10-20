@@ -1,8 +1,8 @@
 """智能补仓建议快照表 CRUD — 反事实决策验证数据层。
 
-每次 generate_smart_add_plan() 被调用时：
+用户显式保存计划时：
 1. 落库一条建议快照（fund_code + snapshot_date 去重）
-2. 同时自动创建一笔假设交易（is_hypothetical=1）
+2. 同时创建待评估建议记录（is_hypothetical=1，不代表真实成交）
 3. 关联 snapshot.hypothetical_tx_id
 """
 import logging
@@ -26,8 +26,8 @@ def create_snapshot_with_hypothetical(
 ) -> dict | None:
     """创建建议快照 + 自动假设交易（原子操作）。
 
-    去重规则：同一 user_id + fund_code + snapshot_date 只保留最新一条。
-    若已存在，删除旧的假设交易和快照，重新创建。
+    幂等规则：同一 user_id + fund_code + snapshot_date 保留首次保存的建议时点。
+    若已存在，返回原ID，不改写原金额、价格证据和跟踪记录。
 
     Returns:
         {"snapshot_id": int, "hypothetical_tx_id": int} 或 None
@@ -36,39 +36,38 @@ def create_snapshot_with_hypothetical(
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 建议金额为 0 或负值则不创建（无意义的建议不需要假设验证）
-    if not suggested_amount or suggested_amount <= 0:
+    import math
+    if not suggested_amount or not math.isfinite(suggested_amount) or suggested_amount <= 0:
         return None
 
     conn = _get_conn()
     try:
         conn.execute("BEGIN")
 
-        # 1. 去重：删除同 user + fund + date 的旧快照及其假设交易
+        # 1. 同日幂等：读取既有建议快照
         old_rows = conn.execute(
             """SELECT id, hypothetical_tx_id FROM smart_add_snapshots
                WHERE user_id = ? AND fund_code = ? AND snapshot_date = ?""",
             (user_id, fund_code, snapshot_date),
         ).fetchall()
-        for old in old_rows:
-            if old["hypothetical_tx_id"]:
-                conn.execute(
-                    "DELETE FROM portfolio_transactions WHERE id = ? AND is_hypothetical = 1",
-                    (old["hypothetical_tx_id"],),
-                )
-            conn.execute("DELETE FROM smart_add_snapshots WHERE id = ?", (old["id"],))
+        if old_rows:
+            # 假设时点不可被刷新或重复保存改写；保留原建议和原评估证据。
+            old = old_rows[0]
+            conn.rollback()
+            return {"snapshot_id": old['id'], "hypothetical_tx_id": old['hypothetical_tx_id']}
 
         # 2. 创建假设交易（is_hypothetical=1）
-        # 买入价 = 当日净值（若快照价缺失则用1.0占位，验证时会从净值表取）
-        buy_price = current_price_at_snapshot or 0
-        buy_shares = round(suggested_amount / buy_price, 4) if buy_price > 0 else 0
+        # 不将建议时已知净值当作未来成交价。
+        buy_price = 0
+        buy_shares = 0  # 建议日价格不是未来成交价；下一可知净值由评估器读取
 
         cursor = conn.execute(
             """INSERT INTO portfolio_transactions
                (user_id, fund_code, fund_name, transaction_type, amount, shares, price,
                 transaction_date, status, notes, is_system, is_hypothetical, created_at)
-               VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'confirmed', ?, 0, 1, ?)""",
+               VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, 'pending', ?, 0, 1, ?)""",
             (user_id, fund_code, fund_name, suggested_amount, buy_shares, buy_price,
-             snapshot_date, f"假设补仓（系统建议）{notes}", now),
+             snapshot_date, notes or "建议跟踪（待下一可知净值；未真实成交）", now),
         )
         hypothetical_tx_id = cursor.lastrowid
 

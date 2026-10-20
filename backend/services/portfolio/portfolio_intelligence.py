@@ -30,7 +30,7 @@ def _safe_float(v, default: float = 0.0) -> float:
     """安全转float。"""
     try:
         f = float(v)
-        if f != f:  # NaN
+        if not math.isfinite(f):
             return default
         return f
     except (ValueError, TypeError):
@@ -58,13 +58,13 @@ def _get_portfolio_weights(user_id: str = "default") -> list[dict]:
     Returns:
         [{fund_code, fund_name, weight, current_value, shares, fund_category}, ...]
     """
-    from db.portfolio import list_holdings, get_portfolio_summary
-    holdings = list_holdings(user_id)
+    from db.portfolio import get_portfolio_snapshot
+    snapshot = get_portfolio_snapshot(user_id)
+    holdings = snapshot.get("funds", [])
     if not holdings:
         return []
 
-    summary = get_portfolio_summary(user_id)
-    total_value = _safe_float(summary.get("total_value", 0))
+    total_value = _safe_float(snapshot.get("invested_value", 0))
     if total_value <= 0:
         return []
 
@@ -94,15 +94,22 @@ def _fetch_nav_series(fund_code: str, days: int = 365) -> dict | None:
     """
     try:
         from services.fund_data_service import get_or_refresh_fund_nav_history
-        df = get_or_refresh_fund_nav_history(fund_code, days=days)
-        if df is None or len(df) < 30:
+        rows = get_or_refresh_fund_nav_history(fund_code, days=days)
+        if not rows:
             return None
-        # 按日期升序
-        df = df.sort_values("nav_date")
+        valid = {}
+        for row in rows:
+            nav = _safe_float(row.get("nav"))
+            if row.get("nav_date") and math.isfinite(nav) and nav > 0:
+                valid[str(row["nav_date"])] = nav
+        if len(valid) < 30:
+            return None
+        dates = sorted(valid)
         return {
             "fund_code": fund_code,
-            "dates": df["nav_date"].tolist(),
-            "navs": df["nav"].astype(float).tolist(),
+            "dates": dates,
+            "navs": [valid[d] for d in dates],
+            "return_basis": "unit_nav_price_returns",
         }
     except Exception as e:
         logger.warning(f"[portfolio_intel] 获取净值失败 {fund_code}: {e}")
@@ -123,11 +130,6 @@ def _align_nav_series(series_list: list[dict]) -> dict:
     common_dates = sorted(set.intersection(*date_sets)) if len(date_sets) > 1 else sorted(date_sets[0])
 
     if len(common_dates) < 30:
-        # 交集不足，放宽到并集（用前值填充）
-        all_dates = sorted(set.union(*date_sets))
-        common_dates = all_dates
-
-    if len(common_dates) < 30:
         return {"dates": [], "nav_matrix": [], "fund_codes": []}
 
     # 构建对齐的净值矩阵（前值填充）
@@ -136,13 +138,7 @@ def _align_nav_series(series_list: list[dict]) -> dict:
     for s in series_list:
         fund_codes.append(s["fund_code"])
         date_to_nav = dict(zip(s["dates"], s["navs"]))
-        navs = []
-        last_nav = None
-        for d in common_dates:
-            if d in date_to_nav:
-                last_nav = date_to_nav[d]
-            if last_nav is not None:
-                navs.append(last_nav)
+        navs = [date_to_nav[d] for d in common_dates]
         nav_matrix.append(navs)
 
     return {"dates": common_dates, "nav_matrix": nav_matrix, "fund_codes": fund_codes}
@@ -176,6 +172,7 @@ def _calc_max_drawdown(nav_series: list[float]) -> tuple[float, int]:
     max_dd = 0.0
     trough_idx = 0
     peak_idx = 0
+    drawdown_peak = peak
 
     for i, nav in enumerate(nav_series):
         if nav > peak:
@@ -185,11 +182,12 @@ def _calc_max_drawdown(nav_series: list[float]) -> tuple[float, int]:
         if dd > max_dd:
             max_dd = dd
             trough_idx = i
+            drawdown_peak = peak
 
     # 恢复期：从trough_idx开始找到恢复到peak的日期
     recovery_days = -1
     if trough_idx < len(nav_series) - 1:
-        peak_value = nav_series[peak_idx]
+        peak_value = drawdown_peak
         for i in range(trough_idx + 1, len(nav_series)):
             if nav_series[i] >= peak_value:
                 recovery_days = i - trough_idx
@@ -207,8 +205,8 @@ def calculate_portfolio_risk_metrics(user_id: str = "default", days: int = 365) 
     if not weights_data:
         return _default_risk_metrics("无持仓数据")
 
-    # 过滤掉权重过小的基金（<1%不参与风险计算）
-    active_holdings = [w for w in weights_data if w["weight"] >= 0.01]
+    # 小仓位也是风险暴露，不能静默剔除后仍声称覆盖整个组合。
+    active_holdings = [w for w in weights_data if w["weight"] > 0]
     if not active_holdings:
         return _default_risk_metrics("所有持仓权重过小")
 
@@ -220,6 +218,17 @@ def calculate_portfolio_risk_metrics(user_id: str = "default", days: int = 365) 
         if series and len(series["navs"]) >= 30:
             nav_series_list.append(series)
             active_codes.append(h["fund_code"])
+
+    total_value = sum(h["current_value"] for h in active_holdings)
+    covered_value = sum(h["current_value"] for h in active_holdings if h["fund_code"] in active_codes)
+    coverage = covered_value / total_value if total_value > 0 else 0
+    excluded = [h["fund_code"] for h in active_holdings if h["fund_code"] not in active_codes]
+    if coverage < 0.999999:
+        result = _default_risk_metrics("部分持仓缺少历史，不能用已覆盖子集代替全组合风险")
+        result.update(data_status="partial", coverage_ratio=round(coverage, 4),
+                      covered_value=round(covered_value, 2), total_value=round(total_value, 2),
+                      excluded_fund_codes=excluded, fund_count=len(active_codes))
+        return result
 
     if len(nav_series_list) < 1:
         return _default_risk_metrics("净值数据不足")
@@ -269,7 +278,7 @@ def calculate_portfolio_risk_metrics(user_id: str = "default", days: int = 365) 
 
     # 组合净值曲线
     portfolio_nav = np.cumprod(1 + portfolio_returns)
-    portfolio_nav_list = portfolio_nav.tolist()
+    portfolio_nav_list = [1.0] + portfolio_nav.tolist()
 
     # 最大回撤
     max_dd, recovery_days = _calc_max_drawdown(portfolio_nav_list)
@@ -283,13 +292,17 @@ def calculate_portfolio_risk_metrics(user_id: str = "default", days: int = 365) 
     sharpe = (annual_return - RISK_FREE_RATE) / portfolio_vol_annual if portfolio_vol_annual > 0 else 0
 
     # Sortino比率（只考虑下行波动）
-    downside_returns = portfolio_returns[portfolio_returns < 0]
-    downside_vol = np.std(downside_returns, ddof=1) * math.sqrt(TRADING_DAYS) if len(downside_returns) > 1 else 0
+    daily_target = (1 + RISK_FREE_RATE) ** (1 / TRADING_DAYS) - 1
+    downside_returns = np.minimum(portfolio_returns - daily_target, 0)
+    downside_vol = np.sqrt(np.mean(downside_returns ** 2)) * math.sqrt(TRADING_DAYS)
     sortino = (annual_return - RISK_FREE_RATE) / downside_vol if downside_vol > 0 else 0
 
     # Effective N（有效分散数）
     if len(returns_array) > 1:
-        corr_matrix = np.corrcoef(returns_array)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr_matrix = np.corrcoef(returns_array)
+        corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
+        np.fill_diagonal(corr_matrix, 1.0)
         if corr_matrix.ndim == 2 and corr_matrix.shape[0] > 1:
             # Effective N = (Σw)² / Σ(w_i × w_j × ρ_ij)
             numerator = (fund_weights.sum()) ** 2
@@ -344,30 +357,39 @@ def calculate_portfolio_risk_metrics(user_id: str = "default", days: int = 365) 
         "data_days": n_days,
         "risk_contributions": risk_contributions[:10],  # Top10
         "data_status": "ok",
+        "coverage_ratio": 1.0,
+        "excluded_fund_codes": [],
+        "calculation_basis": "current_allocation_historical_simulation",
+        "return_basis": "unit_nav_price_returns",
+        "limitations": ["以当前权重回放历史，不是实际账户收益；单位净值价格收益未计现金分红再投资", "历史VaR并非最大可能损失"],
+        "date_range": {"start": aligned["dates"][0], "end": aligned["dates"][-1]},
     }
 
 
 def _default_risk_metrics(reason: str = "") -> dict:
     """风险度量降级默认值。"""
     return {
-        "portfolio_volatility": 0,
-        "var_95_daily": 0,
-        "cvar_95_daily": 0,
-        "var_95_amount": 0,
-        "cvar_95_amount": 0,
-        "max_drawdown": 0,
-        "max_drawdown_recovery_days": 0,
-        "annual_return": 0,
-        "sharpe_ratio": 0,
-        "sortino_ratio": 0,
-        "effective_n": 1.0,
-        "avg_correlation": 0,
+        "portfolio_volatility": None,
+        "var_95_daily": None,
+        "cvar_95_daily": None,
+        "var_95_amount": None,
+        "cvar_95_amount": None,
+        "max_drawdown": None,
+        "max_drawdown_recovery_days": None,
+        "annual_return": None,
+        "sharpe_ratio": None,
+        "sortino_ratio": None,
+        "effective_n": None,
+        "avg_correlation": None,
         "total_value": 0,
         "fund_count": 0,
         "data_days": 0,
         "risk_contributions": [],
         "data_status": "degraded",
         "degraded_reason": reason,
+        "coverage_ratio": 0,
+        "excluded_fund_codes": [],
+        "calculation_basis": "current_allocation_historical_simulation",
     }
 
 
@@ -489,12 +511,15 @@ def calculate_portfolio_health_report(user_id: str = "default", force_refresh: b
             for hr in holding_reports
         ],
         "holding_count": len(active_holdings),
-        "data_status": "ok" if total_weight_used > 0 else "degraded",
+        "data_status": "ok" if total_weight_used >= .999999 and risk_metrics.get("data_status") == "ok" else "partial" if total_weight_used > 0 else "degraded",
+        "coverage_ratio": round(total_weight_used, 4),
     }
 
 
 def _build_portfolio_decision(portfolio_report: dict, risk_metrics: dict) -> dict:
     """组合决策矩阵（基于组合7维 + 风险度量）。"""
+    if risk_metrics.get("data_status", "ok") != "ok":
+        return {"action": "wait", "action_label": "等待数据", "reason": risk_metrics.get("degraded_reason") or "组合风险数据不完整，暂不形成加减仓结论"}
     quality_score = portfolio_report.get("quality", {}).get("score", 50)
     valuation_score = portfolio_report.get("valuation", {}).get("score", 50)
     trend_score = portfolio_report.get("trend", {}).get("score", 50)
@@ -580,6 +605,10 @@ def build_portfolio_master_matrix(portfolio_report: dict, risk_metrics: dict, ho
         {masters: [6位大师组合视角评分], consensus: {...}}
     """
     from services.master_perspectives import _detect_consensus, ACTION_LABELS, MASTER_META
+
+    if risk_metrics.get("data_status", "ok") != "ok":
+        return {"masters": [], "consensus": {"consensus_action": "wait", "consensus_action_label": "等待风险数据",
+                "agreement_count": 0, "agreement_label": "风险资料不完整"}, "data_status": risk_metrics.get("data_status")}
 
     quality_score = portfolio_report.get("quality", {}).get("score", 50)
     valuation_score = portfolio_report.get("valuation", {}).get("score", 50)

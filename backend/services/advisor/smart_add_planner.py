@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from db.config import get_config_bool, get_config_float, get_config_int
+from services.advisor.smart_add_governance import (parse_pyramid_tiers, evidence_warnings, finalize_execution_amount, simulate_cash_strategies, finite_number)
 from db.portfolio import list_holdings, get_portfolio_summary, get_cash_balance
 from db.valuations import get_best_valuation
 from db.smart_add_snapshots import create_snapshot_with_hypothetical
@@ -63,21 +64,12 @@ def _load_config() -> dict:
     # 金字塔档位解析：支持新格式"10:15:5,20:25:10,30:30:15,40:20:20,50:10:25"（亏损:释放率:加仓比例）
     # 兼容旧格式"10:15,20:25,30:30,40:20,50:10"（无add_ratio时用release_pct兜底）
     raw_tiers = get_config_str_safe("smart_add.pyramid_tiers", "10:15:5,20:25:10,30:30:15,40:20:20,50:10:25")
-    tiers = []
+    config_warning = ''
     try:
-        for part in raw_tiers.split(","):
-            fields = part.strip().split(":")
-            if len(fields) >= 3:
-                # 新格式：亏损:释放率:加仓比例
-                loss_str, release_str, add_str = fields[0], fields[1], fields[2]
-                tiers.append({"loss_pct": -int(loss_str), "release_pct": int(release_str), "add_ratio": int(add_str)})
-            elif len(fields) == 2:
-                # 旧格式兼容：亏损:释放率（add_ratio=release_pct兜底）
-                loss_str, release_str = fields[0], fields[1]
-                tiers.append({"loss_pct": -int(loss_str), "release_pct": int(release_str), "add_ratio": int(release_str)})
-        tiers.sort(key=lambda t: t["loss_pct"])
-    except Exception:
-        tiers = list(_DEFAULT_PYRAMID_TIERS)
+        tiers = parse_pyramid_tiers(raw_tiers)
+    except (ValueError, KeyError, TypeError):
+        tiers = []
+        config_warning = '金字塔配置格式无效或仍为旧格式，请核对完整加仓比例后保存；暂停金字塔执行'
 
     return {
         "enabled": get_config_bool_safe("smart_add.enabled", True),
@@ -85,6 +77,7 @@ def _load_config() -> dict:
         "pyramid_enabled": get_config_bool_safe("smart_add.pyramid_enabled", True),
         "pool_pct": get_config_float_safe("smart_add.pool_pct", 15.0),
         "tiers": tiers,
+        "config_warning": config_warning,
         "loss_threshold": get_config_float_safe("smart_add.loss_threshold", -10.0),
         "max_single_position_pct": get_config_float_safe("smart_add.max_single_position_pct", 25.0),
         "valuation_pause_pct": get_config_float_safe("smart_add.valuation_pause_pct", 60.0),
@@ -236,9 +229,6 @@ def _calc_pyramid_tiers(
         if not (profit_rate * 100 <= tiers[i]["loss_pct"]):
             next_untriggered_idx = i
             break
-    # 特殊处理：如果所有档都触发（亏损极深），取最深的档
-    if next_untriggered_idx is None and tiers:
-        next_untriggered_idx = 0  # 最深档（-50%）
 
     for i, tier in enumerate(tiers):
         # 金额 = 有效基准 × 加仓比例（%）；无数据时降级回池子×释放率
@@ -468,9 +458,13 @@ def _generate_grid_plan(
     grid_count = cfg.get("grid_count", 5)
     grid_range_pct = cfg.get("grid_range_pct", 20.0)
 
-    # 网格区间：当前价 ± range_pct%
-    price_low = current_price * (1 - grid_range_pct / 100)
-    price_high = current_price * (1 + grid_range_pct / 100)
+    if not isinstance(grid_count, int) or grid_count < 2 or not 0 < grid_range_pct < 100:
+        return {"type": "grid", "label": "网格交易", "triggered": False, "action": "wait", "amount": 0, "suggested_amount": 0, "reason": "网格参数无效"}
+    state = holding.get('grid_state') or {}
+    anchor = state.get('anchor_price') or current_price
+    state_ready = bool(state.get('cycle_id') and state.get('initialized_at') and state.get('last_executed_grid') is not None and state.get('anchor_price'))
+    price_low = anchor * (1 - grid_range_pct / 100)
+    price_high = anchor * (1 + grid_range_pct / 100)
     grid_step = (price_high - price_low) / grid_count
 
     # 每格仓位 = 当前市值 / grid_count
@@ -489,7 +483,7 @@ def _generate_grid_plan(
         }
         grid_levels.append(level)
         # 找到当前价所在的网格
-        if current_grid < 0 and current_price >= level_price:
+        if current_price >= level_price:
             current_grid = i
 
     if current_grid < 0:
@@ -513,6 +507,10 @@ def _generate_grid_plan(
         tag = "网格中位"
         reason = f"当前价在第{current_grid}格（共{grid_count}格），处于中位，等待触发"
 
+    crossed = state_ready and current_grid != state.get('last_executed_grid')
+    if not crossed:
+        action, suggested = 'wait', 0
+        reason = '网格仅观察：缺少固定锚点/执行状态，或未跨越已执行格位'
     next_grid_price = None
     if current_grid < grid_count:
         next_grid_price = grid_levels[current_grid + 1]["price"]
@@ -530,6 +528,9 @@ def _generate_grid_plan(
         "grid_price": grid_levels[current_grid]["price"],
         "next_grid_price": next_grid_price,
         "suggested_amount": round(suggested, 2),
+        "amount": round(suggested, 2) if action == "buy" else 0,
+        "anchor_price": anchor,
+        "state_ready": state_ready,
         "reason": reason,
         "tag": tag,
         "grid_levels": grid_levels,
@@ -786,180 +787,24 @@ def simulate_strategies(
     monthly_drop_pct: float,
     months: int = 6,
     user_id: str = "default",
+    cash_budget: float | None = None,
+    fee_rate: float = 0,
 ) -> dict:
-    """对比不同补仓策略在持续下跌场景下的效果。
-
-    策略对比：
-    1. 不补仓（躺平）
-    2. 等额定投（DCA）
-    3. 金字塔补仓
-    4. 价值平均法（VA）
-
-    Args:
-        fund_code: 基金代码
-        monthly_drop_pct: 每月下跌百分比（如 -5 表示每月跌5%）
-        months: 模拟月数（默认6个月）
-        user_id: 用户ID
-
-    Returns:
-        {
-            "fund_code": str,
-            "fund_name": str,
-            "scenario": {...},
-            "strategies": [
-                {"name": "不补仓", "final_cost": float, "final_value": float, "profit_rate": float, "total_invested": float},
-                ...
-            ],
-            "best_strategy": "xxx",
-        }
-    """
-    from db.portfolio import get_holding_by_fund, get_portfolio_summary
-    from db.config import get_config_float, get_config
-
+    """共同初始财富、有限现金预算下的情景推演，不构成预测。"""
+    from db.portfolio import get_holding_by_fund
     holding = get_holding_by_fund(fund_code, user_id=user_id)
     if not holding:
         return {"error": f"未找到持仓 {fund_code}"}
-
-    current_price = holding.get("current_price") or 0
-    shares = holding.get("shares") or 0
-    total_cost = holding.get("total_cost") or 0
-
-    # 获取总资产
+    cfg = _load_config()
     summary = get_portfolio_summary(user_id=user_id)
-    total_assets = summary.get("total_assets", 0) if summary else 0
-
-    if not current_price or not shares:
-        return {"error": "持仓数据不完整"}
-
-    # 场景参数
-    base_monthly = total_assets * get_config_float("smart_add.base_dca_pct", 4) / 100 / 12
-    tiers_str = get_config("smart_add.pyramid_tiers", "10:15:5,20:25:10,30:30:15,40:20:20,50:10:25")
-    tiers = []
-    for t in tiers_str.split(","):
-        parts = t.strip().split(":")
-        if len(parts) == 3:
-            tiers.append((float(parts[0]), float(parts[1]), float(parts[2])))
-
-    # 模拟价格路径
-    prices = [current_price]
-    for i in range(1, months + 1):
-        prices.append(round(prices[-1] * (1 + monthly_drop_pct / 100), 4))
-
-    strategies = []
-
-    # 策略1：不补仓
-    final_price = prices[-1]
-    final_value = shares * final_price
-    strategies.append({
-        "name": "不补仓",
-        "icon": "minus-circle",
-        "total_invested": total_cost,
-        "final_shares": round(shares, 2),
-        "final_cost": round(total_cost / shares, 4) if shares else 0,
-        "final_value": round(final_value, 2),
-        "profit_rate": round((final_value - total_cost) / total_cost * 100, 2) if total_cost else 0,
-        "description": "不操作，观望",
-    })
-
-    # 策略2：等额定投（每月固定金额）
-    dca_shares = shares
-    dca_invested = total_cost
-    for i in range(1, months + 1):
-        buy_price = prices[i]
-        dca_shares += base_monthly / buy_price
-        dca_invested += base_monthly
-    dca_value = dca_shares * final_price
-    dca_cost = dca_invested / dca_shares if dca_shares else 0
-    strategies.append({
-        "name": "等额定投",
-        "icon": "repeat",
-        "total_invested": round(dca_invested, 2),
-        "final_shares": round(dca_shares, 2),
-        "final_cost": round(dca_cost, 4),
-        "final_value": round(dca_value, 2),
-        "profit_rate": round((dca_value - dca_invested) / dca_invested * 100, 2) if dca_invested else 0,
-        "description": f"每月固定投入¥{base_monthly:,.0f}",
-    })
-
-    # 策略3：金字塔补仓
-    pyr_shares = shares
-    pyr_invested = total_cost
-    last_buy_price = current_price
-    for i in range(1, months + 1):
-        buy_price = prices[i]
-        loss_pct = (buy_price - last_buy_price) / last_buy_price * 100
-        # 检查是否触发金字塔档位
-        triggered = False
-        for loss_threshold, release_pct, add_ratio in tiers:
-            if loss_pct <= -loss_threshold:
-                # 触发该档位
-                position_value = pyr_shares * buy_price
-                add_amount = position_value * add_ratio / 100
-                pyr_shares += add_amount / buy_price
-                pyr_invested += add_amount
-                triggered = True
-                break
-        if not triggered:
-            # 未触发金字塔，按等额定投
-            pyr_shares += base_monthly / buy_price
-            pyr_invested += base_monthly
-    pyr_value = pyr_shares * final_price
-    pyr_cost = pyr_invested / pyr_shares if pyr_shares else 0
-    strategies.append({
-        "name": "金字塔补仓",
-        "icon": "layers",
-        "total_invested": round(pyr_invested, 2),
-        "final_shares": round(pyr_shares, 2),
-        "final_cost": round(pyr_cost, 4),
-        "final_value": round(pyr_value, 2),
-        "profit_rate": round((pyr_value - pyr_invested) / pyr_invested * 100, 2) if pyr_invested else 0,
-        "description": f"按档位{tiers[0][0]:.0f}%起触发的金字塔补仓",
-    })
-
-    # 策略4：价值平均法
-    va_shares = shares
-    va_invested = total_cost
-    target_monthly = total_assets * get_config_float("smart_add.va_target_growth_pct", 0.33) / 100
-    target_value = total_cost  # 初始目标市值 = 总成本
-    for i in range(1, months + 1):
-        buy_price = prices[i]
-        target_value += target_monthly
-        actual_value = va_shares * buy_price
-        required = target_value - actual_value
-        if required > 0:
-            max_monthly = target_monthly * get_config_float("smart_add.va_max_monthly_mult", 3.0)
-            invest = min(required, max_monthly)
-            va_shares += invest / buy_price
-            va_invested += invest
-    va_value = va_shares * final_price
-    va_cost = va_invested / va_shares if va_shares else 0
-    strategies.append({
-        "name": "价值平均法",
-        "icon": "trending-up",
-        "total_invested": round(va_invested, 2),
-        "final_shares": round(va_shares, 2),
-        "final_cost": round(va_cost, 4),
-        "final_value": round(va_value, 2),
-        "profit_rate": round((va_value - va_invested) / va_invested * 100, 2) if va_invested else 0,
-        "description": f"市值驱动，目标月增长¥{target_monthly:,.0f}",
-    })
-
-    # 找最佳策略（最高最终价值）
-    best = max(strategies, key=lambda s: s["final_value"])
-    best["is_best"] = True
-
-    return {
-        "fund_code": fund_code,
-        "fund_name": holding.get("fund_name", ""),
-        "scenario": {
-            "current_price": current_price,
-            "monthly_drop_pct": monthly_drop_pct,
-            "months": months,
-            "price_path": prices,
-        },
-        "strategies": strategies,
-        "best_strategy": best["name"],
-    }
+    base = (summary.get('total_assets') or 0) * cfg['base_dca_pct'] / 100 / 12
+    if cash_budget is None:
+        # 默认只用已到账现金，不引入未来结余或模拟期间外部入金。
+        from services.portfolio.decision_guardrails import build_decision_snapshot
+        context = build_decision_snapshot(user_id=user_id)
+        cash_budget = (context.get('cash') or {}).get('available_now', 0) or 0
+    result = simulate_cash_strategies(holding, monthly_drop_pct, months, base, cash_budget, fee_rate, cfg['tiers'])
+    return dict(result, fund_code=fund_code, fund_name=holding.get('fund_name', ''))
 
 
 # ── P0-S1（2026-08-01）：组合相关性降权 ──────────────────────────
@@ -1112,11 +957,15 @@ def _plan_hard_cap(plan: dict, total_assets: float, max_add_mult: float) -> floa
     target = ((plan.get("position_sizing") or {}).get("target_position") or {})
     target_pct = target.get("target_pct")
     max_position_pct = safety.get("max_position_pct")
-    position_pct = target_pct if target_pct is not None else max_position_pct
+    declared_limits = [float(x) for x in (target_pct, max_position_pct, safety.get('kelly_limit'), safety.get('type_hard_cap')) if x is not None]
+    position_pct = min(declared_limits) if declared_limits else None
     if position_pct is None or total_assets <= 0:
         position_room = float("inf")
     else:
         position_room = max(0.0, total_assets * float(position_pct) / 100 - effective_base)
+    incremental_pct = target.get('max_increment_pct')
+    if incremental_pct is not None:
+        position_room = min(position_room, max(0., total_assets * float(incremental_pct) / 100))
     position_multiple_room = effective_base * max(0.0, float(max_add_mult or 0))
     return round(max(0.0, min(position_room, position_multiple_room)), 2)
 
@@ -1167,7 +1016,7 @@ def _allocate_portfolio_budget(
         "allocated_amount": allocated,
         "allocation_scale": round(scale, 4),
         "budget_exhausted": total_raw > monthly_budget,
-        "budget_basis": "cash_plus_monthly_inflow",
+        "budget_basis": "available_cash_now",
     }
 
 
@@ -1224,13 +1073,13 @@ def _resolve_monthly_budget(
         }
 
     cash_budget = max(0.0, float(cash_constraint.get("usable_cash", 0) or 0))
-    cash_budget += max(0.0, float(cash_constraint.get("monthly_inflow", 0) or 0))
+    # 未来结余只供计划展示，不进入今日可执行现金预算。
     return {
         "monthly_budget": round(min(pool_budget, cash_budget), 2),
         "cash_budget": round(cash_budget, 2),
         "pool_budget": round(pool_budget, 2),
         "period_used": round(period_used, 2),
-        "budget_basis": "cash_plus_monthly_inflow",
+        "budget_basis": "available_cash_now",
     }
 
 
@@ -1241,7 +1090,7 @@ def _get_executable_add_amount(plan: dict) -> float:
     return round(max(0.0, float(plan.get("final_suggested_amount", 0) or 0)), 2)
 
 
-def generate_smart_add_plan(user_id: str = "default") -> dict:
+def generate_smart_add_plan(user_id: str = "default", persist: bool = False) -> dict:
     """生成智能补仓计划（双引擎 + 计划表 + 组合视角）。
 
     Returns:
@@ -1317,6 +1166,33 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         max_add_mult=cfg["max_add_vs_position_mult"],
     )
     budget_allocation.update(budget_limits)
+    # 统一上下文仅构建一次；多标的共同扣减今日额度，未来结余不能执行。
+    from services.portfolio.decision_guardrails import build_decision_snapshot, evaluate_add_decision
+    context = build_decision_snapshot(user_id=user_id)
+    remaining_now = max(0., float((context.get('cash') or {}).get('available_now') or 0))
+    for p in plans:
+        requested = min(_get_executable_add_amount(p), remaining_now)
+        decision = evaluate_add_decision(p['fund_code'], requested, user_id=user_id, context=context)
+        p['decision'] = decision
+        allowed = decision.get('status') == 'allowed' and (p.get('safety') or {}).get('can_add', False)
+        p['final_suggested_amount'] = min(requested, max(0., float(decision.get('executable_amount') or 0))) if allowed else 0.
+        p['subscription_fee_rate'] = (context.get('policy') or {}).get('estimated_fee_rate', 0)
+        finalize_execution_amount(p, min_amount=get_config_float_safe('opportunity.constraint.min_subscription_amount', 10),
+                                  lot_size=get_config_int_safe('opportunity.constraint.etf_lot_size', 100))
+        final_amount = p['final_suggested_amount']
+        if final_amount > 0:
+            if final_amount != decision.get('executable_amount'):
+                p['decision'] = evaluate_add_decision(p['fund_code'], final_amount, user_id=user_id, context=context)
+            reservations = context.setdefault('proposed_additions', {})
+            reservations[p['fund_code']] = round(reservations.get(p['fund_code'], 0) + final_amount, 2)
+        remaining_now = round(max(0., remaining_now - final_amount), 2)
+        p['safety']['decision_status'] = decision.get('status')
+        if not allowed:
+            p['safety']['can_add'] = False
+            p['safety']['reason'] = '；'.join(decision.get('reasons') or []) or p['safety'].get('reason', '')
+    budget_allocation['allocated_amount'] = round(sum(p['final_suggested_amount'] for p in plans), 2)
+    budget_allocation['available_now'] = (context.get('cash') or {}).get('available_now')
+    budget_allocation['snapshot_id'] = context.get('snapshot_id')
 
     # 3. 组合视角：优先级排序
     deep_loss_plans = [p for p in plans if (p.get("pyramid") or {}).get("triggered_tiers", 0) > 0]
@@ -1336,7 +1212,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
 
     # 资金池为全局共享：各标的的 released_amount 仅为"资金充足时的预估"，
     # 实际已用不能超过池总额，剩余不能为负。
-    pool_demand = sum((p.get("pyramid") or {}).get("released_amount", 0) for p in plans)
+    pool_demand = sum(_get_executable_add_amount(p) for p in plans)
     pool_used = min(pool_demand, pool_total)
     pool_remaining = max(0.0, pool_total - pool_used)
 
@@ -1391,32 +1267,30 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         "rebalance_suggestions": _calc_rebalance_suggestion(holdings, total_assets),
     }
 
-    # ── 反事实决策验证：建议快照 + 假设交易自动落库 ──
+    # ── 显式保存建议快照；预览无落档副作用 ──
     try:
         snapshot_enabled = get_config_bool("smart_add.snapshot_enabled", True)
     except Exception:
         snapshot_enabled = True
-    if snapshot_enabled:
+    if persist and snapshot_enabled:
         for p in plans:
             try:
-                # 修复9：仅金字塔触发的标的落库假设交易，engine1 月投不再落库
-                # 原逻辑 engine1 月投(recurring)被当作一次性 buy 落库，语义错位且无法验证定投效果
+                # 仅当下有效买入信号的最终金额进入建议跟踪；条件月投不登记。
                 pyr = p.get("pyramid") or {}
                 saf = p.get("safety") or {}
                 suggested_amount = _get_executable_add_amount(p)
                 suggested_tier = None
                 if pyr and pyr.get("triggered_tiers", 0) > 0:
                     # 取已触发档位的描述
-                    triggered = [t for t in pyr.get("tiers", []) if t.get("triggered")]
-                    if triggered:
-                        t0 = triggered[0]
-                        suggested_tier = f"{t0.get('loss_pct', '?')}%档 ×{t0.get('release_pct', 0)}%"
+                    t0 = pyr.get("active_tier")
+                    if t0:
+                        suggested_tier = f"{t0.get('loss_pct', '?')}%档 ×{t0.get('add_ratio', 0)}%"
 
                 # 安全阀拦截时不落库（修复3 配套）
                 if (
                     suggested_amount > 0
                     and saf.get("can_add", True)
-                    and pyr.get("triggered_tiers", 0) > 0
+                    and p.get("has_signal", False)
                 ):
                     val = p.get("valuation") or {}
                     create_snapshot_with_hypothetical(
@@ -1428,12 +1302,26 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
                         valuation_zscore=val.get("zscore"),
                         current_price_at_snapshot=p.get("current_price"),
                         user_id=user_id,
+                        notes=__import__('json').dumps({
+                            'mode': 'suggestion_tracking',
+                            'shadow_cash_budget': (context.get('cash') or {}).get('available_now', 0),
+                            'decision_snapshot_id': context.get('snapshot_id'),
+                            'policy_version': context.get('policy_version'),
+                            'strategy_version': 1,
+                            'expires_at': context.get('expires_at'),
+                            'fee_rate': (context.get('policy') or {}).get('estimated_fee_rate', 0),
+                            'event_key': p['fund_code'] + ':' + '|'.join(sorted(
+                                str(sig.get('event_id') or sig.get('type', '')) + ':' + str(sig.get('anchor_date', ''))
+                                for sig in p.get('triggered_signals', []) if sig.get('triggered')
+                            )),
+                        }, ensure_ascii=False),
                     )
             except Exception as e:
                 logger.debug(f"[smart_add] 快照落库失败 {p.get('fund_code')}: {e}")
 
     # 自动将补仓建议转为决策候选（去重：14天内同标的同来源不重复）
-    _plans_to_candidates(plans, user_id=user_id)
+    if persist:
+        _plans_to_candidates(plans, user_id=user_id)
 
     # ── S-1（2026-07-22）：计划持久化到 smart_add_plans 表 ──
     # 用途：历史回溯、计划vs实际对比、所有信号的反事实验证
@@ -1441,7 +1329,7 @@ def generate_smart_add_plan(user_id: str = "default") -> dict:
         persist_enabled = get_config_bool("smart_add.persist_plans_enabled", True)
     except Exception:
         persist_enabled = True
-    if persist_enabled:
+    if persist and persist_enabled:
         today = datetime.now().strftime("%Y-%m-%d")
         for p in plans:
             try:
@@ -1521,9 +1409,9 @@ def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total_amount FROM portfolio_transactions "
                 "WHERE fund_code=? AND transaction_type='buy' "
-                "AND transaction_date >= ? AND status IN ('confirmed','pending','submitted') "
+                "AND user_id=? AND transaction_date >= ? AND status IN ('confirmed','pending','submitted') "
                 "AND (is_hypothetical=0 OR is_hypothetical IS NULL)",
-                (fund_code, cutoff),
+                (fund_code, cfg.get("user_id", "default"), cutoff),
             ).fetchone()
             count = row["cnt"] if row else 0
             recent_amount = float(row["total_amount"]) if row and row["total_amount"] else 0.0
@@ -1534,10 +1422,10 @@ def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
         return True, count, recent_amount, ""
     except Exception as e:
         logger.debug(f"[smart_add] 冷却期检查失败 {fund_code}: {e}")
-        return True, 0, 0.0, ""  # 失败时放行
+        return False, 0, 0.0, "冷却期交易记录不可用，等待核对"
 
 
-def _get_last_buy_price(fund_code: str) -> Optional[float]:
+def _get_last_buy_price(fund_code: str, user_id: str = "default") -> Optional[float]:
     """获取最近一次买入价（用于计算累计跌幅）。"""
     try:
         from db._conn import _get_conn
@@ -1546,9 +1434,9 @@ def _get_last_buy_price(fund_code: str) -> Optional[float]:
             row = conn.execute(
                 "SELECT price FROM portfolio_transactions "
                 "WHERE fund_code=? AND transaction_type='buy' AND status='confirmed' "
-                "AND price IS NOT NULL AND price > 0 "
+                "AND user_id=? AND (is_hypothetical=0 OR is_hypothetical IS NULL) AND price IS NOT NULL AND price > 0 "
                 "ORDER BY transaction_date DESC LIMIT 1",
-                (fund_code,),
+                (fund_code, user_id),
             ).fetchone()
             return float(row["price"]) if row else None
         finally:
@@ -1766,7 +1654,7 @@ def _detect_dip_signal(
         return None
 
     # 条件1：累计跌幅 ≥ 4%
-    last_buy_price = _get_last_buy_price(fund_code)
+    last_buy_price = _get_last_buy_price(fund_code, user_id=holding.get("_user_id", "default"))
     if not last_buy_price or last_buy_price <= 0:
         return None  # 无历史买入价，无法计算跌幅
     drop_pct = (last_buy_price - current_price) / last_buy_price * 100
@@ -1980,6 +1868,8 @@ def _generate_single_plan(
     fund_code = holding.get("fund_code", "")
     fund_name = holding.get("fund_name", "")
     index_code = holding.get("index_code", "")
+    holding = dict(holding, _user_id=user_id)
+    cfg = dict(cfg, user_id=user_id)
     # P2-1: profit_rate/current_price 为 None 时标记数据缺失，不按 0 处理
     _profit_rate_raw = holding.get("profit_rate")
     profit_rate = _profit_rate_raw if _profit_rate_raw is not None else 0
@@ -2073,8 +1963,8 @@ def _generate_single_plan(
             if recovery and recovery.get("median_recovery_months"):
                 if recovery["median_recovery_months"] > 24:
                     rhythm_adjust = 0.5  # 双月投
-                elif recovery["median_recovery_months"] < 12:
-                    rhythm_adjust = 1.5  # 半月投
+                elif recovery["median_recovery_months"] < 12 and recovery.get("sample_count", 0) >= 30 and recovery.get("ongoing_count", 0) == 0:
+                    rhythm_adjust = 1.0  # 半月投
     except Exception as e:
         logger.debug(f"[smart_add] L4 recovery 计算失败 {index_code}: {e}")
         recovery = {}
@@ -2084,9 +1974,9 @@ def _generate_single_plan(
     confidence_mult = 1.0
     try:
         if valuation and valuation.get("percentile") is not None and index_code:
-            win_rate = calc_valuation_win_rate(index_code, valuation["percentile"])
+            win_rate = calc_valuation_win_rate(index_code, valuation["percentile"], metric_type=valuation.get("metric_type", "市盈率"))
             if win_rate and win_rate.get("win_rate_12m") is not None:
-                if win_rate["win_rate_12m"] > 0.80:
+                if win_rate["win_rate_12m"] > 0.80 and win_rate.get("independent_count_12m", 0) >= 30:
                     confidence_mult = 1.3
                 elif win_rate["win_rate_12m"] < 0.60:
                     confidence_mult = 0.7
@@ -2148,10 +2038,14 @@ def _generate_single_plan(
         # 2026-07-17 重构：只预估下次补仓金额（不累加历史已触发档位）
         # 下次补仓 = 第一个未触发档位（is_next=True）的金额；若所有档位都触发，取最后一档
         next_tier = next((t for t in tiers if t.get("is_next")), None)
-        if next_tier is None:
-            # 所有档位都触发，取最后一档作为"下次"档
-            next_tier = tiers[-1] if tiers else None
-        released_amount = next_tier["release_amount"] if next_tier else 0
+        # 未触发档仅预告。没有可核验的周期/执行状态时不推断历史档位尚未执行。
+        state = holding.get('pyramid_state') or {}
+        state_ready = bool(state.get('cycle_id') and state.get('initialized_at') and isinstance(state.get('executed_tiers'), list))
+        executed_tiers = state.get('executed_tiers') or []
+        eligible = [t for t in tiers if t['triggered'] and t['loss_pct'] not in executed_tiers]
+        active_tier = min(eligible, key=lambda t: t['loss_pct']) if state_ready and eligible else None
+        released_amount = active_tier['release_amount'] if active_tier else 0
+
         remaining_tiers = len(tiers) - triggered_count
         next_trigger = next_tier
 
@@ -2167,6 +2061,9 @@ def _generate_single_plan(
 
         engine2 = {
             "pool_total": pool_total,
+            "state_ready": state_ready,
+            "active_tier": active_tier,
+            "observation_reason": "缺少可核验的周期和已执行档位，仅展示条件计划" if not state_ready else "",
             "released_amount": round(released_amount, 2),
             "remaining_amount": round(pool_total - released_amount, 2),
             "triggered_tiers": triggered_count,
@@ -2197,7 +2094,10 @@ def _generate_single_plan(
     # 2026-07-10 基准修正：仓位计算用 effective_base 避免深套误判低仓位
     effective_base_for_pos = max(total_cost, current_value)
     position_pct = round(effective_base_for_pos / total_assets * 100, 2) if total_assets else 0
-    can_add = position_pct < max_position_pct
+    data_warnings = evidence_warnings(holding, valuation, fund_type, cfg.get('stale_days', 14))
+    cooldown_cfg = dict(cfg, user_id=user_id)
+    cooldown_ok, _, _, cooldown_reason = _check_cooldown(fund_code, cooldown_cfg)
+    can_add = position_pct < max_position_pct and not data_warnings and cooldown_ok
 
     # 修复3：安全阀拦截
     # 原逻辑 can_add=False 时仅设标志位，released_amount 照常计算并落库假设交易
@@ -2262,9 +2162,14 @@ def _generate_single_plan(
     # 基本面健康检查
     fund_health = _check_fund_health(fund_code, cfg, holding=holding)
 
+    for signal in triggered_signals:
+        signal.setdefault('action', 'buy')
+        signal.setdefault('amount', signal.get('suggested_amount', 0) if signal['action'] == 'buy' else 0)
+        signal['schema_version'] = 1
+        signal['amount_role'] = 'raw_demand'
     # 总建议金额（所有命中信号汇总，受安全阀约束）
     total_suggested = sum(
-        s.get("amount", 0) for s in triggered_signals if s.get("triggered")
+        s.get("amount", 0) for s in triggered_signals if s.get("triggered") and s.get("action", "buy") == "buy"
     )
     if not can_add:
         total_suggested = 0
@@ -2301,7 +2206,7 @@ def _generate_single_plan(
             exit_signals = (exit_signals or []) + enhanced_exits
         else:
             # 取目标驱动与信号触发的较大值
-            base_amount = max(target_driven_monthly, total_suggested)
+            base_amount = total_suggested  # 目标月投是条件计划，不因GET预览自动成为今日信号
             # 多维约束：安全阀 + 资金约束
             cash_room = (position_sizing.get("cash_constraint") or {}).get("total_available_3m", 0)
             # 资金约束为组合层3个月总额，单标的月度建议不超过资金池的合理份额
@@ -2477,9 +2382,10 @@ def _generate_single_plan(
             "kelly_limit": kelly["limit_pct"],
             "type_hard_cap": type_strategy["hard_cap_pct"],
             "kelly_warning": kelly_warning,
-            "data_warning": ("持仓净值数据缺失或过期（>3天），盈亏可能不准" if _price_stale
-                             else ""),
-            "reason": "" if can_add else f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）",
+            "data_warning": "；".join(data_warnings),
+            "freshness_policy": "净值3个工作日（节假日待人工核对），估值按配置自然日",
+            "cooldown_reason": cooldown_reason,
+            "reason": "" if can_add else ("；".join(data_warnings) or cooldown_reason or f"已达配置上限 {max_position_pct:.1f}%（凯利{kelly['limit_pct']:.0f}%/类型{type_strategy['hard_cap_pct']:.0f}%）"),
         },
         "recovery_path": recovery_path,
     }
@@ -2540,6 +2446,8 @@ def preview_add_scenario(
     Returns:
         {current_cost, simulated_price, new_cost, improvement_pct, ...}
     """
+    finite_number(additional_drop_pct, '额外变动', -99.99, 100)
+    finite_number(add_amount, '补仓金额', 0, 1e12)
     from db.portfolio import get_holding_by_fund
     holding = get_holding_by_fund(fund_code, user_id=user_id)
     if not holding:

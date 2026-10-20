@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 
 SCENARIOS = {
     "market_drop_20": {
@@ -51,6 +53,37 @@ SCENARIOS = {
     },
 }
 
+# 子类型与历史分类共用映射；未知类别保留保守假设并向用户披露。
+RISK_CATEGORY_MAP = {
+    "bond_pure": "bond", "bond_short": "bond", "bond_long": "bond",
+    "bond_hybrid": "hybrid", "bond_convertible": "convertible_bond",
+    "money_market": "money", "stock": "equity", "stock_index": "index",
+}
+
+
+def category_risk_assumption(category: str) -> dict:
+    """返回资产类别的情景映射及是否使用未知类别假设。"""
+    mapped = RISK_CATEGORY_MAP.get(category, category)
+    known = mapped in SCENARIOS["market_drop_20"]["shocks"]
+    return {"category": category, "risk_category": mapped if known else "equity", "assumed": not known}
+
+
+def scenario_shock(category: str, scenario: str = "market_drop_20", custom_shocks: dict | None = None) -> float:
+    """情景冲击为比例，禁止非有限值或损失超过本金。"""
+    if scenario == "custom":
+        if not custom_shocks:
+            raise ValueError("自定义场景需要冲击系数")
+        shocks = custom_shocks
+    elif scenario in SCENARIOS:
+        shocks = SCENARIOS[scenario]["shocks"]
+    else:
+        raise ValueError(f"不支持的压力测试场景: {scenario}")
+    for value in shocks.values():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not -1 <= value <= 1:
+            raise ValueError("冲击系数必须是-1至1之间的有限比例")
+    mapping = category_risk_assumption(category)
+    return float(shocks.get(category, shocks.get(mapping["risk_category"], shocks.get("equity", -.2))))
+
 
 def _risk_level(loss_ratio: float) -> str:
     if loss_ratio >= 0.15:
@@ -69,7 +102,7 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
         user_id: 用户 ID
         custom_shocks: 自定义冲击系数 {"cash": 0, "equity": -0.3, ...}
     """
-    from db import get_portfolio_cash_snapshot, list_holdings
+    from db.portfolio import get_portfolio_snapshot
     from db.goal_buckets import get_goal_bucket_summary
 
     if scenario == "custom" and custom_shocks:
@@ -79,8 +112,14 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
     if not cfg:
         raise ValueError(f"不支持的压力测试场景: {scenario}")
 
-    holdings = [h for h in list_holdings(user_id) if (h.get("shares") or 0) > 0]
-    cash_balance = get_portfolio_cash_snapshot(user_id)["cash_balance"]
+    snapshot = get_portfolio_snapshot(user_id)
+    holdings = snapshot["holdings"]
+    cash_balance = snapshot["cash_balance"] + snapshot.get("receivable_cash", 0)
+    missing = [h.get("fund_code") for h in holdings if h.get("current_value") is None]
+    if missing:
+        return {"status": "insufficient_data", "scenario": scenario, "asset_impacts": [],
+                "loss_amount": None, "loss_ratio": None, "risk_level": "unknown",
+                "warnings": ["部分持仓缺少有效净值，无法估算完整压力损失"], "missing_fund_codes": missing}
     total_holding_value = sum(h.get("current_value") or 0 for h in holdings)
     total_assets = round(total_holding_value + cash_balance, 2)
     if total_assets <= 0:
@@ -95,7 +134,8 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
     projected_total = 0.0
     shocks = cfg["shocks"]
     for category, amount in sorted(grouped.items(), key=lambda item: item[1], reverse=True):
-        shock = shocks.get(category, shocks.get("equity", -0.2))
+        assumption = category_risk_assumption(category)
+        shock = scenario_shock(category, scenario, custom_shocks)
         projected = round(amount * (1 + shock), 2)
         loss = round(amount - projected, 2)
         projected_total += projected
@@ -105,6 +145,8 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
             "shock_pct": round(shock, 4),
             "projected_amount": projected,
             "loss_amount": loss,
+            "risk_category": assumption["risk_category"],
+            "assumed": assumption["assumed"],
         })
 
     projected_total = round(projected_total, 2)
@@ -114,6 +156,9 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
     goal_summary = get_goal_bucket_summary(user_id)
     emergency = goal_summary.get("emergency_bucket")
     warnings = []
+    assumed_categories = [item["category"] for item in impacts if item["assumed"]]
+    if assumed_categories:
+        warnings.append("未知资产类别按权益冲击估算：" + "、".join(assumed_categories))
     if emergency and (emergency.get("progress_pct") or 0) < 100:
         warnings.append(f"备用金不足：{emergency.get('name')} 当前进度 {emergency.get('progress_pct', 0):g}%")
     elif not emergency:
@@ -133,4 +178,6 @@ def run_portfolio_stress_test(scenario: str = "market_drop_20", user_id: str = "
         "asset_impacts": impacts,
         "emergency_bucket": emergency,
         "warnings": warnings,
+        "calculation_basis": "deterministic_scenario_not_forecast",
+        "snapshot_as_of": snapshot.get("as_of"),
     }

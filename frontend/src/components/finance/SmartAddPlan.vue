@@ -1,4 +1,5 @@
 <script setup>
+import PortfolioRiskOverview from '../portfolio/PortfolioRiskOverview.vue'
 /**
  * SmartAddPlan — 智能补仓计划器
  *
@@ -10,6 +11,7 @@
  */
 import { ref, computed, onMounted } from 'vue'
 import Icon from '../ui/Icon.vue'
+import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import { smartAddAPI } from '../../api'
 
 // ── 状态 ──────────────────────────────
@@ -24,7 +26,7 @@ const showStratSim = ref(false)
 const showConfig = ref(false)
 const showCounterfactual = ref(false)
 
-// 反事实决策验证
+// 建议跟踪（虚拟现金）
 const counterfactual = ref(null)
 const cfLoading = ref(false)
 const cfError = ref('')
@@ -57,7 +59,7 @@ const cfgForm = ref({
   loss_threshold: -10.0,
   max_single_position_pct: 25.0,
   valuation_pause_pct: 60.0,
-  pyramid_tiers: '10:15,20:25,30:30,40:20,50:10',
+  pyramid_tiers: '10:15:5,20:25:10,30:30:15,40:20:20,50:10:25',
   pyramid_enabled: true,
   max_add_vs_position_mult: 2.0,
   exit_signal_enabled: false,
@@ -67,6 +69,25 @@ const cfgForm = ref({
 })
 const cfgSaving = ref(false)
 const cfgSaved = ref(false)
+const confirmAction = ref(null)
+const trackingSaving = ref(false)
+const trackingSaved = ref(false)
+const confirmMessage = computed(() => confirmAction.value === 'config'
+  ? `确认更新风险配置？单标的上限 ${cfg.value?.max_single_position_pct ?? '--'}% → ${cfgForm.value.max_single_position_pct}%；金字塔档位（亏损:释放:加仓比例）${tiersToString(cfg.value?.tiers)} → ${cfgForm.value.pyramid_tiers}。`
+  : confirmAction.value === 'tracking'
+    ? '重新校验今日现金与风险后，保存获准的建议并创建虚拟现金跟踪记录。保存不代表真实成交，同日同标的保存不会改写原记录。'
+    : '确认删除这条建议跟踪记录？')
+async function executeConfirmed() {
+  const action = confirmAction.value
+  confirmAction.value = null
+  if (action === 'config') await saveConfig()
+  else if (action === 'tracking') {
+    trackingSaving.value = true
+    try { plan.value = await smartAddAPI.savePlan(); trackingSaved.value = true }
+    catch (e) { error.value = e?.message || '保存建议失败' }
+    finally { trackingSaving.value = false }
+  } else if (action != null) await removeHypothetical(action)
+}
 
 // ── 计算属性 ──────────────────────────────
 const summary = computed(() => plan.value?.summary || {})
@@ -79,7 +100,7 @@ const rebalanceItems = computed(() => {
 const allPlans = computed(() => plan.value?.plans || [])
 // 有信号的标的 = 金字塔触发 OR 趋势加仓 OR 大跌定投（多维度触发器命中任一）
 const deepPlans = computed(() =>
-  allPlans.value.filter(p => p.has_signal || (p.pyramid && p.pyramid.triggered_tiers > 0))
+  allPlans.value
 )
 
 // 信号类型 -> 短标签
@@ -199,7 +220,7 @@ const fundTypeLabel = (t) => {
   return m[t] || t || '--'
 }
 
-// 反事实决策验证：加载假设操作跟踪结果
+// 建议跟踪（虚拟现金）：加载假设操作跟踪结果
 async function loadCounterfactual() {
   cfLoading.value = true
   cfError.value = ''
@@ -222,7 +243,6 @@ async function toggleCounterfactual() {
 
 // 删除假设交易
 async function removeHypothetical(txId) {
-  if (!confirm('确认删除这条假设交易记录？')) return
   try {
     await smartAddAPI.deleteHypothetical(txId)
     await loadCounterfactual()
@@ -239,7 +259,7 @@ function syncCfgForm(c) {
     loss_threshold: Number(c.loss_threshold ?? -10.0),
     max_single_position_pct: Number(c.max_single_position_pct ?? 25.0),
     valuation_pause_pct: Number(c.valuation_pause_pct ?? 60.0),
-    pyramid_tiers: tiersToString(c.tiers) || '10:15,20:25,30:30,40:20,50:10',
+    pyramid_tiers: tiersToString(c.tiers) || '10:15:5,20:25:10,30:30:15,40:20:20,50:10:25',
     pyramid_enabled: !!c.pyramid_enabled,
     max_add_vs_position_mult: Number(c.max_add_vs_position_mult ?? 2.0),
     exit_signal_enabled: !!c.exit_signal_enabled,
@@ -251,7 +271,7 @@ function syncCfgForm(c) {
 
 function tiersToString(tiers) {
   if (!Array.isArray(tiers) || !tiers.length) return ''
-  return tiers.map(t => `${Math.abs(t.loss_pct)}:${t.release_pct}`).join(',')
+  return tiers.map(t => `${Math.abs(t.loss_pct)}:${t.release_pct}:${t.add_ratio}`).join(',')
 }
 
 // ── 摊薄模拟器 ──────────────────────────────
@@ -288,7 +308,7 @@ async function runSimulate() {
   simStratError.value = ''
   simStratResult.value = null
   try {
-    const data = await smartAdd.simulate({
+    const data = await smartAddAPI.simulate({
       fund_code: simStratCode.value.trim(),
       monthly_drop_pct: Number(simStratDrop.value),
       months: Number(simStratMonths.value),
@@ -346,12 +366,18 @@ onMounted(() => {
 
 <template>
   <div class="smart-add-page">
+    <PortfolioRiskOverview :refresh-key="plan" />
     <!-- 页头 -->
+    <ConfirmDialog :visible="confirmAction !== null" title="确认操作" :message="confirmMessage"
+      :danger="typeof confirmAction === 'number'" @confirm="executeConfirmed" @cancel="confirmAction = null" />
     <header class="page-head">
       <div class="page-head-left">
         <h2 class="page-title">智能补仓计划器</h2>
         <p class="page-desc">估值 z-score 加权定投 + 金字塔补仓双引擎，前瞻规划深套标的补仓路径</p>
       </div>
+      <button class="btn-ghost" @click="confirmAction = 'tracking'" :disabled="loading || trackingSaving || !allPlans.length">
+        {{ trackingSaving ? '保存中…' : trackingSaved ? '已保存建议' : '保存建议跟踪' }}
+      </button>
       <button class="btn-ghost" @click="loadPlan" :disabled="loading">
         <Icon name="refresh" size="15" :class="{ spinning: loading }" />
         <span>刷新</span>
@@ -393,11 +419,11 @@ onMounted(() => {
           <span class="ov-value font-jet">¥{{ fmtMoney(summary.pool_total) }}</span>
         </div>
         <div class="ov-card">
-          <span class="ov-label">已释放</span>
+          <span class="ov-label">当前获分配（未执行）</span>
           <span class="ov-value font-jet ov-used">¥{{ fmtMoney(summary.pool_used) }}</span>
         </div>
         <div class="ov-card">
-          <span class="ov-label">剩余</span>
+          <span class="ov-label">计划资金池余量</span>
           <span class="ov-value font-jet ov-remain">¥{{ fmtMoney(summary.pool_remaining) }}</span>
         </div>
         <div class="ov-card">
@@ -410,6 +436,10 @@ onMounted(() => {
         </div>
       </section>
 
+      <p class="page-desc">今日现金可用 ¥{{ fmtMoney(portfolioView.available_now) }}；未来结余仅用于规划。
+        可选保护：退出信号{{ cfg?.exit_signal_enabled ? '已开' : '未开' }}，基本面检查{{ cfg?.fund_health_enabled ? '已开' : '未开' }}。
+        刷新仅预览；保存建议与真实成交分别记录。</p>
+      <p v-if="cfg?.config_warning" class="sim-error">{{ cfg.config_warning }}</p>
       <!-- 资金池耗尽警告 -->
       <div v-if="summary.pool_exit_signals && summary.pool_exit_signals.length" class="pool-warn-banner">
         <Icon name="alert-triangle" size="16" />
@@ -560,7 +590,7 @@ onMounted(() => {
       <section v-if="deepPlans.length" class="block">
         <h3 class="block-title">
           <Icon name="trending-down" size="16" />
-          <span>补仓计划表 · {{ deepPlans.length }} 个深套标的</span>
+          <span>补仓计划表 · {{ deepPlans.length }} 个计划标的</span>
         </h3>
         <div class="plan-cards">
           <article
@@ -637,7 +667,8 @@ onMounted(() => {
                   <span class="metric-label">12月胜率</span>
                   <span class="metric-value font-jet" v-if="p.win_rate.win_rate_12m != null">{{ fmtPct(p.win_rate.win_rate_12m * 100, 0) }}</span>
                   <span class="metric-value font-jet" v-else>-</span>
-                  <span class="metric-sub">{{ p.win_rate.sample_count }}个样本</span>
+                  <span class="metric-sub">12月成熟 {{ p.win_rate.sample_count_12m ?? 0 }} 个 / 独立约 {{ p.win_rate.independent_count_12m ?? 0 }} 个；{{ p.win_rate.metric_type }}</span>
+                  <span class="metric-sub" v-if="p.win_rate.confidence_interval_12m">观测区间 {{ fmtPct(p.win_rate.confidence_interval_12m[0] * 100, 0) }}–{{ fmtPct(p.win_rate.confidence_interval_12m[1] * 100, 0) }}；样本可能重叠</span>
                 </div>
               </div>
             </div>
@@ -658,7 +689,7 @@ onMounted(() => {
               <div class="engine2-head">
                 <span class="engine-tag engine2-tag">引擎2 · 金字塔补仓</span>
                 <span class="engine2-meta">
-                  已释放 ¥{{ fmtMoney(p.pyramid.released_amount) }} ·
+                  策略原始需求 ¥{{ fmtMoney(p.pyramid.released_amount) }} ·
                   剩余 {{ p.pyramid.remaining_tiers }} 档
                   <span v-if="p.pyramid.pool_warning" class="pool-warn-tag">{{ p.pyramid.pool_warning }}</span>
                 </span>
@@ -741,7 +772,7 @@ onMounted(() => {
                       </span>
                     </div>
                     <div class="recovery-item">
-                      <span class="recovery-label">建议补仓</span>
+                      <span class="recovery-label">条件方案金额</span>
                       <span class="recovery-val font-jet" style="color: #3b82f6;">
                         ¥{{ fmtMoney(p.recovery_path.add_scenario?.suggested_amount) }}
                       </span>
@@ -789,7 +820,7 @@ onMounted(() => {
               <!-- 下次触发提示 -->
               <div v-if="p.pyramid.next_trigger" class="next-trigger">
                 <Icon name="info" size="13" />
-                <span>下一档触发：亏损达 {{ fmtPct(p.pyramid.next_trigger.loss_pct) }}，释放 ¥{{ fmtMoney(p.pyramid.next_trigger.release_amount) }}</span>
+                <span>条件计划（未获准执行）：亏损达 {{ fmtPct(p.pyramid.next_trigger.loss_pct) }}，释放 ¥{{ fmtMoney(p.pyramid.next_trigger.release_amount) }}</span>
               </div>
             </div>
 
@@ -801,18 +832,31 @@ onMounted(() => {
                 仓位占比 {{ fmtPct(p.safety?.current_position_pct) }} / 上限 {{ fmtPct(p.safety?.max_position_pct) }}
               </span>
               <span :class="['safety-flag', p.safety?.can_add ? 'flag-ok' : 'flag-stop']">
-                {{ p.safety?.can_add ? '可补仓' : '已达上限' }}
+                {{ p.final_suggested_amount > 0 ? '获准建议' : '暂不执行' }}
               </span>
               <button class="btn-link" @click="fillSim(p.fund_code)">模拟摊薄</button>
             </div>
 
+            <div class="plan-row" data-testid="final-execution-amount">
+              当前可执行 <b class="font-jet">¥{{ fmtMoney(p.final_suggested_amount) }}</b>
+              <span v-if="p.execution_shares > 0">预计份额 {{ fmtNum(p.execution_shares, 4) }}</span>
+            </div>
+            <p v-if="p.safety?.data_warning" class="sim-error" role="status">{{ p.safety.data_warning }}</p>
+            <p v-if="p.safety?.reason || p.min_subscription_note" class="muted">{{ p.safety?.reason || p.min_subscription_note }}</p>
+            <p v-if="p.pyramid?.observation_reason" class="muted">{{ p.pyramid.observation_reason }}</p>
+            <details v-if="p.decision" class="decision-comparison">
+              <summary>投后风险与不补 / 少补对比</summary>
+              <p v-for="reason in p.decision.reasons" :key="reason" class="muted">{{ reason }}</p>
+              <div class="decision-comparison-scroll"><table><thead><tr><th>方案</th><th>投入</th><th>可用现金</th><th>单基金</th><th>同指数</th><th>权益</th><th>压力损失</th></tr></thead><tbody><tr v-for="s in p.decision.comparisons" :key="s.key"><td>{{ {no_add:'不补',small_add:'少补',planned_add:'批准计划'}[s.key] }}</td><td>¥{{ fmtMoney(s.amount) }}</td><td>¥{{ fmtMoney(s.available_cash) }}</td><td>{{ fmtPct(s.single_position_pct) }}</td><td>{{ fmtPct(s.same_index_pct) }}</td><td>{{ fmtPct(s.equity_pct) }}</td><td>¥{{ fmtMoney(s.worst_loss_amount) }}</td></tr></tbody></table></div>
+              <p class="muted">按同一家庭资产和已批准的其他计划比较。{{ p.decision.review_conditions?.join('；') }} · 核对于 {{ p.decision.as_of?.slice(0,19).replace('T',' ') }}</p>
+            </details>
             <!-- 多维度决策层（六维金额计算体系） -->
             <div v-if="positionSizingView(p)" class="plan-row ps-row">
               <div class="ps-head">
                 <Icon name="compass" size="14" />
                 <span class="ps-title">多维度决策层</span>
                 <span v-if="p.final_suggested_amount != null" class="ps-final">
-                  最终建议 <b class="font-jet">¥{{ fmtMoney(p.final_suggested_amount) }}</b>
+                  预算与投后风险校验额 <b class="font-jet">¥{{ fmtMoney(p.final_suggested_amount) }}</b>
                 </span>
                 <span v-if="positionSizingView(p).risk_multiplier != null" class="ps-risk">
                   风险偏好 ×{{ fmtNum(positionSizingView(p).risk_multiplier) }}
@@ -936,7 +980,7 @@ onMounted(() => {
                 <Icon name="zap" size="14" />
                 <span class="signals-title">触发信号（多维度）</span>
                 <span v-if="p.total_suggested > 0" class="signals-total">
-                  合计建议 <b class="font-jet">¥{{ fmtMoney(p.total_suggested) }}</b>
+                  原始信号需求（未含最终约束） <b class="font-jet">¥{{ fmtMoney(p.total_suggested) }}</b>
                 </span>
               </div>
               <div class="signals-list">
@@ -1011,7 +1055,7 @@ onMounted(() => {
                   </div>
                   <!-- 金额计算依据（动态化公式） -->
                   <div v-if="sig.triggered && sig.amount_formula" class="signal-formula">
-                    <span class="formula-label">本次建议补仓</span>
+                    <span class="formula-label">原始信号金额</span>
                     <b class="formula-amount font-jet">¥{{ fmtMoney(sig.amount) }}</b>
                     <span class="formula-detail font-jet">{{ sig.amount_formula.formula }}</span>
                     <span class="formula-breakdown">
@@ -1065,7 +1109,7 @@ onMounted(() => {
                   <span>目标市值 ¥{{ fmtMoney(p.va_result.target_value) }}</span>
                   <span>实际市值 ¥{{ fmtMoney(p.va_result.actual_value) }}</span>
                   <span :class="p.va_result.gap_pct > 0 ? 'text-profit' : 'text-loss'">偏离 {{ fmtSignedPct(p.va_result.gap_pct) }}</span>
-                  <span v-if="p.va_result.action === 'buy' && p.va_result.amount > 0" class="va-amount font-jet">建议 ¥{{ fmtMoney(p.va_result.amount) }}</span>
+                  <span v-if="p.va_result.action === 'buy' && p.va_result.amount > 0" class="va-amount font-jet">条件需求 ¥{{ fmtMoney(p.va_result.amount) }}</span>
                   <span class="va-max">上限 ¥{{ fmtMoney(p.va_result.max_monthly) }}</span>
                 </div>
               </div>
@@ -1208,6 +1252,8 @@ onMounted(() => {
           </div>
           <div v-if="simStratError" class="sim-error">{{ simStratError }}</div>
           <div v-if="simStratResult" class="sim-strategies">
+            <p class="page-desc">{{ simStratResult.scenario?.assumption }}；共同现金预算 ¥{{ fmtMoney(simStratResult.scenario?.cash_budget) }}。
+              {{ simStratResult.ranking_basis }}</p>
             <div
               v-for="(s, idx) in simStratResult.strategies"
               :key="idx"
@@ -1216,7 +1262,7 @@ onMounted(() => {
               <div class="sim-card-head">
                 <Icon :name="s.icon" size="14" />
                 <span>{{ s.name }}</span>
-                <span v-if="s.is_best" class="sim-best-badge">最优</span>
+                <span v-if="s.is_best" class="sim-best-badge">本情景财富较高</span>
               </div>
               <div class="sim-card-body">
                 <div class="sim-row">
@@ -1224,11 +1270,11 @@ onMounted(() => {
                   <span class="font-jet">{{ fmtNum(s.final_cost, 4) }}</span>
                 </div>
                 <div class="sim-row">
-                  <span>最终市值</span>
+                  <span>投资部分市值</span>
                   <span class="font-jet">¥{{ fmtMoney(s.final_value) }}</span>
                 </div>
                 <div class="sim-row">
-                  <span>总投入</span>
+                  <span>持仓历史成本 + 追加</span>
                   <span class="font-jet">¥{{ fmtMoney(s.total_invested) }}</span>
                 </div>
                 <div class="sim-row">
@@ -1237,6 +1283,11 @@ onMounted(() => {
                     {{ fmtSignedPct(s.profit_rate) }}
                   </span>
                 </div>
+                <div class="sim-row"><span>期末总财富</span><b>¥{{ fmtMoney(s.final_wealth) }}</b></div>
+                <div class="sim-row"><span>剩余现金</span><span>¥{{ fmtMoney(s.remaining_cash) }}</span></div>
+                <div class="sim-row"><span>费用</span><span>¥{{ fmtMoney(s.fees) }}</span></div>
+                <div class="sim-row"><span>最大损失 / 回撤</span><span>¥{{ fmtMoney(s.max_loss) }} / {{ fmtPct(s.max_drawdown_pct) }}</span></div>
+                <div class="sim-row"><span>追加资金峰值</span><span>¥{{ fmtMoney(s.peak_additional_funding) }}</span></div>
                 <div class="sim-desc">{{ s.description }}</div>
               </div>
             </div>
@@ -1283,7 +1334,7 @@ onMounted(() => {
               <input v-model.number="cfgForm.valuation_pause_pct" type="number" step="5" class="cfg-input font-jet" />
             </div>
             <div class="cfg-field cfg-field-wide">
-              <label>金字塔档位 (亏损%:释放%)</label>
+              <label>金字塔档位 (亏损%:释放%:加仓比例%)</label>
               <input v-model="cfgForm.pyramid_tiers" type="text" class="cfg-input font-jet" placeholder="10:15,20:25,30:30,40:20,50:10" />
             </div>
             <div class="cfg-field cfg-field-check">
@@ -1318,7 +1369,7 @@ onMounted(() => {
             </div>
           </div>
           <div class="cfg-actions">
-            <button class="btn-primary" @click="saveConfig" :disabled="cfgSaving">
+            <button class="btn-primary" @click="confirmAction = 'config'" :disabled="cfgSaving">
               <Icon name="spinner" v-if="cfgSaving" size="14" class="spinning" />
               <span>{{ cfgSaving ? '保存中…' : '保存配置' }}</span>
             </button>
@@ -1329,12 +1380,12 @@ onMounted(() => {
         </div>
       </section>
 
-      <!-- ⑤ 反事实决策验证 -->
+      <!-- ⑤ 建议跟踪（虚拟现金） -->
       <section class="cfg-section">
         <header class="cfg-head" @click="toggleCounterfactual">
           <h3 class="cfg-title">
             <Icon name="check-circle" size="16" />
-            <span>反事实决策验证</span>
+            <span>建议跟踪（虚拟现金）</span>
             <span class="cf-badge" v-if="counterfactual?.summary?.total_count > 0">
               {{ counterfactual.summary.total_count }}条
             </span>
@@ -1344,7 +1395,7 @@ onMounted(() => {
 
         <div v-if="showCounterfactual" class="cfg-body">
           <p class="cf-intro">
-            系统每次生成补仓建议时自动创建"假设交易"。此处跟踪：如果过去都按建议补仓了，现在赚/亏多少。
+            仅显式保存建议后登记；固定期初虚拟现金按顺序扣款，等待建议日之后首个可知净值。此处记录与真实成交分开，不代表真实组合收益。
             <button class="btn-link" @click="loadCounterfactual" :disabled="cfLoading">
               {{ cfLoading ? '验证中…' : '刷新验证' }}
             </button>
@@ -1366,13 +1417,13 @@ onMounted(() => {
               <div class="cf-sum-card">
                 <span class="cf-sum-label">假设累计盈亏</span>
                 <span class="cf-sum-value font-jet" :style="{ color: profitColor(counterfactual.summary.total_profit_loss) }">
-                  {{ counterfactual.summary.total_profit_loss >= 0 ? '+' : '' }}¥{{ fmtMoney(counterfactual.summary.total_profit_loss) }}
+                  {{ counterfactual.summary.total_profit_loss == null ? '--' : (counterfactual.summary.total_profit_loss >= 0 ? '+' : '') + '¥' + fmtMoney(counterfactual.summary.total_profit_loss) }}
                 </span>
               </div>
               <div class="cf-sum-card">
-                <span class="cf-sum-label">假设收益率</span>
+                <span class="cf-sum-label">虚拟总财富收益率</span>
                 <span class="cf-sum-value font-jet" :style="{ color: profitColor(counterfactual.summary.total_profit_rate) }">
-                  {{ fmtSignedPct(counterfactual.summary.total_profit_rate * 100) }}
+                  {{ counterfactual.summary.total_profit_rate == null ? '--' : fmtSignedPct(counterfactual.summary.total_profit_rate * 100) }}
                 </span>
               </div>
               <div class="cf-sum-card">
@@ -1387,6 +1438,7 @@ onMounted(() => {
               </div>
             </div>
 
+            <p class="muted" v-if="counterfactual.summary">{{ counterfactual.summary.note }}；虚拟剩余现金 ¥{{ fmtMoney(counterfactual.summary.remaining_shadow_cash) }}；待评估 {{ counterfactual.summary.pending_count ?? 0 }} 条。</p>
             <!-- 改善幅度提示 -->
             <div class="cf-improvement" v-if="counterfactual.comparison?.improvement != null">
               <Icon name="trending-up" size="14" />
@@ -1437,10 +1489,10 @@ onMounted(() => {
                       <span v-if="tx.status === 'verified'" class="cf-tag" :class="tx.is_breakeven ? 'cf-tag-win' : 'cf-tag-loss'">
                         {{ tx.is_breakeven ? '已回本' : '仍亏损' }}
                       </span>
-                      <span v-else class="cf-tag cf-tag-muted">{{ tx.status === 'no_nav_data' ? '无净值' : tx.status }}</span>
+                      <span v-else class="cf-tag cf-tag-muted">{{ ({ pending_evaluation: '待评估', duplicate_event: '重复事件未执行', insufficient_shadow_cash: '虚拟现金不足', missing_budget_evidence: '旧记录缺资金证据' })[tx.status] || tx.status }}</span>
                     </td>
                     <td>
-                      <button class="btn-link-danger" @click="removeHypothetical(tx.tx_id)">删除</button>
+                      <button class="btn-link-danger" @click="confirmAction = tx.tx_id">删除</button>
                     </td>
                   </tr>
                 </tbody>
@@ -1450,7 +1502,7 @@ onMounted(() => {
 
             <div v-else class="cf-empty">
               <Icon name="info" size="16" />
-              <span>暂无假设交易记录。每次访问补仓计划页面时，系统会自动为建议创建假设交易。</span>
+              <span>暂无建议跟踪记录。可通过“保存建议跟踪”登记当前获准建议；刷新页面不会自动登记。</span>
             </div>
           </div>
         </div>
@@ -2232,7 +2284,7 @@ onMounted(() => {
   .sim-form { flex-direction: column; align-items: stretch; }
 }
 
-/* ── 反事实决策验证 ── */
+/* ── 建议跟踪（虚拟现金） ── */
 .cf-badge {
   display: inline-flex;
   align-items: center;
@@ -2844,4 +2896,8 @@ onMounted(() => {
   .ps-grid { grid-template-columns: repeat(2, 1fr); }
   .exposure-funds { max-width: 200px; }
 }
+</style>
+
+<style scoped>
+.decision-comparison{padding:12px 0;font-size:12px;border-top:1px solid var(--color-border)}.decision-comparison summary{cursor:pointer;color:var(--color-text-secondary)}.decision-comparison-scroll{overflow:auto}.decision-comparison table{width:100%;border-collapse:collapse;white-space:nowrap;margin-top:12px}.decision-comparison th,.decision-comparison td{padding:8px;text-align:right;border-bottom:1px solid var(--color-border);font-variant-numeric:tabular-nums}.decision-comparison th:first-child,.decision-comparison td:first-child{text-align:left}
 </style>

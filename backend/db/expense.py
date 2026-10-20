@@ -351,15 +351,17 @@ def set_expense_month_complete(month: str, complete: bool, user_id: str = "defau
     _auto_fill_profile(user_id)
 
 
-def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
+def get_cashflow(user_id: str = "default", month: str | None = None, *, conn=None) -> dict:
     """统一家庭现金流：实际/待付/月均预留、月预算和应急储备分别计算。"""
     from db.recurring_expenses import get_recurring_summary
     from db.portfolio import get_portfolio_cash_snapshot
 
     month = _validate_month(month) if month else _current_month()
-    conn = _get_conn()
+    owned = conn is None
+    conn = conn if conn is not None else _get_conn()
     try:
-        conn.execute("BEGIN")
+        if owned:
+            conn.execute("BEGIN")
         profile_row = conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
         profile = dict(profile_row) if profile_row else {}
         summary = get_expense_summary(month, user_id, conn=conn)
@@ -371,7 +373,8 @@ def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
         buckets = conn.execute("SELECT * FROM goal_buckets WHERE user_id=? AND status='active'", (user_id,)).fetchall()
         cash_snapshot = get_portfolio_cash_snapshot(user_id, conn=conn)
     finally:
-        conn.close()
+        if owned:
+            conn.close()
     income = max(0.0, float(profile.get("monthly_income") or 0))
     budget = max(0.0, float(profile.get("monthly_expense") or 0))
     complete = bool(row and row["complete"])
@@ -414,12 +417,13 @@ def get_cashflow(user_id: str = "default", month: str | None = None) -> dict:
         from db.recurring_expenses import get_recurring_summary
         for offset in range(3):
             target = _month_offset(month, offset)
-            forecast_conn = _get_conn()
+            forecast_conn = _get_conn() if owned else conn
             try:
                 target_summary = get_expense_summary(target, user_id, conn=forecast_conn)
                 target_bills = get_recurring_summary(target, user_id, conn=forecast_conn)
             finally:
-                forecast_conn.close()
+                if owned:
+                    forecast_conn.close()
             target_manual_fixed = max(0.0, target_summary["fixed_total"] - target_bills.get("paid_total", 0))
             target_fixed = round(target_manual_fixed + target_bills.get("recurring_due_total", 0), 2)
             # 预算代表全月必要支出的上限；若预算缺失，则至少锁定固定必缴。

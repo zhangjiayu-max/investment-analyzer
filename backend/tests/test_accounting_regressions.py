@@ -9,12 +9,12 @@ from services import fee_calculator as fees
 
 
 def holding():
-    return p.create_holding('000001', '测试基金', 100, 1, 1, buy_date='2026-01-01', account='测试')
+    return p.create_holding('000001', '测试基金', 100, 1, 1, buy_date='2026-01-01', account='花无缺')
 
 
 def pending(hid, kind='sell'):
     return p.create_transaction('000001', kind, 0, '2026-02-01', holding_id=hid,
-                                shares=50, status='pending', account='测试')
+                                shares=50, status='pending', account='花无缺')
 
 
 def test_cost_replay_sell_then_rebuy():
@@ -60,7 +60,12 @@ def test_concurrent_confirmation_credits_cash_once():
     assert p.get_holding(hid)['shares'] == 50
     conn = _get_conn()
     try:
-        assert conn.execute("SELECT balance FROM portfolio_cash WHERE user_id='default'").fetchone()['balance'] == 100
+        assert conn.execute("SELECT balance FROM portfolio_cash WHERE user_id='花无缺'").fetchone() is None
+        assert p.get_portfolio_cash_snapshot()['receivable_cash'] == 100
+        assert p.settle_transaction(tx)
+        assert not p.settle_transaction(tx)
+        assert p.get_portfolio_cash_snapshot()['cash_balance'] == 100
+        assert p.get_portfolio_cash_snapshot()['receivable_cash'] == 0
     finally:
         conn.close()
 
@@ -78,7 +83,7 @@ def test_conversion_uses_independent_target_nav():
     hid = holding()
     tx = pending(hid, 'convert')
     assert p.confirm_transaction(tx, 2, target_fund_code='000002', target_price=4, fee=4)
-    target = p.get_holding_by_fund('000002', account='测试')
+    target = p.get_holding_by_fund('000002', account='花无缺')
     assert target['shares'] == 24
     assert target['total_cost'] == 96
     assert p.get_holding(hid)['shares'] == 50
@@ -134,7 +139,7 @@ def test_conversion_rolls_back_both_legs_on_target_failure(monkeypatch):
         p.confirm_transaction(tx, 2, target_fund_code='000002', target_price=4)
     assert p.get_transaction(tx)['status'] == 'pending'
     assert p.get_holding(hid)['shares'] == 100
-    assert p.get_holding_by_fund('000002', account='测试') is None
+    assert p.get_holding_by_fund('000002', account='花无缺') is None
 
 
 def test_bucket_credit_failure_rolls_back_debit():
@@ -157,7 +162,7 @@ def test_conversion_preserves_target_fund_category():
     tx = pending(hid, 'convert')
     assert p.confirm_transaction(tx, 2, target_fund_code='000002',
                                  target_fund_name='测试纯债基金', target_price=4)
-    assert p.get_holding_by_fund('000002', account='测试')['fund_category'] == 'bond_pure'
+    assert p.get_holding_by_fund('000002', account='花无缺')['fund_category'] == 'bond_pure'
 
 
 def test_transfer_api_accepts_frontend_object_body():
