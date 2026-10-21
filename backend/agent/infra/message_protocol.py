@@ -308,52 +308,44 @@ def agent_outputs_to_a2a_context(outputs: list[AgentOutput],
 _A2A_OUTPUT_INSTRUCTION = """
 ## A2A 输出格式要求
 
-你的分析需要同时输出两部分：
+两部分，顺序固定：先结构化结论，再详细分析正文。
 
-### 1. 结构化结论（JSON，放在分析文本最前面，用 ```json 包裹）
+### 1. 结构化结论（```json 代码块，字段名不得改动）
+
 ```json
 {
-  "conclusion": "一句话结论（50字以内）",
+  "conclusion": "一句话结论，50字内",
   "verdict": "buy|hold|sell|watch|avoid",
   "action_signals": [
-    {"type": "BUY|SELL|HOLD|ADD|REDUCE|WATCH", "target": "标的名称", "confidence": 0.0-1.0, "urgency": "high|medium|low"}
+    {"type": "BUY|SELL|HOLD|ADD|REDUCE|WATCH", "target": "标的", "confidence": 0.0-1.0, "urgency": "high|medium|low"}
   ],
   "asset_actions": [
-    {"target": "标的名称", "target_code": "有原始证据支持的六位代码，未知则为空字符串", "action": "BUY|SELL|HOLD|ADD|REDUCE",
-     "confidence": 0.0-1.0, "evidence_refs": ["可追溯的工具或证据ID"], "reason": "针对该标的的理由",
+    {"target": "标的", "target_code": "有证据支持的六位代码，未知填空字符串", "action": "BUY|SELL|HOLD|ADD|REDUCE",
+     "confidence": 0.0-1.0, "evidence_refs": ["可回查的工具或证据ID"], "reason": "该标的的理由",
      "status": "current|conditional|historical|negated|rejected", "amount": null, "conditions": []}
   ],
   "portfolio_stance": "buy|hold|sell|watch",
-  "data_references": [
-    {"source": "数据来源表名", "metric": "指标名", "value": "数值"}
-  ],
+  "data_references": [{"source": "来源", "metric": "指标", "value": "数值"}],
   "confidence": 0.0-1.0,
-  "confidence_breakdown": {
-    "data_quality": 0.0-1.0,
-    "analysis_depth": 0.0-1.0,
-    "uncertainty": 0.0-1.0
-  }
+  "confidence_breakdown": {"data_quality": 0.0-1.0, "analysis_depth": 0.0-1.0, "uncertainty": 0.0-1.0}
 }
 ```
 
-### 2. 详细分析（Markdown，放在 JSON 后面）
-正常的分析文本，包括数据解读、逻辑推理、风险提示等。
+### 2. 详细分析（Markdown，JSON 之后）
 
-注意：
-- JSON 必须放在代码块 ```json 中
-- verdict 必须明确填写，取值含义：
-  - buy：建议买入/加仓
-  - hold：建议持有/观望（不追加也不减仓）
-  - sell：建议卖出/减仓
-  - watch：建议观察等待（数据不足或信号不明确）
-  - avoid：建议回避（高风险或估值过高）
-- verdict 必须与 action_signals 和详细分析的操作建议一致，不得矛盾
-- asset_actions 中每个动作独立保留 confidence、evidence_refs、reason、status、target_code、amount 和 conditions。
-- amount 是已核验的人民币金额，未知用 null；target_code、evidence_refs 必须能回查已有证据，不能猜测或补造。
-- 条件、历史或否定动作分别标记 status=conditional、historical、negated；拒绝动作用 rejected，条件写入 conditions。这些状态不表示当前可执行建议。
-- portfolio_stance 表示组合层面立场，可以与单个标的的 asset_actions 同时存在。
-- 如果某个字段不适用，用空数组 [] 或 0.0
-- 置信度 confidence 不要盲目给高分，有不确定因素时如实降低
+数据解读、推理过程、风险提示。**正文不少于 400 字**，这是主要交付物。
+
+### 填写规则
+
+- JSON 只放结论，不放论证过程；论证写在正文。JSON 控制在 30 行内。
+- `action_signals` 与 `asset_actions` 各不超过 5 条，只写真正有证据支持的动作；无动作则给空数组 `[]`。
+- `verdict` 取值：buy 买入/加仓，hold 持有/观望，sell 卖出/减仓，watch 观察等待，avoid 回避。
+- `verdict` 必须与 `action_signals`、正文建议三者一致，不得矛盾。
+- `target_code`、`evidence_refs` 必须能回查已有工具证据，不得猜测或补造；`amount` 未知填 null。
+- 条件/历史/否定/拒绝的动作分别标 status=conditional/historical/negated/rejected，条件写入 conditions；这些不代表当前可执行建议。
+- `portfolio_stance` 是组合层面立场，可与单标的 `asset_actions` 并存。
+- 字段不适用时用 `[]` 或 0.0，不要省略字段。
+- 置信度如实给分，有数据缺口时降低，不要一律高分。
 """
 
 

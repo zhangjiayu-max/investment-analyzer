@@ -440,6 +440,10 @@ class _SpecialistUsage:
         self.token_budget = token_budget
         self.max_output_tokens = max_output_tokens
         self.exhausted = False
+        # 真实 prompt_tokens / 估算 prompt 的比值，用于收敛估算误差。估算按字符数/2 计，
+        # JSON 与英文密集的上下文会被高估约 2 倍，直接用高估值做预算判定会让多轮工具
+        # 场景在第三轮误判「预算耗尽」或把输出压成碎片。
+        self.estimate_ratio = None
         self.context_usage = {'calls': 0, 'raw_message_chars': 0, 'model_message_chars': 0,
                               'tool_schema_chars': 0, 'estimated_input_tokens': 0}
 
@@ -449,13 +453,26 @@ class _SpecialistUsage:
         kwargs = {**kwargs, 'messages': compact_model_messages(kwargs.get('messages', []),
             per_tool_chars=get_config_int('pipeline.per_tool_context_chars', 6000),
             total_tool_chars=get_config_int('pipeline.tool_context_chars', 18000))}
-        prompt_estimate = _estimate_specialist_tokens(kwargs.get('messages', []), '', [], kwargs.get('tools'))
+        raw_prompt_estimate = _estimate_specialist_tokens(kwargs.get('messages', []), '', [], kwargs.get('tools'))
+        prompt_estimate = raw_prompt_estimate
+        if self.estimate_ratio is not None:
+            prompt_estimate = max(1, int(raw_prompt_estimate * self.estimate_ratio))
         cap = kwargs.get("max_tokens")
         if self.max_output_tokens is not None:
             cap = min(cap, self.max_output_tokens) if cap is not None else self.max_output_tokens
         if self.token_budget is not None:
             remaining = self.token_budget - self.reported - self.estimated
-            cap = min(cap, remaining - prompt_estimate) if cap is not None else remaining - prompt_estimate
+            affordable = remaining - prompt_estimate
+            # 旧写法 cap=min(cap, remaining-prompt_estimate) 会按「估算输入」逐轮压缩输出。
+            # 估算按字符数/2 计偏保守，输入膨胀到 2 万 token 后输出只剩 1333 token，
+            # 专家产出的 A2A JSON 块闭合不了、正文没有空间，被判 failed。
+            # 2026-10-21 整条 pipeline 失败即由此产生：全部 #turn2/#continue 均为 1333。
+            # 现在只保留「一次完整输出」的下限，真正的超支交由下方事后判定标记 exhausted。
+            if affordable <= 0:
+                self.exhausted = True
+                raise _SpecialistBudgetExhausted("专家预算不足以容纳下一轮输入和输出")
+            floor = min((cap or 0) // 2, remaining // 2) if cap else max(1, remaining // 2)
+            cap = min(cap, max(affordable, floor)) if cap is not None else max(affordable, floor)
         if cap is not None:
             if cap <= 0:
                 self.exhausted = True
@@ -469,6 +486,12 @@ class _SpecialistUsage:
         self.context_usage['estimated_input_tokens'] += prompt_estimate
         usage = getattr(response, "usage", None)
         total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
+        # 用真实 prompt_tokens 校准下一轮的输入估算，避免高估把输出空间吃光。
+        prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else getattr(usage, "prompt_tokens", None)
+        if (isinstance(prompt_tokens, (int, float)) and not isinstance(prompt_tokens, bool)
+                and prompt_tokens > 0 and raw_prompt_estimate > 0):
+            ratio = min(1.0, float(prompt_tokens) / raw_prompt_estimate)
+            self.estimate_ratio = ratio if self.estimate_ratio is None else (self.estimate_ratio + ratio) / 2
         if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
             self.reported += int(total)
             self.reported_calls += 1

@@ -818,20 +818,9 @@ def _extract_portfolio_impact(analysis: str, action_signals: list, asset_actions
     }
 
 
-# ── 全局单例 ──────────────────────────────────
-
-_global_blackboard: Optional[Blackboard] = None
-
-
-def get_global_blackboard() -> Blackboard:
-    """获取全局黑板实例（单次对话内复用）。"""
-    global _global_blackboard
-    if _global_blackboard is None:
-        _global_blackboard = Blackboard()
-    return _global_blackboard
-
-
-def reset_global_blackboard() -> None:
-    """重置全局黑板（新对话开始时调用）。"""
-    global _global_blackboard
-    _global_blackboard = None
+# ── 说明：黑板实例的生命周期 ──────────────────────────────
+# 黑板按「单次请求」创建（orchestrate_stream / run_pipeline 内部各自 new 一个，
+# 并在 checkpoint 里序列化 blackboard_dict）。不要引入进程级单例：
+# 同一进程内并发对话会互相覆盖结论，且 reset 时机无法协调。
+# 历史上曾有 _global_blackboard 单例，但它从未被任何代码读取，
+# 每次请求都只把 None 设回 None，已移除以免误导。

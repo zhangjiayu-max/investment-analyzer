@@ -27,4 +27,9 @@ def tmp_db(tmp_path, monkeypatch, request):
     from db import init_db
     init_db()
 
+    # 综合阶段流式会直接打真实模型通道；单测默认走非流式分支，
+    # 专测流式的用例在自身内部重新打开。
+    import agent.core.pipeline as pipeline_mod
+    monkeypatch.setattr(pipeline_mod, "_synthesis_stream_enabled", lambda: False, raising=False)
+
     yield db_path

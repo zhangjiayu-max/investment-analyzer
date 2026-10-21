@@ -13,7 +13,7 @@ from infra.execution_budget import ExecutionCancelled
 
 from services.llm_service import client, MODEL, _call_llm, _parse_tool_args
 from agent.core.multi_agent import run_specialist, run_specialist_with_context, run_cross_review_opinion, _build_portfolio_summary
-from agent.infra.blackboard import Blackboard, extract_entry_from_result, reset_global_blackboard
+from agent.infra.blackboard import Blackboard, extract_entry_from_result
 from db.agents import (
     load_specialist_agents,
     create_pending_agent_run,
@@ -5699,7 +5699,7 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
             from contextlib import closing
             from infra.execution_budget import execution_budget
             from services.llm_service import _call_llm_stream
-            with execution_budget(180, cancel_event), closing(_call_llm_stream(
+            with execution_budget(get_config_int('agent.synthesis_timeout', 180), cancel_event), closing(_call_llm_stream(
                 caller="orchestrator",
                 trace_id=trace_id,
                 model=MODEL,
@@ -5781,6 +5781,32 @@ def _stream_final_synthesis(query: str, refined_query: str, specialists: list,
         logger.warning(
             f"[trace:{trace_id}] [orchestrator] 卖出时机守卫失败: {_timing_err}"
         )
+
+    # P0 持仓约束冲突守卫（2026-10-21 分析记录复核 conv#139 修复）
+    # 检测"已超 KYC 目标/单只超限"与"无条件加仓建议"并存的自相矛盾，
+    # 命中时在文末追加前置条件提示。开关：agent.position_constraint_guard_enabled
+    try:
+        from agent.safety.position_constraint_guard import enforce_position_constraint_guard
+        final_answer, _constraint_warnings = enforce_position_constraint_guard(
+            final_answer, trace_id=trace_id
+        )
+        if _constraint_warnings:
+            logger.info(
+                f"[trace:{trace_id}] [orchestrator] 持仓约束冲突守卫触发: {_constraint_warnings}"
+            )
+    except Exception as _constraint_err:
+        logger.warning(
+            f"[trace:{trace_id}] [orchestrator] 持仓约束冲突守卫失败: {_constraint_err}"
+        )
+
+    # 行情数据时效守卫：把"今日"锚定到真实交易日，避免拿隔夜收盘当当天行情
+    try:
+        from agent.safety.market_date_guard import enforce_market_date_guard
+        final_answer, _date_warnings = enforce_market_date_guard(final_answer, trace_id=trace_id)
+        if _date_warnings:
+            logger.info(f"[trace:{trace_id}] [orchestrator] 行情日期守卫触发: {_date_warnings}")
+    except Exception as _date_err:
+        logger.warning(f"[trace:{trace_id}] [orchestrator] 行情日期守卫失败: {_date_err}")
 
     # 估值数据利用监测：记录综合报告对估值数据的引用情况
     _record_valuation_references(specialist_results, final_answer, trace_id, conversation_id, message_id)
@@ -5911,9 +5937,6 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
     """
     start_time = time.time()
 
-    # 重置全局黑板（防止上一轮对话残留数据混入）
-    reset_global_blackboard()
-
     # 性能监控
     perf_metrics = {
         "start_time": start_time,
@@ -5967,6 +5990,10 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                         yield evt  # 直接转发
                     elif evt_type == "specialist_done":
                         yield evt  # 直接转发
+                    elif evt_type in ("answer_chunk", "reasoning_chunk"):
+                        # 综合阶段的流式增量：必须显式转发，否则用户要等到 answer
+                        # 一次性送达才看得到内容（对话 2026-10-21 曾静默 107 秒）。
+                        yield evt
                     elif evt_type == "answer":
                         pipeline_completed = True
                         yield evt  # 直接转发最终回答
@@ -6231,6 +6258,46 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     specialist_results.append(sr)
                     already_called.add(sr["agent_key"])
 
+    def _checkpoint_experts_done() -> None:
+        """专家结果就绪时存档，供中断后恢复。
+
+        必须在「无工具调用」分支 return 之前显式调用：正常完成路径在
+        `if ntc_done: return` 处直接退出，永远走不到函数末尾的检查点语句。
+        这曾导致 orchestration_checkpoints 长期为空（0 行），
+        断点续接在主路径上从未生效。
+        """
+        if not (conversation_id and message_id and specialist_results):
+            return
+        _save_checkpoint(conversation_id, message_id, "experts_done", {
+            "specialist_results": specialist_results,
+            "all_tool_calls": all_tool_calls,
+            "arbitration_done": arbitration_done,
+            "complexity": complexity,
+            **_build_flow_metadata(
+                query,
+                complexity,
+                len(specialist_results),
+                route_result=route_result,
+                clarification=clarification,
+            ),
+            # 内存状态字段（用于恢复时重建 orchestrator 状态）
+            "llm_messages": _truncate_llm_messages_for_checkpoint(llm_messages),
+            "blackboard_dict": blackboard.to_dict(),
+            "conflicts": conflicts,
+            "cross_review_results": cross_review_results,
+            "active_plan": active_plan,
+            # 综合阶段需要的上下文字段
+            "refined_query": refined_query,
+            "prebuilt_context": prebuilt_context,
+            "system_content": system_content,
+            "route_result": route_result,
+            "clarification": clarification,
+            "context_config": context_config,
+            "rag_context": rag_context,
+            "specialists": specialists,
+            "trace_id": trace_id,
+        })
+
     # ── resume_from_checkpoint 模式：跳过 ReAct 循环，直接进入综合阶段 ──
     # 恢复场景下所有专家已完成（从 checkpoint 恢复 specialist_results），
     # 无需再调用 LLM 决策下一步，直接走 _stream_final_synthesis（5段结构+仲裁+止盈不止损）
@@ -6319,6 +6386,9 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                     ntc_done = si.value
                     break
             if ntc_done:
+                # 正常完成路径从这里 return，走不到函数末尾的检查点语句，
+                # 因此专家结果就绪时必须先存档。
+                _checkpoint_experts_done()
                 return
             # ntc_done == False 不会发生（函数总是返回 True），但防御性处理
             arbitration_done = True  # 函数内部已处理仲裁
@@ -6686,39 +6756,8 @@ def orchestrate_stream(query: str, history: list, rag_context: str = "", cancel_
                 except Exception as e:
                     logger.error(f"动态追加专家 {agent_key} 执行失败: {e}")
 
-        # 增强1: 检查点存档 — Phase A 专家执行完成
-    # 扩展：保存完整内存状态，支持中断后走 orchestrate_stream 完整恢复
-    if conversation_id and message_id and specialist_results:
-        _save_checkpoint(conversation_id, message_id, "experts_done", {
-            # ── 现有字段（保留）──
-            "specialist_results": specialist_results,
-            "all_tool_calls": all_tool_calls,
-            "arbitration_done": arbitration_done,
-            "complexity": complexity,
-            **_build_flow_metadata(
-                query,
-                complexity,
-                len(specialist_results),
-                route_result=route_result,
-                clarification=clarification,
-            ),
-            # ── 新增：内存状态字段（用于恢复时重建 orchestrator 状态）──
-            "llm_messages": _truncate_llm_messages_for_checkpoint(llm_messages),
-            "blackboard_dict": blackboard.to_dict(),
-            "conflicts": conflicts,
-            "cross_review_results": cross_review_results,
-            "active_plan": active_plan,
-            # ── 新增：上下文字段（综合阶段需要）──
-            "refined_query": refined_query,
-            "prebuilt_context": prebuilt_context,
-            "system_content": system_content,
-            "route_result": route_result,
-            "clarification": clarification,
-            "context_config": context_config,
-            "rag_context": rag_context,
-            "specialists": specialists,
-            "trace_id": trace_id,
-        })
+    # 轮次耗尽路径的兜底存档：正常完成已在「无工具调用」分支保存过。
+    _checkpoint_experts_done()
 
     # 超过最大轮次,做最后一次总结
     yield from _stream_final_synthesis(

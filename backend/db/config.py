@@ -69,6 +69,8 @@ DEFAULT_CONFIGS = [
     ('pipeline.complex.synthesis_cost_tokens', '70000', '复杂任务综合阶段保留成本额度', 'pipeline'),
     ('pipeline.complex.max_total_cost_tokens', '400000', '复杂任务全流程成本额度', 'pipeline'),
     ('pipeline.review_output_tokens', '6000', '审查单次最大输出token', 'pipeline'),
+    ('pipeline.synthesis_stream_enabled', 'true', '综合回答流式生成（关闭则等全文生成完再一次性返回）', 'pipeline'),
+    ('agent.synthesis_timeout', '180', '综合回答生成时限（秒）。ReAct 与 Pipeline 综合阶段共用，需明显小于 abort 总时限', 'agent'),
     ('pipeline.per_tool_context_chars', '6000', '专家单工具模型视图字符上限（原始证据保留）', 'pipeline'),
     ('pipeline.tool_context_chars', '18000', '专家全部工具模型视图总字符上限', 'pipeline'),
     ('llm.max_tokens_orchestrator', '8192', 'Orchestrator最大token', 'llm'),
@@ -257,7 +259,7 @@ DEFAULT_CONFIGS = [
     # P2-1：长对话超时保护
     ('conversation.warn_at_minutes', '5', '长对话警告阈值（分钟）', 'conversation'),
     ('conversation.abort_at_minutes', '15', '长对话硬收尾阈值（分钟，包含专家与综合阶段）', 'conversation'),
-    ('agent.specialist_timeout', '600', '专家执行阶段共享时限（秒，达到时保留已完成结果）', 'agent'),
+    ('agent.specialist_timeout', '300', '专家执行阶段共享时限（秒，达到时保留已完成结果）。实测单专家峰值 274s；该值需明显小于 conversation.abort_at_minutes，否则专家阶段会吃掉总预算', 'agent'),
 
     # LLM 调用优化：冲突检测缓存 + cross_review 单轮意见 + ReAct 压缩
     ('agent.conflict_detect_cache', 'true', '冲突检测结果缓存（cross_review 前后原始专家列表相同时复用，省 1 次 LLM 调用）', 'agent'),
@@ -725,6 +727,16 @@ def init_default_configs(conn=None):
             )
         except Exception:
             pass
+    # 一次性迁移：专家阶段共享时限原默认 600s，实测单专家耗时 P99=153s、峰值 274s，
+    # 600s 会占掉 abort 总时限（15min）的 2/3，挤压审阅与综合预算。
+    # 只迁移仍停留在旧默认值的库，用户自行调过的值不动。
+    try:
+        conn.execute(
+            "UPDATE system_config SET value='300', updated_at=datetime('now','localtime') "
+            "WHERE key='agent.specialist_timeout' AND value='600'"
+        )
+    except Exception:
+        pass
     if own_conn:
         conn.commit()
         conn.close()

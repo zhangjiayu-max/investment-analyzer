@@ -31,7 +31,7 @@ from agent.query_understander import (
     understand_query, is_simple_chat, get_complexity,
     needs_clarification, INTENT_FINANCIAL_QUERY,
 )
-from agent.infra.blackboard import Blackboard, extract_entry_from_result, reset_global_blackboard
+from agent.infra.blackboard import Blackboard, extract_entry_from_result
 from agent.infra.convergence import ConvergenceDetector, reset_convergence_detector
 from agent.infra.termination import TerminationChecker, get_token_budget_for_complexity
 from agent.infra.tool_dedup import reset_tool_call_cache
@@ -210,7 +210,6 @@ def run_pipeline(
     # 重置全局状态（新对话开始）
     reset_convergence_detector()
     reset_tool_call_cache()
-    reset_global_blackboard()
 
     # 初始化状态
     if resumed_state:
@@ -584,11 +583,12 @@ def run_pipeline(
 
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
-        phase4_result = _phase_synthesis(
+        phase4_result = yield from _phase_synthesis_streaming(
             state, query, phase3_result, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
             plan=phase2_result,
+            cancel_event=cancel_event,
         )
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
@@ -705,7 +705,6 @@ def run_pipeline_from_checkpoint(
     # 重置全局状态
     reset_convergence_detector()
     reset_tool_call_cache()
-    reset_global_blackboard()
 
     checker = TerminationChecker(start_time=start_time)
     detector = ConvergenceDetector()
@@ -839,11 +838,12 @@ def run_pipeline_from_checkpoint(
 
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
-        phase4_result = _phase_synthesis(
+        phase4_result = yield from _phase_synthesis_streaming(
             state, state.refined_query, phase3_result, blackboard, trace_id,
             reflection_result=reflection_result,
             debate_result=debate_result,
             plan=phase2_result,
+            cancel_event=cancel_event,
         )
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
@@ -2376,6 +2376,60 @@ def _validate_synthesis(answer, completion_status, specialists, reflection_resul
     return calibrate_confidence_text(answer, confidence), completion_status, quality_status, confidence
 
 
+def _phase_synthesis_streaming(*args, cancel_event=None, **kwargs):
+    """在后台线程执行综合阶段，把增量事件经队列转给调用方生成器。
+
+    综合阶段是一次同步阻塞的长模型调用，而 SSE 需要边生成边推送。两者之间加一层
+    单生产者/单消费者队列桥接，既保持 _phase_synthesis 的同步契约（多处测试与
+    降级路径依赖它直接返回 dict），又让 run_pipeline 能实时 yield 增量。
+
+    事件顺序与生成顺序一致；异常（含取消）原样抛回调用方。
+    """
+    import contextvars
+    import queue as _queue
+    import threading as _threading
+
+    events = _queue.Queue()
+    outcome = {}
+
+    def _emit(event):
+        events.put(("event", event))
+
+    def _work():
+        try:
+            outcome["result"] = _phase_synthesis(
+                *args, cancel_event=cancel_event, chunk_emitter=_emit, **kwargs)
+        except BaseException as exc:  # 取消/超时同样要传回主线程
+            outcome["error"] = exc
+        finally:
+            events.put(("done", None))
+
+    ctx = contextvars.copy_context()
+    worker = _threading.Thread(target=ctx.run, args=(_work,),
+                               name="pipeline-synthesis", daemon=True)
+    worker.start()
+    completed = False
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _PipelineCancelled()
+            try:
+                kind, payload = events.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            if kind == "done":
+                completed = True
+                break
+            yield payload
+    finally:
+        # 生成器被关闭时也要收尾，避免线程悬挂到进程结束。
+        worker.join(timeout=0.2 if not completed else 5.0)
+
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
+
+
 def _phase_synthesis(
     state: PipelineState,
     query: str,
@@ -2385,8 +2439,13 @@ def _phase_synthesis(
     reflection_result: dict = None,
     debate_result: dict = None,
     plan: dict = None,
+    cancel_event=None,
+    chunk_emitter=None,
 ) -> dict:
     """Phase 4: 交叉审阅 + 仲裁 + 生成最终回答。
+
+    chunk_emitter 会透传给综合阶段：传入时最终回答按块回调输出（供 SSE 转发），
+    不传则一次性返回，与旧行为一致。
 
     Args:
         reflection_result: P3 Reflection 阶段的产出（可选），包含 quality_issues 等
@@ -2448,6 +2507,8 @@ def _phase_synthesis(
             portfolio_context=(state.get_phase_result("info_gather") or {}).get("portfolio", ""),
             tool_calls=tool_calls,
             state=state,
+            cancel_event=cancel_event,
+            chunk_emitter=chunk_emitter,
         )
     except Exception as e:
         logger.error(f"[pipeline] 综合失败，降级拼接: {e}")
@@ -2789,6 +2850,18 @@ def _replace_specialist_analysis(specialists: list, rerun_result: dict) -> list:
     return updated
 
 
+def _synthesis_stream_enabled() -> bool:
+    """综合阶段是否走流式生成。
+
+    默认开启；单元测试通过 conftest 关闭，避免只 mock 了 _call_llm 的用例
+    误打真实流式通道。
+    """
+    try:
+        return get_config_bool('pipeline.synthesis_stream_enabled', True)
+    except Exception:
+        return True
+
+
 def _synthesize_multiple_specialists(
     query: str,
     specialists: list,
@@ -2801,8 +2874,15 @@ def _synthesize_multiple_specialists(
     portfolio_context: str = "",
     tool_calls: list = None,
     state: PipelineState = None,
-) -> tuple:
+    cancel_event=None,
+    chunk_emitter=None,
+):
     """调用 LLM 综合多个专家的分析。
+
+    Args:
+        chunk_emitter: 可选回调，接收 answer_chunk/reasoning_chunk 事件 dict。
+            传入时用流式生成并把增量实时交给调用方；不传则保持原有同步行为。
+            流式失败或输出为空时自动回退非流式续写。
 
     Returns:
         (answer, arbitration_summary, completion_status)
@@ -3070,16 +3150,63 @@ def _synthesize_multiple_specialists(
             state.record_phase_tokens('synthesis', reported)
         return response
 
-    answer, _tokens, completion_status = complete_text_analysis_sync(
-        synthesis_call,
+    # 单一专家路径之外的所有调用都在这里生成最终回答。
+    # 优先流式生成：同样的总耗时，但首字从「全部生成完」提前到 prefill 完成即可见。
+    # 通过 chunk_emitter 回调把增量交给调用方（run_pipeline 用线程桥接转成 SSE），
+    # 不改变本函数的同步签名——多处测试与降级路径都依赖它直接返回三元组。
+    _answer_parts = []
+    _stream_failed = False
+    _use_stream = chunk_emitter is not None and _synthesis_stream_enabled()
+    _stream_kwargs = dict(
         caller="pipeline_synthesizer",
         trace_id=trace_id,
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
         max_tokens=get_config_int('llm.max_tokens_report', 8192),
-        can_continue=lambda: synthesis_remaining() is None or synthesis_remaining() > 0,
     )
+    try:
+        if not _use_stream:
+            raise _StreamDisabled()
+        from services.llm_service import _call_llm_stream
+        for _chunk in _call_llm_stream(**_stream_kwargs):
+            if cancel_event is not None and cancel_event.is_set():
+                raise _PipelineCancelled()
+            if _chunk.get("reasoning") and chunk_emitter is not None:
+                chunk_emitter({"type": "reasoning_chunk", "content": _chunk["reasoning"],
+                               "agent": "pipeline_synthesizer"})
+            if _chunk.get("content"):
+                _answer_parts.append(_chunk["content"])
+                if chunk_emitter is not None:
+                    chunk_emitter({"type": "answer_chunk", "content": _chunk["content"]})
+    except _PipelineCancelled:
+        raise
+    except _StreamDisabled:
+        _stream_failed = True
+    except Exception as _stream_err:
+        _stream_failed = True
+        logger.warning(f"[trace:{trace_id}] [pipeline] 综合流式失败，回退非流式: {_stream_err}")
+
+    answer = "".join(_answer_parts)
+    if _stream_failed or not answer.strip():
+        answer, _tokens, completion_status = complete_text_analysis_sync(
+            synthesis_call,
+            caller="pipeline_synthesizer",
+            trace_id=trace_id,
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=get_config_int('llm.max_tokens_report', 8192),
+            can_continue=lambda: synthesis_remaining() is None or synthesis_remaining() > 0,
+        )
+    else:
+        completion_status = "completed"
+        if state is not None and _stream_kwargs:
+            # 流式 usage 由 _call_llm_stream 记录到 token_usage；阶段预算需要单独记账，
+            # 否则 synthesis 阶段用量对后续预算校验不可见。
+            from services.llm.context_budget import estimate_request_tokens as _est_req
+            state.record_phase_tokens(
+                'synthesis', _est_req(_stream_kwargs['messages']) + max(1, len(answer) // 2))
     if completion_status == "failed":
         raise RuntimeError("综合回答为空")
     if state is not None and state.token_budget:
@@ -4095,6 +4222,11 @@ def _handle_simple_chat(
 
 class _PipelineCancelled(Exception):
     """Pipeline 被取消。"""
+    pass
+
+
+class _StreamDisabled(Exception):
+    """综合阶段未启用流式（配置关闭或未提供 emitter）。"""
     pass
 
 

@@ -77,9 +77,22 @@ def validate_specialist_output(result: dict, *, min_chars=50) -> dict:
         issues.append('tool_evidence_without_analysis')
     if result.get('closure_failed'):
         issues.append('closure_failed')
-    invalid_body = bool(analysis_issues(result.get('analysis', ''),
-                                      completion_status=result.get('completion_status'), min_chars=min_chars))
-    return {'valid': not issues, 'issues': list(dict.fromkeys(issues)),
+    issues = list(dict.fromkeys(issues))
+    # 可容忍项：只影响完整度评级，不否定正文本身。典型是「输出被长度上限截断」——
+    # 专家已写出完整论证，结尾缺一个收尾句不该让整条链路判 failed
+    # （2026-10-21 全链失败的诱因之一）。空正文、兜底文本、原始 tool_call、
+    # 结构未闭合、工具证据冒充分析仍属正文失效，必须保持 failed。
+    tolerable = {
+        'incomplete_completion',
+        'specialist_completion_degraded',
+        'specialist_completion_unverified',
+        'specialist_status_degraded',
+        'unresolved_reflection_gaps',
+        'closure_failed',
+        'unfinished_ending',
+    }
+    invalid_body = any(issue not in tolerable for issue in issues)
+    return {'valid': not issues, 'issues': issues,
             'status': 'success' if not issues else ('failed' if invalid_body else 'degraded')}
 
 
