@@ -85,7 +85,7 @@ async function checkTaskStatus(task) {
     }
 
     // 如果任务完成或失败，触发通知
-    if (data.status === 'completed' || data.status === 'failed') {
+    if (['completed', 'degraded', 'failed', 'timeout'].includes(data.status)) {
       completedTask.value = {
         convId: task.convId,
         messageId: task.messageId,

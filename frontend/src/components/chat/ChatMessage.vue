@@ -6,6 +6,7 @@ import Icon from '../ui/Icon.vue'
 import MarkdownActions from '../ui/MarkdownActions.vue'
 import TraceDetail from '../task/TraceDetail.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
+import { chatDeliveryStatus } from '../../utils/chatDeliveryStatus'
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -18,6 +19,8 @@ const props = defineProps({
   traceDetailData: { type: Object, default: () => ({}) },
   ragFeedbackEnabled: { type: Boolean, default: false },
 })
+
+const delivery = computed(() => chatDeliveryStatus(props.msg))
 
 const emit = defineEmits([
   'feedback',
@@ -407,19 +410,23 @@ const tradeSuggestions = computed(() => {
         </span>
       </div>
       <!-- 执行状态徽章 -->
-      <div v-if="msg.execution_status && (msg.execution_status !== 'completed' || isErrorResponse(msg))" class="execution-status-badge" :class="'status-' + msg.execution_status">
-        <template v-if="['queued', 'streaming', 'resuming'].includes(msg.execution_status)">
+      <div v-if="delivery.execution_status && (delivery.execution_status !== 'completed' || isErrorResponse(msg))" class="execution-status-badge" :class="'status-' + delivery.execution_status">
+        <template v-if="['queued', 'streaming', 'resuming'].includes(delivery.execution_status)">
           <Icon name="hourglass" size="13" class="inline-icon" /> 后台执行中
           <button class="btn-retry btn-ai-action" @click="emit('resume', convId)" title="恢复连接"><Icon name="refresh" size="12" class="inline-icon" /> 恢复连接<span class="ai-agent-tooltip">投资分析助手</span></button>
         </template>
-        <template v-else-if="msg.execution_status === 'failed'"><Icon name="error" size="13" class="inline-icon" /> 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
-        <template v-else-if="msg.execution_status === 'cancelled'">
+        <template v-else-if="delivery.execution_status === 'degraded'">
+          <Icon name="alert-triangle" size="13" class="inline-icon" /> {{ delivery.delivery_message }}
+          <span v-if="delivery.delivery_reasons.length">{{ delivery.delivery_reasons.join('；') }}</span>
+        </template>
+        <template v-else-if="delivery.execution_status === 'failed'"><Icon name="error" size="13" class="inline-icon" /> 执行失败{{ msg.error_message ? ': ' + msg.error_message : '（超时或异常）' }}</template>
+        <template v-else-if="delivery.execution_status === 'cancelled'">
           <Icon name="square" size="13" class="inline-icon" /> 已取消
           <button class="btn-retry btn-ai-action" @click="emit('continue-analysis', msg)" title="继续分析"><Icon name="arrow-right" size="12" class="inline-icon" /> 继续分析<span class="ai-agent-tooltip">投资分析助手</span></button>
         </template>
-        <template v-else-if="msg.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
-        <template v-else-if="msg.execution_status === 'completed' && isErrorResponse(msg)"><Icon name="error" size="13" class="inline-icon" /> 分析失败（未产出有效内容）</template>
-        <button v-if="['failed', 'cancelled', 'timeout'].includes(msg.execution_status) || (msg.execution_status === 'completed' && isErrorResponse(msg))" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
+        <template v-else-if="delivery.execution_status === 'timeout'"><Icon name="alarm-clock" size="13" class="inline-icon" /> 执行超时</template>
+        <template v-else-if="delivery.execution_status === 'completed' && isErrorResponse(msg)"><Icon name="error" size="13" class="inline-icon" /> 分析失败（未产出有效内容）</template>
+        <button v-if="['failed', 'degraded', 'cancelled', 'timeout'].includes(delivery.execution_status) || (delivery.execution_status === 'completed' && isErrorResponse(msg))" class="btn-retry btn-ai-action" @click="emit('regenerate', msg)" title="重新生成"><Icon name="refresh" size="12" class="inline-icon" /> 重新生成<span class="ai-agent-tooltip">投资分析助手</span></button>
       </div>
       <!-- 专家分析展示 -->
       <div v-if="msg.specialist_results && msg.specialist_results.length" class="specialists-container">
@@ -427,7 +434,9 @@ const tradeSuggestions = computed(() => {
           <div class="specialist-header" @click="s.expanded = !s.expanded">
             <span class="specialist-icon">{{ isSpecialistFailed(s) ? '⚠️' : s.icon }}</span>
             <span class="specialist-name editorial-title">{{ s.agent }}</span>
-            <span v-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
+            <span v-if="s.completion_status === 'truncated'" class="specialist-degraded-badge">输出截断</span>
+            <span v-else-if="s.status === 'degraded'" class="specialist-degraded-badge">待复核</span>
+            <span v-else-if="isSpecialistFailed(s)" class="specialist-failed-badge">失败</span>
             <span v-if="s.duration_ms" class="specialist-time font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
             <!-- 专家反馈按钮（失败态隐藏） -->
             <div v-if="!isSpecialistFailed(s)" class="specialist-feedback" @click.stop>
@@ -451,7 +460,7 @@ const tradeSuggestions = computed(() => {
               <button v-if="isSpecialistFailed(s)" class="btn-retry-specialist" @click.stop="emit('regenerate', msg)" title="重新生成">
                 <Icon name="refresh" size="12" class="inline-icon" /> 重新生成
               </button>
-              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && msg.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
+              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && delivery.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
             </div>
           </div>
         </div>
@@ -469,7 +478,7 @@ const tradeSuggestions = computed(() => {
           <div v-if="s.expanded" class="specialist-analysis-wrap">
             <div class="specialist-analysis markdown-body" v-html="renderMarkdown(s.analysis || '（暂无审阅内容）')"></div>
             <div class="specialist-actions">
-              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && msg.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
+              <MarkdownActions v-if="!isSpecialistFailed(s) && s.status !== 'running' && delivery.execution_status !== 'streaming'" :content="s.analysis" :title="s.agent || '专家分析报告'" :created-at="msg.created_at" :record-id="s.run_id" />
             </div>
           </div>
         </div>
@@ -680,7 +689,7 @@ const tradeSuggestions = computed(() => {
         </div>
       </div>
       <MarkdownActions
-        v-if="msg.role === 'assistant' && !['streaming', 'failed', 'cancelled', 'timeout'].includes(msg.execution_status) && !isErrorResponse(msg)"
+        v-if="msg.role === 'assistant' && !['streaming', 'failed', 'cancelled', 'timeout'].includes(delivery.execution_status) && !isErrorResponse(msg)"
         :content="msg.content"
         title="投资分析报告"
         :created-at="msg.created_at"
@@ -689,7 +698,7 @@ const tradeSuggestions = computed(() => {
       <!-- 反馈按钮 -->
       <div v-if="msg.role === 'assistant' && !feedbackGiven[index]" class="message-feedback">
         <button
-          v-if="msg.id && msg.execution_status !== 'streaming'"
+          v-if="msg.id && delivery.execution_status !== 'streaming'"
           class="btn-msg-feedback btn-ai-action"
           @click="emit('save-decision', msg, index)"
         >
@@ -1902,4 +1911,6 @@ const tradeSuggestions = computed(() => {
   color: white;
   transform: translateY(-1px);
 }
+.specialist-degraded-badge { color: var(--color-warning, #a76a10); font-size: 12px; }
+.execution-status-badge.status-degraded { color: var(--color-warning, #a76a10); background: var(--color-warning-bg, #fff7e6); border-color: var(--color-warning-border, #e8c37a); }
 </style>

@@ -544,7 +544,9 @@ def _count_recent_buys(fund_code: str, recent_txs: list, cooldown_days: int) -> 
     cutoff = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
     count = 0
     for tx in recent_txs:
-        if tx.get("fund_code") == fund_code and tx.get("transaction_type") == "buy":
+        if (tx.get("fund_code") == fund_code and tx.get("transaction_type") == "buy"
+                and tx.get("status") in {"confirmed", "settled"}
+                and not tx.get("is_system") and not tx.get("is_hypothetical")):
             tx_date = tx.get("transaction_date", "")
             if tx_date >= cutoff:
                 count += 1
@@ -564,8 +566,10 @@ def _is_data_stale(price_updated: str, stale_days: int) -> bool:
 
 def _get_last_buy_price(user_id: str, fund_code: str, recent_txs: list) -> float | None:
     """从交易记录获取最近买入价。"""
-    for tx in recent_txs:
-        if tx.get("fund_code") == fund_code and tx.get("transaction_type") == "buy" and tx.get("status") == "confirmed":
+    for tx in sorted(recent_txs, key=lambda row: (row.get("transaction_date") or "", row.get("id") or 0), reverse=True):
+        if (tx.get("fund_code") == fund_code and tx.get("transaction_type") == "buy"
+                and tx.get("status") in {"confirmed", "settled"}
+                and not tx.get("is_system") and not tx.get("is_hypothetical")):
             price = tx.get("price")
             if price and price > 0:
                 return price
@@ -578,7 +582,9 @@ def _get_recent_transactions(user_id: str, days: int = 90) -> list[dict]:
     try:
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         rows = conn.execute(
-            "SELECT * FROM portfolio_transactions WHERE user_id=? AND transaction_date >= ? ORDER BY transaction_date DESC",
+            "SELECT * FROM portfolio_transactions WHERE user_id=? AND transaction_date >= ? "
+            "AND COALESCE(is_system,0)=0 AND COALESCE(is_hypothetical,0)=0 "
+            "AND status IN ('confirmed','settled','pending','submitted') ORDER BY transaction_date DESC, id DESC",
             (user_id, cutoff)
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -592,7 +598,8 @@ def _get_pending_decisions(user_id: str) -> dict:
     try:
         # 待确认交易
         pending_tx = conn.execute(
-            "SELECT DISTINCT fund_code FROM portfolio_transactions WHERE user_id=? AND status='pending'",
+            "SELECT DISTINCT fund_code FROM portfolio_transactions WHERE user_id=? AND status IN ('pending','submitted') "
+            "AND COALESCE(is_system,0)=0 AND COALESCE(is_hypothetical,0)=0",
             (user_id,)
         ).fetchall()
         pending_funds = {r["fund_code"] for r in pending_tx if r["fund_code"]}

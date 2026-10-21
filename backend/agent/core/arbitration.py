@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import re
 
 
 def _detect_stance(text: str) -> str:
@@ -55,22 +56,30 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     """基于专家结果做轻量仲裁，输出可解释裁决。
 
     P0 修复（2026-08-02）：优先读专家结构化 verdict 字段，消除从 analysis 文本
-    关键词提取方向的幻觉。verdict 为 unknown/缺失时回退到 _detect_stance。
+    关键词提取方向的幻觉。仅历史缺失 verdict 时回退；显式 unknown 为弃权。
     """
-    from agent.infra.output_quality import analysis_issues
+    from agent.infra.output_quality import validate_specialist_output
     invalid_keys = set()
+    invalid_verdicts = {}
     eligible = []
+    seen_keys = set()
     for result in specialist_results or []:
-        invalid = (bool(result.get("analysis") and analysis_issues(result["analysis"], min_chars=1))
-                   or result.get("status", "success") not in {"success", "completed", "done"}
-                   or result.get("completion_status") in {"failed", "truncated", "degraded"}
-                   or (result.get("output_quality") or {}).get("valid") is False)
-        if invalid and not result.get("is_cross_review"):
-            invalid_keys.add(result.get("agent_key", "unknown"))
-            eligible.append({**result, "analysis": "", "verdict": "unknown", "stance": "unknown",
-                             "confidence": 0.0, "asset_actions": [], "action_signals": []})
-        else:
+        if (result.get("is_cross_review") or result.get("is_arbitration")
+                or result.get("agent_key") in {"arbitrator", "arbitration"}
+                or result.get("run_phase") in {"cross_review", "arbitration"}):
+            continue
+        key = result.get("agent_key", "unknown")
+        # 旧版专家可能只有简短正文；仍必须通过状态、截断和结构验收。
+        analysis = result.get("analysis") or ""
+        min_chars = 1 if re.search(r"买|卖|持有|观望|定投|基金|仓位|风险|估值|回避", analysis) else 50
+        if not validate_specialist_output(result, min_chars=min_chars)["valid"]:
+            invalid_keys.add(key)
+            invalid_verdicts[key] = {"agent": result.get("agent", key), "agent_key": key,
+                                     "verdict": "unknown", "confidence": 0.0, "source": "invalid_output"}
+            continue
+        if key not in seen_keys:
             eligible.append(result)
+            seen_keys.add(key)
     specialist_results = eligible
     stances = []
     reasons = []
@@ -89,11 +98,14 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         analysis = result.get("analysis", "")
         # P0 修复：优先读结构化 verdict 字段
         struct_verdict = result.get("verdict")
-        if struct_verdict and struct_verdict in ("buy", "sell", "hold", "watch", "avoid"):
-            stance = struct_verdict
+        valid_stances = {"buy", "sell", "hold", "watch", "avoid"}
+        if "verdict" in result:
+            # 显式 unknown 是弃权，不允许用正文关键词覆盖。
+            stance = struct_verdict if struct_verdict in valid_stances else "unknown"
             stance_sources.append("structured")
         else:
             stance = result.get("stance") or _detect_stance(analysis)
+            stance = stance if stance in valid_stances else "unknown"
             stance_sources.append("keyword_fallback")
         stances.append(stance)
         agent_keys_list.append(agent_key)
@@ -108,14 +120,16 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         if analysis:
             reasons.append(f"{agent_name}: {analysis[:120]}")
 
+    expert_verdicts.extend(invalid_verdicts.values())
     counts = Counter(s for s in stances if s != "unknown")
+    resolved_stances = dict(zip(agent_keys_list, stances))
     # conv#131 修复：原逻辑"1 个 hold 就压倒一切"违反多数决原则
     # 新逻辑：hold 需过半才生效，否则 buy/sell 的明确意图优先
     total_stanced = sum(counts.values())
     half = total_stanced / 2
     risk_guardrail = any(
         result.get("agent_key") == "risk_assessor"
-        and (result.get("stance") or _detect_stance(result.get("analysis", ""))) == "hold"
+        and resolved_stances.get(result.get("agent_key")) == "hold"
         and any(kw in (result.get("analysis", "") or "") for kw in ("不建议", "控制仓位", "风险偏高", "不要追高"))
         for result in specialist_results or []
     )
@@ -124,26 +138,19 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         arbitration_mode = "conflict"
     elif counts["hold"] > half:
         final_stance = "hold"
-        arbitration_mode = "conflict" if (counts["buy"] or counts["sell"]) else "consensus"
+        arbitration_mode = "consensus" if len(counts) == 1 else "conflict"
     elif counts["sell"] > counts["buy"]:
         final_stance = "sell"
-        arbitration_mode = "consensus" if counts["sell"] > 1 else "conflict"
+        arbitration_mode = "consensus" if len(counts) == 1 else "conflict"
     elif counts["buy"] > 0:
         final_stance = "buy"
-        arbitration_mode = "consensus" if counts["buy"] > 1 else "conflict"
+        arbitration_mode = "consensus" if len(counts) == 1 else "conflict"
+    elif total_stanced:
+        final_stance = counts.most_common(1)[0][0]
+        arbitration_mode = "consensus" if len(counts) == 1 else "conflict"
     else:
         final_stance = "watch"
-        arbitration_mode = "consensus"
-
-    # G-2a（2026-07-23）修复 supporting_agents 计数 bug：
-    # 原逻辑收集所有 stance != "unknown" 的专家，导致"4位一致"文案失真
-    # 修复后：只收集与最终裁决方向一致的专家
-    seen = set()
-    supporting_agents = []
-    for ak, st in zip(agent_keys_list, stances):
-        if st == final_stance and ak not in seen:
-            seen.add(ak)
-            supporting_agents.append(ak)
+        arbitration_mode = "insufficient_evidence"
 
     # G-2b（2026-07-23）sell 裁决强制估值前置：
     # 无估值数据时降级为 hold，避免盲目割肉
@@ -165,6 +172,8 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
             arbitration_mode = "valuation_gap"
             valuation_gap = True
 
+    supporting_agents = [key for key, stance in resolved_stances.items() if stance == final_stance]
+
     shared_evidence = {}
     if plan and getattr(plan, "shared_evidence_keys", None):
         shared_evidence["keys"] = list(plan.shared_evidence_keys)
@@ -182,11 +191,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
     for result in specialist_results or []:
         if result.get("is_cross_review") or result.get("is_arbitration"):
             continue
-        struct_v = result.get("verdict")
-        if struct_v and struct_v in ("buy", "sell", "hold", "watch", "avoid"):
-            stance = struct_v
-        else:
-            stance = result.get("stance") or _detect_stance(result.get("analysis", ""))
+        stance = resolved_stances.get(result.get("agent_key"), "unknown")
         if stance in ("buy", "sell"):
             ak = result.get("agent_key", "unknown")
             if ak not in _seen_disagree_keys:
@@ -206,6 +211,7 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         "sell": "建议卖出/减仓",
         "hold": "建议持有/观望",
         "watch": "建议观望等待",
+        "avoid": "建议回避",
     }
     verdict = _stance_verdict_map.get(final_stance, "建议观望")
 
@@ -311,6 +317,8 @@ def arbitrate_results(query: str, specialist_results: list[dict], blackboard=Non
         "expert_verdicts": expert_verdicts,           # 各专家 verdict 快照（可追溯）
         "stance_source": stance_source,               # stance 来源（structured / keyword_fallback）
         "invalid_specialists": sorted(invalid_keys),
+        "valid_specialist_count": len(specialist_results),
+        "voting_specialist_count": total_stanced,
         "consistency_warning": consistency_warning,    # 一致性告警（空字符串表示一致）
     }
     return summary
@@ -440,42 +448,32 @@ def _detect_data_conflicts(specialist_results: list[dict]) -> list[dict]:
 
 
 def _check_valuation_in_results(specialist_results: list[dict]) -> bool:
-    """G-2b：检查专家结果中是否包含估值数据（query_valuation 调用或 PE/PB/分位 提及）。
+    """估值前置需要完整可用的原始指标；正文关键词和调用名称不构成数据。"""
+    from agent.infra.output_quality import usable_tool_data
+    import math
 
-    Args:
-        specialist_results: 专家结果列表
-
-    Returns:
-        True 表示有估值数据，False 表示缺失
-    """
-    if not specialist_results:
+    def has_metric(value):
+        if isinstance(value, list):
+            return any(has_metric(row) for row in value)
+        if not isinstance(value, dict):
+            return False
+        for key, item in value.items():
+            if re.search(r"^(?:pe|pb|ps|current_value|percentile|pe_percentile|pb_percentile|ps_percentile|估值|分位)$", key, re.I):
+                try:
+                    if not isinstance(item, bool) and math.isfinite(float(item)):
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            if isinstance(item, (dict, list)) and has_metric(item):
+                return True
         return False
 
-    # 估值关键词：PE/PB/分位/估值/percentile
-    valuation_kws = [
-        "pe分位", "pb分位", "估值分位", "百分位", "percentile",
-        "pe(", "pb(", "pe：", "pb：",
-        "估值高位", "估值低位", "估值合理", "估值偏高", "估值偏低",
-        "分位>", "分位<", "分位约",
-    ]
-
-    for result in specialist_results:
-        analysis = result.get("analysis", "") or ""
-        analysis_lower = analysis.lower()
-        # 检测文本中是否提及估值分位
-        if any(kw in analysis_lower for kw in valuation_kws):
-            return True
-        # 检测工具调用记录
-        tool_calls = result.get("tool_calls") or result.get("tools_used") or []
-        for tc in tool_calls:
-            tc_name = ""
-            if isinstance(tc, dict):
-                tc_name = tc.get("name", "") or tc.get("tool", "")
-            elif isinstance(tc, str):
-                tc_name = tc
-            if "valuation" in tc_name.lower() or "估值" in tc_name:
-                return True
-
+    for result in specialist_results or []:
+        for call in result.get("tool_calls") or []:
+            if isinstance(call, dict):
+                data = usable_tool_data(call)
+                if data is not None and has_metric(data):
+                    return True
     return False
 
 
@@ -521,14 +519,18 @@ def _build_arbitration_reasoning(
             parts.append("【分歧】未检测到方向性冲突")
     else:
         # 无方向性冲突时，根据 arbitration_mode 区分描述，避免与段3矛盾
-        if arbitration_mode == "consensus":
+        if arbitration_mode == "insufficient_evidence":
+            parts.append("【分歧】证据不足，没有有效专家方向票，无法判断共识或分歧")
+        elif arbitration_mode == "consensus":
             parts.append("【分歧】专家立场一致，未检测到方向性冲突")
         else:
             # conflict 模式但无 buy_vs_sell 冲突：部分专家持中性立场
             parts.append("【分歧】未检测到方向性冲突（部分专家持中性立场）")
 
     # 段3：解决逻辑
-    if arbitration_mode == "valuation_gap":
+    if arbitration_mode == "insufficient_evidence":
+        parts.append("【解决】保留观望作为保守兜底；补齐有效专家分析和证据后再形成裁决")
+    elif arbitration_mode == "valuation_gap":
         # G-2b：估值缺口降级
         parts.append("【解决】检测到卖出信号但专家未查询估值分位，按止盈不止损原则降级为持有/观望，建议补充估值数据后再决策")
     elif arbitration_mode == "consensus":

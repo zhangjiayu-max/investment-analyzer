@@ -235,6 +235,7 @@ def run_pipeline(
         # ── Phase 0: 预处理 ──────────────────
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.PREPROCESS.value}
         phase0_result = _phase_preprocess(state, query, history, user_id, trace_id)
+        _reconcile_trace_usage(state)
         state.set_phase_result(PipelinePhase.PREPROCESS.value, phase0_result)
         state.refined_query = phase0_result.get("refined_query", query)
         complexity = phase0_result.get("complexity", "medium")
@@ -289,9 +290,12 @@ def run_pipeline(
         state.transition_to(PipelinePhase.PLANNING)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.PLANNING.value}
         phase2_result = _phase_planning(state, query_info, phase1_result, trace_id)
+        _reconcile_trace_usage(state)
         state.set_phase_result(PipelinePhase.PLANNING.value, phase2_result)
         complexity = _effective_complexity(complexity, phase2_result, phase2_result.get("specialists", []))
         state.set_phase_result("effective_complexity", {"value": complexity, "source": "preprocess+plan+expert_count"})
+        _sync_complexity_budget(state, complexity)
+        phase2_result['complexity'] = complexity
         yield {"type": EVENT_PLAN_GENERATED, "plan": phase2_result}
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.PLANNING.value}
 
@@ -314,6 +318,7 @@ def run_pipeline(
         if phase3_result is None:
             phase3_result = {"specialists": [], "tool_calls": []}
         state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+        _reconcile_trace_usage(state)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
                "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
 
@@ -348,6 +353,7 @@ def run_pipeline(
                     )
                     phase3_result["tool_calls"] = [tc for sr in phase3_result["specialists"] for tc in sr.get("tool_calls", [])]
                     state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+                    _reconcile_trace_usage(state)
                     # 修复 conv 192：重跑事件必须补全 agent_key/icon/analysis 等字段，
                     # 否则 conversations.py:1879 的 event["agent_key"] 直接索引会抛 KeyError
                     yield {"type": EVENT_SPECIALIST_DONE,
@@ -467,7 +473,8 @@ def run_pipeline(
             from infra.execution_budget import SPECIALIST_EXECUTOR
             from agent.core.multi_agent import run_cross_review_opinion as _run_cr_op
 
-            review_output_limit = _review_tokens_remaining(state) // max(1, len(_original_specialists))
+            review_cost_limit = _review_tokens_remaining(state) // max(1, len(_original_specialists))
+            review_output_limit = min(review_cost_limit, state.token_budget.get("review_output", review_cost_limit))
 
             def _review_single_pipeline(sr):
                 peer = {k: v for k, v in _peer_analyses.items()
@@ -477,6 +484,7 @@ def run_pipeline(
                         sr.get("agent_key", ""), state.refined_query,
                         sr.get("analysis", ""), peer,
                         max_output_tokens=max(1, review_output_limit),
+                        token_budget=review_cost_limit,
                         trace_id=trace_id,
                         conversation_id=state.conversation_id,
                         message_id=state.message_id,
@@ -585,6 +593,7 @@ def run_pipeline(
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
+        _reconcile_trace_usage(state)
         state.answer = phase4_result.get("answer", "")
 
         # 二次防护：综合结果为空或为占位文本 → 降级
@@ -608,6 +617,8 @@ def run_pipeline(
                "quality_status": phase4_result.get("quality_status", "degraded"),
                "quality_issues": phase4_result.get("quality_issues", []),
                "phase_timings": _phase_timings_ms(state),
+               "budget_usage": {"cost_budget": dict(state.token_budget), "tokens_used": state.tokens_used,
+                                "by_phase": dict(state.tokens_used_by_phase)},
                "arbitration": phase4_result.get("arbitration"),
                "cross_review_results": phase4_result.get("cross_review_results", []),
                "completion_status": phase4_result.get("completion_status", "completed"),
@@ -714,7 +725,13 @@ def run_pipeline_from_checkpoint(
         state.transition_to(PipelinePhase.PLANNING)
         yield {"type": EVENT_PHASE_START, "phase": PipelinePhase.PLANNING.value}
         phase2_result = _phase_planning(state, query_info, phase1_result, trace_id)
+        _reconcile_trace_usage(state)
         state.set_phase_result(PipelinePhase.PLANNING.value, phase2_result)
+        initial_complexity = (state.get_phase_result('effective_complexity') or {}).get('value', query_info.get('complexity', 'medium'))
+        complexity = _effective_complexity(initial_complexity, phase2_result, phase2_result.get('specialists', []))
+        _sync_complexity_budget(state, complexity)
+        state.set_phase_result('effective_complexity', {'value': complexity, 'source': 'clarification+plan+expert_count'})
+        phase2_result['complexity'] = complexity
         yield {"type": EVENT_PLAN_GENERATED, "plan": phase2_result}
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.PLANNING.value}
 
@@ -736,6 +753,7 @@ def run_pipeline_from_checkpoint(
         if phase3_result is None:
             phase3_result = {"specialists": [], "tool_calls": []}
         state.set_phase_result(PipelinePhase.EXECUTION.value, phase3_result)
+        _reconcile_trace_usage(state)
         yield {"type": EVENT_PHASE_END, "phase": PipelinePhase.EXECUTION.value,
                "result": {"specialist_count": len(phase3_result.get("specialists", []))}}
 
@@ -830,6 +848,7 @@ def run_pipeline_from_checkpoint(
         if cancel_event and cancel_event.is_set():
             raise _PipelineCancelled()
         state.set_phase_result(PipelinePhase.SYNTHESIS.value, phase4_result)
+        _reconcile_trace_usage(state)
         state.answer = phase4_result.get("answer", "")
 
         if not state.answer or state.answer == "无法生成分析":
@@ -848,6 +867,8 @@ def run_pipeline_from_checkpoint(
                "quality_status": phase4_result.get("quality_status", "degraded"),
                "quality_issues": phase4_result.get("quality_issues", []),
                "phase_timings": _phase_timings_ms(state),
+               "budget_usage": {"cost_budget": dict(state.token_budget), "tokens_used": state.tokens_used,
+                                "by_phase": dict(state.tokens_used_by_phase)},
                "arbitration": phase4_result.get("arbitration"),
                "cross_review_results": phase4_result.get("cross_review_results", []),
                "completion_status": phase4_result.get("completion_status", "completed"),
@@ -1691,11 +1712,47 @@ def _phase_futures(tasks, executor, timeout, cancel_event):
             future.cancel()
 
 
+def _sync_complexity_budget(state, complexity):
+    """规划升级复杂度后同步额度，真实 usage 始终保留。"""
+    state.token_budget = get_token_budget_for_complexity(complexity)
+
+
+def _reconcile_trace_usage(state):
+    """阶段结束后补记同 trace 的辅助调用；不得在专家并行记账中途调用。"""
+    if not state.trace_id:
+        return
+    try:
+        from db._conn import _get_conn
+        conn = _get_conn()
+        try:
+            reported = conn.execute('SELECT COALESCE(SUM(total_tokens),0) FROM token_usage WHERE trace_id=?',
+                                    (state.trace_id,)).fetchone()[0]
+        finally:
+            conn.close()
+        # 已有估算可能偏保守，不用更低的 trace 报告值回退预算计数。
+        if reported > state.tokens_used:
+            state.record_phase_tokens('auxiliary', reported - state.tokens_used)
+    except Exception as exc:
+        logger.debug('trace 辅助用量补记跳过: %s', exc)
+
+
+def _specialist_cost_limit(state, count=1):
+    budget = state.token_budget
+    if not budget or 'specialist_output' not in budget:
+        return None
+    remaining = max(0, budget['execution'] - state.tokens_used_by_phase.get('execution', 0))
+    remaining = min(remaining, max(0, budget['max_total'] - budget['review'] - budget['synthesis'] - state.tokens_used))
+    return remaining // max(1, count)
+
+
 def _specialist_output_limit(state, count=1):
     """分摊输出额度；真实输入 usage 另行入账，避免严格输入预检拒绝所有首轮。"""
     if not state.token_budget:
         return get_config_int('llm.max_tokens_agent', 8000)
     budget = state.token_budget
+    if 'specialist_output' in budget:
+        cost = _specialist_cost_limit(state, count)
+        return min(budget['specialist_output'], cost) if cost else 0
     remaining = max(0, budget.get('execution', 4000) - state.tokens_used_by_phase.get('execution', 0))
     if budget.get('max_total'):
         reserved = budget.get('review', 1500) + budget.get('synthesis', 0)
@@ -1717,6 +1774,9 @@ def _run_pipeline_specialist(func, cancel_event, budget_state=None, **kwargs):
         if output_limit <= 0:
             return _exhausted_specialist(kwargs.get('agent_key', ''))
         kwargs['max_output_tokens'] = output_limit
+        cost_limit = _specialist_cost_limit(budget_state)
+        if cost_limit is not None:
+            kwargs['token_budget'] = cost_limit
     for _, future in _phase_futures({0: lambda: func(**kwargs)}, SPECIALIST_EXECUTOR,
                                     get_config_int('agent.specialist_timeout', 600), cancel_event):
         return future.result()
@@ -1825,6 +1885,7 @@ def _execute_steps_parallel(
     connection_error = None
 
     output_limit = _specialist_output_limit(state, len(step_ctxs))
+    cost_limit = _specialist_cost_limit(state, len(step_ctxs))
 
     def _run_one(step, ctx, agent_key):
         if output_limit <= 0:
@@ -1833,6 +1894,7 @@ def _execute_steps_parallel(
         return run_specialist(
             agent_key=agent_key,
             max_output_tokens=output_limit,
+            **({'token_budget': cost_limit} if cost_limit is not None else {}),
             query=step_query,
             prebuilt_context=ctx,
             trace_id=trace_id,
@@ -2189,9 +2251,11 @@ def _call_review_model(state, phase, call, **kwargs):
     已完成请求仍必须入账；超出审查或综合保留额度时返回未完成状态。
     """
     remaining = _review_tokens_remaining(state)
-    if remaining <= 0:
+    from services.llm.context_budget import estimate_request_tokens
+    available_output = remaining - estimate_request_tokens(kwargs.get('messages', []), kwargs.get('tools'))
+    if available_output <= 0:
         raise _ReviewBudgetExhausted('模型审查预算已耗尽，确定性事实检查仍会运行')
-    kwargs['max_tokens'] = min(int(kwargs.get('max_tokens') or remaining), remaining)
+    kwargs['max_tokens'] = min(int(kwargs.get('max_tokens') or available_output), available_output, state.token_budget.get('review_output', remaining))
     response = call(**kwargs)
     usage = getattr(response, 'usage', None)
     def field(key):
@@ -2229,29 +2293,33 @@ def _followup_budget_exhausted(state: PipelineState, *, for_review=False) -> boo
 
 
 def _validate_final_facts(state, answer, completion_status, confidence, tool_calls, actions=None):
-    from services.conversation.factual_checks import check_final_facts
+    from services.conversation.factual_checks import check_final_fact_status
     from services.conversation.quality_contract import calibrate_confidence_text, action_constraint_issues
     snapshot = (state.get_phase_result("info_gather") or {}).get("portfolio_snapshot")
-    issues = check_final_facts(answer, snapshot, tool_calls) + action_constraint_issues(actions, tool_calls)
-    from agent.core.answer_policy import has_explicit_action_intent
-    if not has_explicit_action_intent(state.original_query or state.refined_query):
-        import re
-        actionable = any(isinstance(a, dict) and str(a.get("type") or a.get("action") or "").upper()
-                         in {"BUY", "ADD", "SELL", "REDUCE", "REDUCE_CONCENTRATION"} for a in actions or [])
-        trade_plan = any(re.search(r"建议|每月|每期|分批|立即|执行", s)
-                         and re.search(r"买入|卖出|加仓|减仓|补仓|定投", s)
-                         and re.search(r"\d+(?:\.\d+)?\s*(?:元|万元|%)", s)
-                         and not re.search(r"不建议|不要|不能|不应|未建议|历史|旧报告|假如|如果", s)
-                         for s in re.split(r"[。；\n]", answer or ""))
-        if actionable or trade_plan:
-            issues.append("unrequested_trade_plan")
+    facts = check_final_fact_status(answer, snapshot, tool_calls,
+        original_query=state.original_query or state.refined_query, actions=actions)
+    issues = facts["issues"] + facts["unverified"] + action_constraint_issues(actions, tool_calls)
+    state.set_phase_result("factual_validation", facts)
+    from agent.infra.output_quality import validate_specialist_output
+    for specialist in (state.get_phase_result("execution") or {}).get("specialists", []):
+        if specialist.get("is_cross_review") or specialist.get("is_arbitration"):
+            continue
+        if not validate_specialist_output(specialist)["valid"]:
+            issues.append("specialist_truncated" if specialist.get("completion_status") == "truncated" else "specialist_invalid")
+    reflection_status = (state.get_phase_result("reflection") or {}).get("status")
+    if reflection_status in {"failed", "budget_exhausted", "degraded"}:
+        issues.append("reflection_" + reflection_status)
     review_status = (state.get_phase_result("cross_review_status") or {}).get("status")
     if review_status in {"failed", "budget_exhausted", "degraded"}:
         issues.append("cross_review_" + review_status)
-    for phase in ("execution_status", "debate"):
+    for phase in ("execution_status", "debate", "synthesis_status"):
         status = (state.get_phase_result(phase) or {}).get("status")
         if status in {"failed", "timeout", "budget_exhausted"}:
             issues.append(phase + "_" + status)
+    issues = list(dict.fromkeys(issues))
+    from services.conversation.delivery_status import has_delivery_content
+    if not has_delivery_content(answer):
+        return answer, "failed", 0.0, issues
     if issues:
         completion_status = "degraded"
         confidence = min(confidence, .45)
@@ -2265,7 +2333,19 @@ def _validate_final_facts(state, answer, completion_status, confidence, tool_cal
                   "market_quote_falsely_missing": "报告称点位缺失，但原始工具已有带时间的点位",
                   "unrequested_trade_plan": "用户未请求交易方案，报告却给出了操作金额",
                   "conflicting_asset_actions": "同一标的存在未消解的买卖方向冲突",
-                  "asset_action_limit_violation": "操作金额超出用户配置上限、可用现金或持有金额"}
+                  "asset_action_limit_violation": "操作金额超出用户配置上限、可用现金或持有金额",
+                  "specialist_truncated": "专家分析输出被截断",
+                  "specialist_invalid": "专家分析未通过完整性校验",
+                  "reflection_budget_exhausted": "反思审查因预算不足未完成",
+                  "cross_review_budget_exhausted": "交叉审查因预算不足未完成",
+                  "reflection_failed": "反思审查失败",
+                  "cross_review_failed": "交叉审查失败",
+                  "market_causation_unverified": "市场归因缺乏当期证据核验",
+                  "equity_target_direction_error": "权益目标调整方向有误",
+                  "stale_quote_as_current": "旧行情被写为当期行情",
+                  "nonreal_trade_as_executed": "假设或未成交交易被写为真实成交",
+                  "trade_execution_unverified": "所述交易执行缺少对应完整记录"}
+        labels['synthesis_status_budget_exhausted'] = '综合阶段成本超出额度'
         answer += "\n\n质量校验未通过，以上分析仅供复核，暂不生成操作候选。待复核：" + "、".join(labels.get(i, "追加审查未完成") for i in issues)
         answer = calibrate_confidence_text(answer, confidence)
     return answer, completion_status, confidence, issues
@@ -2281,6 +2361,9 @@ def _validate_synthesis(answer, completion_status, specialists, reflection_resul
     """结构验收与统一置信度；失败专家或失败审查不得进入可执行链。"""
     from agent.infra.output_quality import is_valid_analysis, validate_specialist_output
     from services.conversation.quality_contract import calibrate_confidence_text
+    from services.conversation.delivery_status import has_delivery_content
+    if not has_delivery_content(answer):
+        return answer, "failed", "degraded", 0.0
     invalid = not specialists or any(not validate_specialist_output(s)["valid"] for s in specialists)
     review_failed = bool(reflection_result and reflection_result.get("status") not in {"completed", "success"})
     if not is_valid_analysis(answer, completion_status=completion_status):
@@ -2730,13 +2813,14 @@ def _synthesize_multiple_specialists(
 
     # 构建综合 prompt
     from agent.core.answer_policy import build_answer_policy, has_explicit_action_intent
+    from services.llm.context_budget import preview_context_text
     action_requested = has_explicit_action_intent(query)
     parts = [f"## 用户问题\n{query}\n"]
     parts.append("## 各专家分析")
 
     for i, s in enumerate(specialists, 1):
         agent_name = s.get("agent", f"专家{i}")
-        analysis = s.get("analysis", "")
+        analysis = preview_context_text(s.get("analysis", ""), 8000)
         parts.append(f"\n### {agent_name}\n{analysis}")
 
     from services.conversation.quality_contract import compact_tool_evidence
@@ -2748,8 +2832,8 @@ def _synthesize_multiple_specialists(
         key_data = blackboard.get_key_data()
         if key_data:
             parts.append("\n## 关键数据汇总")
-            for k, v in list(key_data.items())[:10]:
-                parts.append(f"- {k}: {v}")
+            from services.llm.context_budget import summarize_evidence
+            parts.append(json.dumps(summarize_evidence(key_data, 6000), ensure_ascii=False))
 
     # 冲突提示
     conflicts = blackboard.find_conflicts() if blackboard else []
@@ -2791,7 +2875,7 @@ def _synthesize_multiple_specialists(
     # P1替代: 注入持仓约束提醒（零 LLM 成本，复用 Phase 1 预取的持仓）
     # 单专家场景已在 Phase 3 通过 build_specialist_context 注入完整持仓，此处仅多专家综合时提醒
     if portfolio_context:
-        parts.append(f"\n## 本轮持仓快照及确定性计算\n{portfolio_context}\n")
+        parts.append(f"\n## 本轮持仓快照及确定性计算\n{preview_context_text(portfolio_context, 12000)}\n")
 
     # P0-A: 风险否决约束（强制降级被否决的动作）
     vetoes = blackboard.get_vetoes() if blackboard else []
@@ -2872,7 +2956,7 @@ def _synthesize_multiple_specialists(
     # P0 修复 conv#192：注入工具结果汇总（与 ReAct 路径 _build_final_synthesis_prompt 对齐）
     # Pipeline 路径原本不读取 tool_broadcasts，导致估值等工具结果只通过专家 analysis 间接传递
     # 综合LLM 看不到完整的工具结果，容易遗漏关键估值数据（如恒生科技/医药50估值查到但未引用）
-    if blackboard and hasattr(blackboard, "get_tool_broadcasts"):
+    if not raw_tools and blackboard and hasattr(blackboard, "get_tool_broadcasts"):
         try:
             tool_broadcasts = blackboard.get_tool_broadcasts()
             if tool_broadcasts:
@@ -2956,20 +3040,55 @@ def _synthesize_multiple_specialists(
         parts.append(build_answer_policy(query))
     prompt = "\n".join(parts)
 
-    from services.llm.text_completion import complete_text_analysis_sync
+    from services.llm.text_completion import complete_text_analysis_sync, CompletionBudgetExhausted
+    from services.llm.context_budget import estimate_request_tokens
+    def synthesis_remaining():
+        if state is None or not state.token_budget:
+            return None
+        budget = state.token_budget
+        remaining = max(0, budget.get('synthesis', 50000) - state.tokens_used_by_phase.get('synthesis', 0))
+        if budget.get('max_total'):
+            remaining = min(remaining, max(0, budget['max_total'] - state.tokens_used))
+        return remaining
+
+    def synthesis_call(**kwargs):
+        remaining = synthesis_remaining()
+        if remaining == 0:
+            raise CompletionBudgetExhausted('综合阶段预算不足，未启动额外模型调用')
+        if remaining is not None:
+            available_output = remaining - estimate_request_tokens(kwargs.get('messages', []), kwargs.get('tools'))
+            if available_output <= 0:
+                raise CompletionBudgetExhausted('综合预算不足以容纳下一轮输入和输出')
+            kwargs['max_tokens'] = min(kwargs['max_tokens'], available_output)
+        response = _call_llm(**kwargs)
+        usage = getattr(response, 'usage', None)
+        reported = usage.get('total_tokens') if isinstance(usage, dict) else getattr(usage, 'total_tokens', None)
+        if not isinstance(reported, int) or reported <= 0:
+            visible = ''.join(str(getattr(c.message, k, '') or '') for c in response.choices for k in ('content', 'reasoning_content'))
+            reported = max(1, (len(json.dumps(kwargs['messages'], ensure_ascii=False)) + len(visible)) // 2)
+        if state is not None:
+            state.record_phase_tokens('synthesis', reported)
+        return response
+
     answer, _tokens, completion_status = complete_text_analysis_sync(
-        _call_llm,
+        synthesis_call,
         caller="pipeline_synthesizer",
         trace_id=trace_id,
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_tokens=3000,
+        max_tokens=get_config_int('llm.max_tokens_report', 8192),
+        can_continue=lambda: synthesis_remaining() is None or synthesis_remaining() > 0,
     )
-    if state is not None:
-        state.record_phase_tokens("synthesis", _tokens)
     if completion_status == "failed":
         raise RuntimeError("综合回答为空")
+    if state is not None and state.token_budget:
+        budget = state.token_budget
+        if (state.tokens_used_by_phase.get('synthesis', 0) > budget.get('synthesis', 50000)
+                or (budget.get('max_total') and state.tokens_used > budget['max_total'])):
+            state.set_phase_result('synthesis_status', {'status': 'budget_exhausted'})
+            if completion_status == 'completed':
+                completion_status = 'degraded'
 
     # P2-问题6修复：风险否决代码层硬兜底
     # prompt 级降级依赖 LLM 遵守，此处做事后校验：

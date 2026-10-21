@@ -12,8 +12,39 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Optional
 from db.config import get_config_int, get_config_float
+from agent.infra.output_quality import usable_tool_data as _tool_data
 
 logger = logging.getLogger(__name__)
+
+
+def _original_specialists(metadata: dict, *, valid_only=True) -> list[dict]:
+    """只统计原始专家；仲裁、交叉审阅和同一专家的重复副本不增加覆盖。"""
+    from agent.infra.output_quality import validate_specialist_output
+    results = {}
+    for result in metadata.get("specialist_results") or []:
+        if (not isinstance(result, dict) or result.get("is_cross_review") or result.get("is_arbitration")
+                or result.get("agent_key") in {"arbitrator", "arbitration"}
+                or result.get("run_phase") in {"cross_review", "arbitration"}):
+            continue
+        if valid_only and not validate_specialist_output(result)["valid"]:
+            continue
+        key = result.get("agent_key") or result.get("agent") or json.dumps(result, sort_keys=True, default=str)
+        results.setdefault(key, result)
+    return list(results.values())
+
+
+
+
+def _delivery_metrics(message: dict, metadata: dict) -> dict:
+    """交付完整度与事实正确性分开记录。"""
+    originals = _original_specialists(metadata, valid_only=False)
+    valid = _original_specialists(metadata)
+    recovery = metadata.get("recovery_type")
+    has_synthesis = recovery not in {"experts_only", "specialist_merge", "no_expert"}
+    if re.search(r"仅(?:恢复|保留|有)?专家(?:分析|结果)|综合报告未(?:生成|完成)", message.get("content", "") or ""):
+        has_synthesis = False
+    return {"original_specialists": len(originals), "valid_specialists": len(valid),
+            "invalid_specialists": max(0, len(originals) - len(valid)), "has_final_synthesis": has_synthesis}
 
 
 @dataclass
@@ -141,7 +172,7 @@ class ConversationQualityEvaluator:
             dimensions=[asdict(d) for d in dimensions],
             metadata={
                 "complexity": metadata.get("complexity", "unknown"),
-                "specialist_count": len(metadata.get("specialist_results", [])),
+                "specialist_count": len(_original_specialists(metadata)),
                 "duration_ms": metadata.get("duration_ms"),
                 "duration_source": metadata.get("duration_source", "unknown"),
                 "verification_status": accuracy_status,
@@ -149,8 +180,8 @@ class ConversationQualityEvaluator:
                 "execution_status": metadata.get("execution_status", "unknown"),
                 "completion_status": metadata.get("completion_status", "unknown"),
                 # 兼容两种字段：orchestrator 写入 cross_review(bool)，路由层落库为 cross_review_results(list)
-                "has_cross_review": bool(metadata.get("cross_review")) or bool(metadata.get("cross_review_results")),
-                "has_arbitration": bool(metadata.get("arbitration")),
+                "has_cross_review": collaboration_dim.metrics.get("has_cross_review", False),
+                "has_arbitration": collaboration_dim.metrics.get("has_arbitration", False),
             },
             suggestions=suggestions,
         )
@@ -191,6 +222,7 @@ class ConversationQualityEvaluator:
         from db.agents import deserialize_agent_run_payload
 
         metadata = dict(metadata)
+        metadata.setdefault("evaluated_at", message.get("created_at"))
         specialists = list(metadata.get("specialist_results") or [])
         calls = list(metadata.get("tool_calls") or [])
         for run in runs:
@@ -198,6 +230,7 @@ class ConversationQualityEvaluator:
             calls.extend(tools)
             if not metadata.get("specialist_results") and run.get("run_phase", "primary") == "primary":
                 specialists.append({"agent_key": run.get("agent_key"), "analysis": run.get("result", ""),
+                                    **evidence, "status": run.get("status", "success"),
                                     "evidence": evidence, "tool_calls": tools})
         # 同源副本只保留一次，避免重复事实/工具成功率被抬高。
         metadata["tool_calls"] = list({json.dumps(c, sort_keys=True, ensure_ascii=False, default=str): c
@@ -332,7 +365,7 @@ class ConversationQualityEvaluator:
         details = []
         score = 0.0
 
-        specialist_results = metadata.get("specialist_results", [])
+        specialist_results = _original_specialists(metadata)
         tool_calls = metadata.get("tool_calls", [])
 
         # 1. RAG 命中率
@@ -350,23 +383,10 @@ class ConversationQualityEvaluator:
         metrics["rag_rate"] = rag_rate
         details.append(f"RAG命中: {rag_hits}/{total_specialists} ({rag_rate:.0%})")
 
-        # 2. 工具调用成功率（检查 error 字段 + result 中的 error 关键词）
-        def _is_tool_failed(tc):
-            if tc.get("error"):
-                return True
-            result = str(tc.get("result", ""))
-            if result:
-                try:
-                    parsed = json.loads(result) if isinstance(result, str) else result
-                    if isinstance(parsed, dict) and parsed.get("error"):
-                        return True
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            return False
-
-        successful_tools = sum(1 for tc in tool_calls if not _is_tool_failed(tc))
+        # 2. 完整且可用的数据才计为工具成功。
+        successful_tools = sum(1 for tc in tool_calls if isinstance(tc, dict) and _tool_data(tc) is not None)
         total_tools = len(tool_calls)
-        tool_success_rate = successful_tools / total_tools if total_tools > 0 else 1.0
+        tool_success_rate = successful_tools / total_tools if total_tools > 0 else 0.0
         metrics["tool_success_rate"] = tool_success_rate
         metrics["successful_tools"] = successful_tools
         metrics["total_tools"] = total_tools
@@ -393,6 +413,9 @@ class ConversationQualityEvaluator:
             if any(kw in analysis for kw in ["估值", "PE", "PB", "百分位", "分位"]):
                 has_valuation = True
                 break
+        has_valuation = has_valuation and (any(
+            _tool_data(call) is not None and re.search(r"valuation|估值|index", call.get("name", call.get("tool", "")), re.I)
+            for call in tool_calls if isinstance(call, dict)) or any(sr.get("data_refs") for sr in specialist_results))
         metrics["has_valuation_data"] = has_valuation
         if has_valuation:
             details.append("✓ 引用了估值数据")
@@ -451,7 +474,7 @@ class ConversationQualityEvaluator:
         details = []
         score = 0.0
 
-        specialist_results = metadata.get("specialist_results", [])
+        specialist_results = _original_specialists(metadata)
         complexity = metadata.get("complexity", "medium")
 
         # 1. 专家覆盖度
@@ -461,7 +484,7 @@ class ConversationQualityEvaluator:
             "complex": 2,
         }
         expected = expected_specialists.get(complexity, 1)
-        actual = len([s for s in specialist_results if not s.get("is_cross_review")])
+        actual = len(specialist_results)
         coverage = min(1.0, actual / expected) if expected > 0 else 1.0
         metrics["specialist_coverage"] = coverage
         metrics["expected_specialists"] = expected
@@ -470,7 +493,11 @@ class ConversationQualityEvaluator:
 
         # 2. 交叉审阅
         # 兼容两种字段：orchestrator 写入 cross_review(bool)，路由层落库为 cross_review_results(list)
-        has_cross_review = bool(metadata.get("cross_review")) or bool(metadata.get("cross_review_results"))
+        reviews = metadata.get("cross_review_results") or []
+        has_cross_review = bool(actual and any(
+            isinstance(review, dict) and review.get("status") in {"success", "completed", "done", "validated"}
+            and review.get("completion_status") not in {"truncated", "failed", "degraded"}
+            for review in reviews))
         metrics["has_cross_review"] = has_cross_review
         if has_cross_review:
             details.append("✓ 触发了交叉审阅")
@@ -479,7 +506,11 @@ class ConversationQualityEvaluator:
             details.append("⚠ complex任务未触发交叉审阅")
 
         # 3. 仲裁
-        has_arbitration = metadata.get("arbitration", False)
+        arbitration = metadata.get("arbitration") or {}
+        valid_keys = {sr.get("agent_key") for sr in specialist_results}
+        has_arbitration = bool(isinstance(arbitration, dict) and actual
+                               and arbitration.get("arbitration_mode") not in {None, "insufficient_evidence"}
+                               and set(arbitration.get("supporting_agents") or []) & valid_keys)
         metrics["has_arbitration"] = has_arbitration
         if has_arbitration:
             details.append("✓ 触发了仲裁")
@@ -611,6 +642,18 @@ class ConversationQualityEvaluator:
             (100 if has_confidence else 60) * 0.10
         )
 
+        delivery = _delivery_metrics(message, metadata)
+        metrics.update(delivery)
+        if delivery["invalid_specialists"]:
+            score = min(score, 70 * delivery["valid_specialists"] / max(1, delivery["original_specialists"]) + 30)
+            details.append("专家分析存在截断或无效输出，响应质量按有效完成率降级。")
+        coverage = self._evaluate_completeness(message, metadata).metrics.get("coverage_rate", 0)
+        metrics["question_coverage"] = coverage
+        score = min(score, 40 + 60 * coverage)
+        if not delivery["has_final_synthesis"]:
+            score = min(score, 50)
+            details.append("仅交付专家恢复内容，缺少最终综合报告。")
+
         return EvalDimension(
             name="response",
             score=min(100, score),
@@ -695,11 +738,11 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        from services.conversation.factual_checks import check_final_facts
+        from services.conversation.factual_checks import check_final_fact_status
         from services.conversation.quality_contract import action_constraint_issues, selected_asset_actions
 
         content = message.get("content", "") or ""
-        specialists = metadata.get("specialist_results") or []
+        specialists = _original_specialists(metadata)
         calls = [c for c in metadata.get("tool_calls", []) if isinstance(c, dict)]
         complete_calls = [c for c in calls if not c.get("result_truncated")]
         points = [number for sr in specialists for number in re.findall(r"\d+(?:\.\d+)?%", sr.get("analysis", "") or "")]
@@ -710,12 +753,24 @@ class ConversationQualityEvaluator:
         # 相同字符串既不能识别标的/单位/窗口，也不能证明来源独立；一律不奖励。
         details.append("重复引用不构成交叉核验，规则检查不能证明全部事实正确。")
         snapshot = metadata.get("portfolio_snapshot") or metadata.get("snapshot") or {}
-        issues = check_final_facts(content, snapshot, complete_calls)
         actions = selected_asset_actions(metadata.get("arbitration"), specialists)
+        fact_status = check_final_fact_status(content, snapshot, complete_calls, original_query=metadata.get("original_query"), actions=actions)
+        issues = list(fact_status["issues"])
+        unverified = list(fact_status["unverified"])
         issues.extend(action_constraint_issues(actions, complete_calls))
         reported = metadata.get("quality_issues") or []
+        # 质量门禁含执行/审查缺口，并不都是事实反证。
+        review_issues = []
         if isinstance(reported, list):
-            issues.extend(str(issue) for issue in reported)
+            for issue in reported:
+                issue = str(issue)
+                if re.search(r"budget_exhausted|review|reflection|specialist|truncated|incomplete|unverified|synthesis", issue):
+                    review_issues.append(issue)
+                else:
+                    unverified.append(issue)
+        for review in metadata.get("cross_review_results") or []:
+            if isinstance(review, dict) and review.get("status") not in {"success", "completed", "done", "validated"}:
+                review_issues.append("cross_review_" + str(review.get("status", "unverified")))
         validation = metadata.get("factual_validation") or {}
         validation = validation if isinstance(validation, dict) else {}
         checks = validation.get("checks") or {}
@@ -731,8 +786,19 @@ class ConversationQualityEvaluator:
         for key in required:
             if gates[key] == "not_applicable":
                 gates[key] = "unverified"
-        if validation.get("status") == "failed":
+        validation_issues = validation.get("issues") or []
+        review_only_failure = bool(validation_issues and all(
+            re.search(r"budget_exhausted|review|reflection|truncated|incomplete|unverified", str(issue))
+            for issue in validation_issues))
+        if validation.get("status") == "failed" and not review_only_failure:
             issues.append("factual_validation_failed")
+        if review_only_failure:
+            review_issues.extend(str(issue) for issue in validation_issues)
+        for key in ("cross_review_status", "reflection"):
+            review = metadata.get(key) or {}
+            review_status = review.get("status") if isinstance(review, dict) else review
+            if review_status in {"budget_exhausted", "failed", "timeout", "skipped", "incomplete"}:
+                review_issues.append(key + "_" + review_status)
         query = metadata.get("original_query", "") or ""
         is_attribution = bool(re.search(r"为什么|为何|原因|做空|归因", query))
         if not is_attribution and gates["causal_evidence"] == "unverified":
@@ -740,26 +806,23 @@ class ConversationQualityEvaluator:
         # 因果问题需要机制证据；不因其他数值已核验而豁免。
         if is_attribution and gates["causal_evidence"] == "not_applicable":
             gates["causal_evidence"] = "unverified"
-        if is_attribution and not re.search(r"买|卖|加仓|减仓|定投|操作|配置|交易", query):
-            clauses = re.split(r"[。\n，,；;]", content)
-            if any(re.search(r"(?:建议|每期|每月)[^。\n]{0,24}(?:加仓|减仓|定投|买入|卖出|\d+元)", clause)
-                   and not re.search(r"不建议|不应|不宜|禁止|不要|无须|无需|不提供|不涉及|旧报告|误称", clause)
-                   for clause in clauses):
-                issues.append("unrequested_trading_plan")
-                gates["intent"] = "failed"
+        if "unrequested_trade_plan" in issues:
+            gates["intent"] = "failed"
         if metadata.get("unresolved_disagreements"):
-            issues.append("unresolved_disagreements")
+            review_issues.append("unresolved_disagreements")
         issues = list(dict.fromkeys(issues))
         if issues or "failed" in gates.values():
             status, score = "failed", 40
         elif (isinstance(validation, dict) and validation.get("status") == "verified"
               and all(value in {"verified", "not_applicable"} for value in gates.values())
-              and not metrics["incomplete_tool_results"]):
+              and not metrics["incomplete_tool_results"] and not review_issues and not unverified
+              and all(_tool_data(call) is not None for call in calls)):
             status, score = "verified", 90
         else:
             status, score = "unverified", 60 if metrics["has_source_attribution"] else 50
         metrics.update(verification_status=status, quality_gates=gates, factual_issues=issues,
-                       has_data_contradiction=bool(issues))
+                       unverified_issues=list(dict.fromkeys(unverified)), review_issues=list(dict.fromkeys(review_issues)),
+                       has_data_contradiction=bool(fact_status["issues"]))
         details.append({"verified": "已记录必要事实核验；得分仍不代表统计准确率。",
                         "unverified": "事实未核验：来源类型、指标类型、单位、日期、因果与意图需要明确核验记录。",
                         "failed": "事实或意图门槛未通过：" + "、".join(issues or [k for k,v in gates.items() if v == "failed"])}[status])
@@ -777,46 +840,50 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        content = message.get("content", "")
-
-        # 检查是否覆盖了投资分析的关键方面
-        aspects = {
-            "估值分析": [r'PE', r'PB', r'估值', r'百分位', r'分位'],
-            "风险评估": [r'风险', r'回撤', r'波动', r'止损'],
-            "市场环境": [r'市场', r'行情', r'趋势', r'大盘'],
-            "操作建议": [r'建议', r'买入', r'卖出', r'持有', r'加仓', r'减仓'],
-            "配置建议": [r'配置', r'仓位', r'比例', r'分散'],
-        }
-
-        covered = 0
-        total = len(aspects)
-        for aspect, patterns in aspects.items():
-            if any(re.search(p, content) for p in patterns):
-                covered += 1
-                details.append(f"✓ 覆盖：{aspect}")
-            else:
-                details.append(f"✗ 未覆盖：{aspect}")
-
-        coverage_rate = covered / total if total > 0 else 0
-        metrics["coverage_rate"] = coverage_rate
-        metrics["covered_aspects"] = covered
-        metrics["total_aspects"] = total
-
-        # 内容长度也作为完整性的一个指标
-        content_length = len(content)
-        metrics["content_length"] = content_length
-        if content_length < 500:
-            details.append(f"⚠ 内容过短（{content_length}字），可能不够完整")
-        elif content_length > 3000:
-            details.append(f"✓ 内容详尽（{content_length}字）")
-
-        return EvalDimension(
-            name="completeness",
-            score=min(100, coverage_rate * 100),
-            weight=self.WEIGHTS["completeness"],
-            metrics=metrics,
-            details=details,
-        )
+        content = message.get("content", "") or ""
+        query = metadata.get("original_query", "") or ""
+        # 标题、重复段落和篇幅不能代替对实际问题的回答。
+        body = "\n".join(dict.fromkeys(line.strip() for line in content.splitlines()
+                                     if line.strip() and not re.match(r"^#{1,6}\s", line.strip())))
+        clauses = [clause for clause in re.split(r"[。！？\n]", body) if len(clause.strip()) >= 10]
+        substantive = "。".join(clauses)
+        if re.search(r"为什么|为何|原因|归因|做空", query):
+            aspects = {
+                "原因及不确定性": r"原因|归因|因为|导致|驱动|无法确定|不能确定",
+                "归因证据边界": r"(?:缺少|缺乏|未取得|未获取|无法|不能|没有|待验证|假设)[^。]{0,30}(?:数据|证据|判断|确定)|(?:证据|数据)[^。]{0,30}(?:不足|缺失|不完整)",
+            }
+            if re.search(r"做空|卖空", query):
+                aspects["做空证据与判断"] = r"做空|卖空"
+        else:
+            candidates = {
+                "估值分析": (r"估值|PE|PB|分位", r"PE|PB|估值|分位"),
+                "风险评估": (r"风险|回撤|波动|亏损", r"风险|回撤|波动|亏损"),
+                "行情与时间范围": (r"市场|行情|今天|上午|大跌|涨|跌", r"市场|行情|涨|跌|盘中"),
+                "操作条件": (r"买|卖|持有|加仓|减仓|操作|定投", r"买入|卖出|持有|加仓|减仓|等待|定投|观望"),
+                "配置约束": (r"配置|仓位|比例|组合", r"配置|仓位|比例|敞口|组合"),
+            }
+            aspects = {name: answer for name, (question, answer) in candidates.items()
+                       if re.search(question, query, re.I)}
+            if not aspects:
+                aspects = {"问题相关回答": re.escape(query[:12]) if query else r"证据|结论|原因|风险|建议"}
+        covered = sum(bool(re.search(pattern, substantive, re.I)) for pattern in aspects.values())
+        coverage_rate = covered / len(aspects) if aspects else 0
+        metrics.update(coverage_rate=coverage_rate, covered_aspects=covered, total_aspects=len(aspects),
+                       required_aspects=list(aspects), content_length=len(content))
+        for aspect, pattern in aspects.items():
+            details.append(("✓ 覆盖：" if re.search(pattern, substantive, re.I) else "✗ 未覆盖：") + aspect)
+        delivery = _delivery_metrics(message, metadata)
+        metrics.update(delivery)
+        score = coverage_rate * 100
+        if delivery["invalid_specialists"]:
+            valid_rate = delivery["valid_specialists"] / max(1, delivery["original_specialists"])
+            score = min(score, 40 + 60 * valid_rate)
+            details.append("原始专家输出未全部完成，不能评为完整交付。")
+        if not delivery["has_final_synthesis"]:
+            score = min(score, 40)
+            details.append("综合报告未生成，当前仅有恢复的专家内容。")
+        return EvalDimension(name="completeness", score=score, weight=self.WEIGHTS["completeness"],
+                             metrics=metrics, details=details)
 
     def _evaluate_practicality(self, message: dict, metadata: dict) -> EvalDimension:
         """评估实用性：是否有可操作的建议"""
@@ -885,64 +952,64 @@ class ConversationQualityEvaluator:
                 metrics=metrics, details=["无响应消息"],
             )
 
-        content = message.get("content", "")
+        from datetime import datetime, date
+        content = message.get("content", "") or ""
+        query = metadata.get("original_query", "") or ""
+        snapshot = metadata.get("portfolio_snapshot") or metadata.get("snapshot") or {}
+        reference = snapshot.get("as_of") or metadata.get("evaluated_at")
+        try:
+            as_of = date.fromisoformat(str(reference)[:10])
+        except (ValueError, TypeError):
+            as_of = datetime.now().date()
+        intraday = bool(re.search(r"盘中|上午|下午|现在|今天|今日|实时", query))
+        stamps = []
 
-        # 检查是否包含近期日期引用
-        from datetime import datetime, timedelta
-        now = datetime.now()
+        def market_stamps(value):
+            if isinstance(value, dict):
+                # 只取与实际行情指标在同一对象的日期，避免请求日期/报告日期充当行情日期。
+                has_metric = any(key in value and value[key] is not None for key in
+                                 ("price", "last_price", "current_point", "change_pct", "涨跌幅", "最新价", "最新点位"))
+                if has_metric:
+                    for key in ("as_of", "timestamp", "datetime", "date", "trade_date", "data_date", "更新时间", "时间", "日期"):
+                        if value.get(key):
+                            yield str(value[key])
+                            break
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        yield from market_stamps(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from market_stamps(child)
 
-        # 查找日期模式
-        date_patterns = [
-            (r'(\d{4})[-年](\d{1,2})[-月](\d{1,2})', 'absolute'),  # 2025-07-06 或 2025年7月6日
-            (r'今天|今日', 'relative'),
-            (r'昨天|昨日', 'relative'),
-            (r'本周|这周', 'relative'),
-            (r'本月|这月', 'relative'),
-            (r'近期|最近|最新', 'relative'),
-            (r'(\d+)天前', 'days_ago'),
-        ]
-
-        has_recent_date = False
-        for pattern, ptype in date_patterns:
-            matches = re.findall(pattern, content)
-            if matches:
-                if ptype == 'relative':
-                    has_recent_date = True
-                    details.append(f"✓ 引用了相对时间：{pattern}")
-                elif ptype == 'absolute':
-                    # 检查日期是否在 30 天内
-                    for m in matches:
-                        try:
-                            year, month, day = int(m[0]), int(m[1]), int(m[2])
-                            date = datetime(year, month, day)
-                            diff = (now - date).days
-                            if diff <= 30:
-                                has_recent_date = True
-                                details.append(f"✓ 引用了近期日期：{year}-{month}-{day}")
-                        except (ValueError, IndexError):
-                            pass
-
-        metrics["has_recent_date"] = has_recent_date
-        if not has_recent_date:
-            details.append("⚠ 未引用近期日期，数据时效性存疑")
-
-        # 检查是否有过时数据警告
-        has_stale_warning = bool(re.search(r'(历史|过去|曾经|截至)', content))
-        metrics["has_stale_data_marker"] = has_stale_warning
-
-        score = 60  # 基础分
-        if has_recent_date:
-            score += 30
-        if has_stale_warning:
-            score += 10  # 标注了历史数据反而说明有时效意识
-
-        return EvalDimension(
-            name="timeliness",
-            score=min(100, score),
-            weight=self.WEIGHTS["timeliness"],
-            metrics=metrics,
-            details=details,
-        )
+        for call in metadata.get("tool_calls") or []:
+            if not isinstance(call, dict) or not re.search(r"quotation|quote|market|finance_data|行情", str(call.get("name", call.get("tool", ""))), re.I):
+                continue
+            value = _tool_data(call)
+            if value is not None:
+                stamps.extend(market_stamps(value))
+        parsed = []
+        intraday_stamps = []
+        for stamp in stamps:
+            try:
+                stamp_date = date.fromisoformat(stamp[:10])
+                parsed.append(stamp_date)
+                if re.search(r"[T ]\d{1,2}:\d{2}", stamp) and stamp_date == as_of:
+                    intraday_stamps.append(stamp)
+            except (ValueError, TypeError):
+                continue
+        # 当日日期仍不能证明已取得盘中行情；需要有时间戳的实际报价。
+        current = bool(intraday_stamps) if intraday else bool(parsed and all(0 <= (as_of - stamp).days <= 3 for stamp in parsed))
+        limitation = bool(re.search(r"(?:盘中|当日|今天|今日|实时)[^。]{0,18}(?:未获取|未取得|缺少|无数据|无法|尚未)|只有[^。]{0,30}收盘", content))
+        score = 90 if current else (65 if limitation else 30 if intraday else 50)
+        metrics.update(requires_intraday=intraday, market_data_current=current, market_data_dates=sorted(set(stamps)),
+                       as_of=as_of.isoformat(), has_timeliness_limitation=limitation,
+                       has_recent_date=bool(parsed and any(0 <= (as_of - stamp).days <= 3 for stamp in parsed)))
+        details.append("实际行情证据满足所问时间范围。" if current else
+                       "未取得满足原问题时间范围的行情；文本出现日期或‘今天’不代表数据新鲜。")
+        if limitation:
+            details.append("正文明确披露时效缺口，保留部分时效得分。")
+        return EvalDimension(name="timeliness", score=score, weight=self.WEIGHTS["timeliness"],
+                             metrics=metrics, details=details)
 
     def _evaluate_risk_warning(self, message: dict, metadata: dict) -> EvalDimension:
         """评估风险提示：是否标注了风险
@@ -1023,7 +1090,9 @@ class ConversationQualityEvaluator:
             if dim.name == "execution":
                 if dim.metrics.get("duplicate_calls", 0) > 0:
                     suggestions.append(f"🔧 检测到{dim.metrics['duplicate_calls']}次重复调用，建议优化编排逻辑避免重复执行")
-                if dim.metrics.get("duration_score", 100) < 60:
+                if dim.metrics.get("duration_seconds") is None:
+                    suggestions.append("⏱️ 未记录执行耗时，建议补齐 trace 起止时间")
+                elif dim.metrics.get("duration_score", 100) < 60:
                     suggestions.append(f"⏱️ 执行耗时较长（{dim.metrics.get('duration_seconds', 0):.0f}秒），建议减少专家数量或简化分析流程")
 
             elif dim.name == "data":

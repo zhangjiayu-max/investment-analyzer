@@ -11,7 +11,7 @@ from tools import TOOLS, execute_tool
 from db.agents import load_specialist_agents, create_agent_run
 from db.config import get_config_int, get_config_bool
 from agent.infra.output_quality import has_raw_toolcall_tags, is_valid_analysis, validate_specialist_output
-from services.llm.text_completion import complete_text_analysis_sync
+from services.llm.text_completion import complete_text_analysis_sync, CompletionBudgetExhausted
 from agent.core.answer_policy import (
     build_answer_policy, has_attribution_intent, has_explicit_action_intent,
 )
@@ -425,7 +425,7 @@ def _get_message_reasoning(message):
     return extra.get("reasoning_content") or getattr(message, "reasoning_content", None)
 
 
-class _SpecialistBudgetExhausted(RuntimeError):
+class _SpecialistBudgetExhausted(CompletionBudgetExhausted):
     """显式专家预算无法容纳下一次调用。"""
 
 
@@ -440,14 +440,21 @@ class _SpecialistUsage:
         self.token_budget = token_budget
         self.max_output_tokens = max_output_tokens
         self.exhausted = False
+        self.context_usage = {'calls': 0, 'raw_message_chars': 0, 'model_message_chars': 0,
+                              'tool_schema_chars': 0, 'estimated_input_tokens': 0}
 
     def call(self, **kwargs):
+        from services.llm.context_budget import compact_model_messages
+        raw_chars = len(json.dumps(kwargs.get('messages', []), ensure_ascii=False, default=str))
+        kwargs = {**kwargs, 'messages': compact_model_messages(kwargs.get('messages', []),
+            per_tool_chars=get_config_int('pipeline.per_tool_context_chars', 6000),
+            total_tool_chars=get_config_int('pipeline.tool_context_chars', 18000))}
+        prompt_estimate = _estimate_specialist_tokens(kwargs.get('messages', []), '', [], kwargs.get('tools'))
         cap = kwargs.get("max_tokens")
         if self.max_output_tokens is not None:
             cap = min(cap, self.max_output_tokens) if cap is not None else self.max_output_tokens
         if self.token_budget is not None:
             remaining = self.token_budget - self.reported - self.estimated
-            prompt_estimate = _estimate_specialist_tokens(kwargs.get("messages", []), "", [])
             cap = min(cap, remaining - prompt_estimate) if cap is not None else remaining - prompt_estimate
         if cap is not None:
             if cap <= 0:
@@ -455,9 +462,14 @@ class _SpecialistUsage:
                 raise _SpecialistBudgetExhausted("专家预算不足以容纳下一轮输入和输出")
             kwargs = {**kwargs, "max_tokens": int(cap)}
         response = _call_llm(**kwargs)
+        self.context_usage['calls'] += 1
+        self.context_usage['raw_message_chars'] += raw_chars
+        self.context_usage['model_message_chars'] += len(json.dumps(kwargs['messages'], ensure_ascii=False, default=str))
+        self.context_usage['tool_schema_chars'] += len(json.dumps(kwargs.get('tools', []), ensure_ascii=False, default=str))
+        self.context_usage['estimated_input_tokens'] += prompt_estimate
         usage = getattr(response, "usage", None)
         total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
-        if isinstance(total, (int, float)) and total >= 0:
+        if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
             self.reported += int(total)
             self.reported_calls += 1
         else:
@@ -465,7 +477,7 @@ class _SpecialistUsage:
             text = (getattr(message, "content", None) or "") + (_get_message_reasoning(message) or "")
             for tool in getattr(message, "tool_calls", None) or []:
                 text += getattr(getattr(tool, "function", None), "arguments", "") or ""
-            self.estimated += _estimate_specialist_tokens(kwargs.get("messages", []), text, [])
+            self.estimated += _estimate_specialist_tokens(kwargs.get("messages", []), text, [], kwargs.get('tools'))
             self.estimated_calls += 1
         if self.token_budget is not None and self.reported + self.estimated > self.token_budget:
             # 输入估计与供应商实际计费可能有差异；完整首包也必须显式降级。
@@ -476,7 +488,8 @@ class _SpecialistUsage:
         source = "mixed" if self.reported_calls and self.estimated_calls else (
             "reported" if self.reported_calls else "estimated"
         )
-        fields = {"tokens_used": self.reported + self.estimated, "tokens_source": source}
+        fields = {"tokens_used": self.reported + self.estimated, "tokens_source": source,
+                  "context_usage": dict(self.context_usage)}
         if self.exhausted:
             fields.update({"budget_exhausted": True, "status": "budget_exhausted",
                            "completion_status": "degraded", "verdict": "unknown", "confidence": 0.0,
@@ -590,9 +603,7 @@ def run_specialist(agent_key: str, query: str, context: str = "",
         if "search_knowledge" in agent.get("tools", []) and get_config_bool("agent.agentic_rag_enabled", True):
             system_content += _ACTIVE_RETRIEVAL_INSTRUCTION
 
-    # 追加通用数据约束
-    system_content += _UNIVERSAL_DATA_CONSTRAINT
-
+    # 通用数据约束在模板之后统一追加，避免每轮重复发送。
     # 追加禁止原始 tool_call 文本约束
     system_content += _NO_RAW_TOOLCALL_CONSTRAINT
 
@@ -1125,32 +1136,15 @@ def _fallback_from_tool_results(tool_calls_log: list) -> str:
     return "\n\n".join(tool_summaries) if tool_summaries else ""
 
 
-def _estimate_specialist_tokens(llm_messages: list, answer: str, tool_calls_log: list) -> int:
+def _estimate_specialist_tokens(llm_messages: list, answer: str, tool_calls_log: list, tools=None) -> int:
     """估算专家调用的总 token 消耗（prompt + completion）。
 
     用于 Pipeline 的 token 预算追踪，不追求精确，只用于预算控制。
     """
-    try:
-        from agent.memory.memory import estimate_tokens
-    except ImportError:
-        estimate_tokens = lambda x: len(x) // 3
-
-    # prompt tokens：所有输入消息
-    prompt_tokens = 0
-    for msg in llm_messages:
-        content = msg.get("content", "") or ""
-        prompt_tokens += estimate_tokens(content)
-        # tool_calls 的 arguments 也算
-        for tc in msg.get("tool_calls", []) or []:
-            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-            prompt_tokens += estimate_tokens(fn.get("arguments", ""))
-
-    # completion tokens：最终回答 + 工具结果摘要
-    completion_tokens = estimate_tokens(answer)
-    for tc in tool_calls_log:
-        completion_tokens += estimate_tokens(tc.get("result_preview", ""))
-
-    return prompt_tokens + completion_tokens
+    from services.llm.context_budget import estimate_request_tokens
+    # 包含 MIMO 思考历史和工具 schema；工具结果属于输入，不能误算为模型输出。
+    output = (len(answer or '') + 1) // 2
+    return estimate_request_tokens(llm_messages, tools) + output
 
 
 def _parse_structured_output(raw_text: str, agent_key: str, agent_name: str,
@@ -1758,8 +1752,9 @@ def _build_portfolio_summary(max_chars: int = 800) -> str:
 
         # 近 30 天交易频率
         try:
-            txns = list_transactions()
-            lines.append(f"- 历史交易记录：共 {len(txns)} 条")
+            txns = [t for t in list_transactions() if t.get('status') in {'confirmed', 'settled'}
+                    and not t.get('is_system') and not t.get('is_hypothetical')]
+            lines.append(f"- 历史真实已成交记录：共 {len(txns)} 条")
         except Exception:
             pass
 

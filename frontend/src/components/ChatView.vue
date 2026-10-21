@@ -1,4 +1,5 @@
 <script setup>
+import { chatDeliveryStatus } from '../utils/chatDeliveryStatus'
 import { ref, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import {
   listConversations, createConversation, deleteConversation,
@@ -313,7 +314,7 @@ async function autoRecoverIfNeeded(convId) {
       return
     }
     // failed 状态不自动恢复 — 需用户显式点击「重新生成」或「继续分析」
-    if (lastAssistant?.execution_status === 'failed') {
+    if (['failed', 'degraded'].includes(lastAssistant?.execution_status)) {
       return
     }
     // 只有最后一条是 user 消息且后面没有 assistant 时才恢复
@@ -325,7 +326,7 @@ async function autoRecoverIfNeeded(convId) {
       if (!hasAssistantAfter) {
         // 对话历史中已有完成的 assistant 回答时，这条 user 消息可能是重复发送的
         // （如 409 后 DB 仍保留 user 消息但前端已移除内存副本），不自动恢复避免循环
-        const hasCompletedAssistant = msgs.some(m => m.role === 'assistant' && m.execution_status === 'completed')
+        const hasCompletedAssistant = msgs.some(m => m.role === 'assistant' && ['completed', 'degraded'].includes(m.execution_status))
         if (hasCompletedAssistant) {
           console.log('[ChatView] 对话已完成，不自动恢复可能重复的 user 消息')
           return
@@ -351,7 +352,7 @@ function tryResumeConversation(convId) {
         _reconnectReplay(convId, item.channel_id, 0)
         return
       }
-      if (item && ['completed', 'failed', 'aborted', 'cancelled'].includes(item.channel_status || item.execution_status)) {
+      if (item && ['completed', 'degraded', 'failed', 'aborted', 'cancelled'].includes(item.channel_status || item.execution_status)) {
         clearRecovery(convId)
         finishStream(convId)
         removeTask(convId)
@@ -363,7 +364,7 @@ function tryResumeConversation(convId) {
       await loadMessages(convId)
       if (!chatActive || selectedConv.value?.id !== convId) return
       const assistant = [...messages.value].reverse().find(m => m.role === 'assistant')
-      if (assistant && ['completed', 'failed', 'cancelled'].includes(assistant.execution_status)) {
+      if (assistant && ['completed', 'degraded', 'failed', 'cancelled'].includes(assistant.execution_status)) {
         clearRecovery(convId)
         finishStream(convId)
         removeTask(convId)
@@ -451,7 +452,7 @@ function parseMessageMeta(msg) {
     msg.specialist_results = msg.metadata.specialist_results || []
     msg.cross_review_results = msg.metadata.cross_review_results || []
     msg.tool_calls = msg.metadata.tool_calls || []
-    msg.execution_status = msg.metadata.execution_status
+    Object.assign(msg, chatDeliveryStatus(msg))
     msg.complexity = msg.metadata.complexity
     msg.phase_timings = msg.metadata.phase_timings
     msg.error_message = msg.metadata.error_message
@@ -502,6 +503,7 @@ function sendMessageAndTrack(convId, text) {
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
           // 流式已产出：用全文兜底覆盖 + 附加专家结果
           lastMsg.content = data.content || lastMsg.content
+          Object.assign(lastMsg, chatDeliveryStatus({ ...lastMsg, ...data, content: lastMsg.content }))
           lastMsg.streaming = false
           lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
           lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
@@ -512,6 +514,7 @@ function sendMessageAndTrack(convId, text) {
           messages.value.push({
             role: 'assistant',
             content: data.content,
+            ...chatDeliveryStatus(data),
             created_at: new Date().toISOString(),
             specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
             cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
@@ -765,6 +768,7 @@ async function handleSend() {
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
           // 流式已产出：用全文兜底覆盖 + 附加专家结果
           lastMsg.content = data.content || lastMsg.content
+          Object.assign(lastMsg, chatDeliveryStatus({ ...lastMsg, ...data, content: lastMsg.content }))
           lastMsg.streaming = false
           lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
           lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
@@ -775,6 +779,7 @@ async function handleSend() {
           messages.value.push({
             role: 'assistant',
             content: data.content,
+            ...chatDeliveryStatus(data),
             created_at: new Date().toISOString(),
             specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
             cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
@@ -879,12 +884,14 @@ function handleClarifyAnswer(msg, answer) {
         const lastMsg = messages.value[messages.value.length - 1]
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
           lastMsg.content = data.content || lastMsg.content
+          Object.assign(lastMsg, chatDeliveryStatus({ ...lastMsg, ...data, content: lastMsg.content }))
           lastMsg.streaming = false
           lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
         } else {
           messages.value.push({
             role: 'assistant',
             content: data.content,
+            ...chatDeliveryStatus(data),
             created_at: new Date().toISOString(),
             specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
           })
@@ -1298,6 +1305,7 @@ async function handleResume() {
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming) {
           // 流式已产出：用全文兜底覆盖 + 附加专家结果
           lastMsg.content = data.content || lastMsg.content
+          Object.assign(lastMsg, chatDeliveryStatus({ ...lastMsg, ...data, content: lastMsg.content }))
           lastMsg.streaming = false
           lastMsg.specialist_results = phaseAResults.length > 0 ? phaseAResults : null
           lastMsg.cross_review_results = phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null)
@@ -1308,6 +1316,7 @@ async function handleResume() {
           messages.value.push({
             role: 'assistant',
             content: data.content,
+            ...chatDeliveryStatus(data),
             created_at: new Date().toISOString(),
             specialist_results: phaseAResults.length > 0 ? phaseAResults : null,
             cross_review_results: phaseBResults.length > 0 ? phaseBResults : (state.completedCrossReviews.length > 0 ? [...state.completedCrossReviews] : null),
