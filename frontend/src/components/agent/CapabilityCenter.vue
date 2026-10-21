@@ -921,7 +921,7 @@ onMounted(() => {
           <div class="debug-info-bar">
             <span class="info-chip">耗时 {{ formatMs(debugResult.duration_ms) }} ms</span>
             <span class="info-chip" :class="debugResult.success ? 'chip-ok' : 'chip-fail'">
-              {{ debugResult.success ? '✅ 成功' : '❌ 失败' }}
+              <Icon :name="debugResult.success ? 'success' : 'error'" size="14" /> {{ debugResult.success ? '成功' : '失败' }}
             </span>
             <span v-if="debugResult.trace_id" class="info-chip font-jet">trace: {{ debugResult.trace_id }}</span>
             <div class="info-actions">

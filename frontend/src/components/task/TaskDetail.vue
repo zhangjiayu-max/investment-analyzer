@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch, computed, onBeforeUnmount, reactive, defineAsyncComponent } from 'vue'
+import Icon from '../ui/Icon.vue'
 import { marked } from 'marked'
 import { getTask, getTaskImages, pollTask, chat, analyzeTaskImages, getTraceDetail, getMessages } from '../../api'
 import ImageGrid from '../knowledge/ImageGrid.vue'
@@ -27,11 +28,11 @@ const valuationHistoryRef = ref(null)
 // ── Agent 执行细节展示状态 ──────────────────────────────────────
 // 动态进度条阶段（反映实际 Agent 编排阶段，区别于上方 4 步固定流程）
 const phases = [
-  { icon: '🔍', label: '检索' },
-  { icon: '🤖', label: '专家分析' },
-  { icon: '🔄', label: '交叉审阅' },
-  { icon: '⚖️', label: '仲裁' },
-  { icon: '📝', label: '综合报告' },
+  { icon: '', label: '检索' },
+  { icon: '', label: '专家分析' },
+  { icon: '', label: '交叉审阅' },
+  { icon: '', label: '仲裁' },
+  { icon: '', label: '综合报告' },
 ]
 
 // 工具调用展开/收起状态（用 reactive Set 触发模板更新）
@@ -118,7 +119,7 @@ async function fetchExecutionDetail(t) {
         t.specialists = data.agent_runs.map(r => ({
           agent_key: r.agent_key || r.id,
           name: r.agent_name || r.agent || r.agent_key,
-          icon: r.icon || '🤖',
+          icon: r.icon || '',
           status: r.status === 'running' ? 'running' : (r.status === 'failed' ? 'failed' : 'success'),
           duration_ms: r.duration_ms,
         }))
@@ -335,7 +336,7 @@ watch(() => props.taskId, () => {
         </div>
         <div class="specialist-list">
           <div v-for="s in task.specialists" :key="s.agent_key" class="specialist-item reveal-stagger">
-            <span class="specialist-icon">{{ s.icon || '🤖' }}</span>
+            <span class="specialist-icon">{{ s.icon || '' }}</span>
             <span class="specialist-name">{{ s.name || s.agent_key }}</span>
             <span class="specialist-status" :class="s.status">{{ specialistStatusText(s.status) }}</span>
             <span v-if="s.duration_ms" class="specialist-duration font-jet">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>

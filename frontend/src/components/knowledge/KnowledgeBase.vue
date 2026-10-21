@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { getKnowledgeStats, getKnowledgeBooks, listKnowledge, searchKnowledge, deleteKnowledge } from '../../api'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
+import Icon from '../ui/Icon.vue'
 
 const { showToast } = useToast()
 
@@ -17,13 +18,14 @@ const books = ref([])
 
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
-// 分类映射
+// 分类映射（icon 走统一 Icon 组件，不再用 emoji：emoji 在各系统渲染不一致，
+// 且自带彩色，与金融终端的单色线性图标语言冲突）
 const categoryMap = {
-  concept: { label: '概念', icon: '📚' },
-  strategy: { label: '策略', icon: '🎯' },
-  book: { label: '书籍', icon: '📖' },
-  article: { label: '文章', icon: '📰' },
-  note: { label: '个人笔记', icon: '📝' },
+  concept: { label: '概念', icon: 'library' },
+  strategy: { label: '策略', icon: 'target' },
+  book: { label: '书籍', icon: 'book-open' },
+  article: { label: '文章', icon: 'newspaper' },
+  note: { label: '个人笔记', icon: 'pen-line' },
 }
 
 const subcategoryMap = {
@@ -172,7 +174,7 @@ function importanceClass(score) {
       </div>
       <div v-for="(count, cat) in stats.categories" :key="cat" class="stat-card editorial-card reveal-stagger"
            :class="{ active: activeCategory === cat }" @click="filterByCategory(cat)">
-        <div class="stat-icon">{{ categoryMap[cat]?.icon || '📄' }}</div>
+        <div class="stat-icon"><Icon :name="categoryMap[cat]?.icon || 'file-text'" size="16" /></div>
         <div class="stat-value font-jet-lg">{{ count }}</div>
         <div class="stat-label terminal-label">{{ categoryMap[cat]?.label || cat }}</div>
       </div>
@@ -245,7 +247,7 @@ function importanceClass(score) {
       <div v-for="item in filteredItems" :key="item.id" class="knowledge-item editorial-card reveal-stagger">
         <div class="item-header">
           <span class="item-category" :class="item.category">
-            {{ categoryMap[item.category]?.icon || '📄' }}
+            <Icon :name="categoryMap[item.category]?.icon || 'file-text'" size="13" />
             <span class="cat-label">{{ categoryMap[item.category]?.label || item.category }}</span>
           </span>
           <span v-if="item.subcategory" class="item-subcategory terminal-label">
@@ -256,7 +258,7 @@ function importanceClass(score) {
             <span class="font-jet" :class="importanceClass(item.importance)">{{ item.importance }}</span>
             <span class="terminal-label importance-sep">/10</span>
           </span>
-          <button class="btn-delete" @click="handleDelete(item)" title="删除">🗑️</button>
+          <button class="btn-delete" @click="handleDelete(item)" title="删除"><Icon name="trash" size="14" /></button>
         </div>
         <h3 class="item-title editorial-title">{{ item.title }}</h3>
         <div class="item-content markdown-body" v-html="renderContent(item.content)"></div>
@@ -317,6 +319,17 @@ function renderContent(content) {
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 0.75rem;
   margin-bottom: 1.5rem;
+}
+/* KPI 网格里不能用 editorial-card 的金→蓝渐变竖线：
+   卡片高度不一致时，每张卡会截到渐变的不同色段，视觉上变成金/蓝交错，
+   看起来像编码了状态，其实纯属巧合。这里统一成单色。 */
+.stats-grid .stat-card::before {
+  background: var(--color-gold);
+  opacity: 0.7;
+}
+.stats-grid .stat-card.active::before {
+  background: var(--color-primary);
+  opacity: 1;
 }
 .stat-card {
   background: var(--color-bg-card);
@@ -461,7 +474,7 @@ function renderContent(content) {
 .dark .item-category.book { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
 
 .item-subcategory {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
 }
 .item-importance {
   display: inline-flex;
@@ -533,7 +546,7 @@ function renderContent(content) {
   margin-bottom: 0.6rem;
 }
 .keyword-tag {
-  font-size: 0.66rem;
+  font-size: 0.7rem;
   padding: 0.18rem 0.55rem;
   background: var(--color-bg-hover);
   border: 1px solid var(--color-border-light);

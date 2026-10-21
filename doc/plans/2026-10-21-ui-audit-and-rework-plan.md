@@ -185,6 +185,63 @@ token 解析：--color-skeleton → rgb(233,237,242)   --color-up → rgb(220,38
 
 ---
 
+## 八、第 2 批执行记录：移动端与全站体系（2026-10-21）
+
+第 1 批只覆盖了桌面端几个页面。本批把 39 个页面 + iPhone 视口（390×844）+ 亮暗双主题全部扫过，重点补移动端。
+
+### 8.1 关键发现：移动端没有独立实现
+
+`MobileApp.vue` 只是壳（687 行），页面全部**复用桌面组件**（`Dashboard` / `ChatView` / `PortfolioManagement` / `EventRadarPage` …）。
+因此桌面组件的响应式能力就是移动端的真实表现，而 **99 个组件里有 28 个完全没有 `@media`**，断点值散成 14 种（768/760/720/680/640/600/540/520/480…）。
+
+扫描方法：Playwright 移动视口逐页加载，统计横向溢出元素、被截断文本、`<11px` 文字。
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 小字元素总数（<11.5px） | ≈2400 | ≈260 |
+| 小字超标页面数 | 15 / 22 | 7 / 22 |
+| emoji 总数 | 305 | 79（-74%） |
+| 裸用未定义 CSS 变量 | 0（第 1 批已修） | 0 |
+
+### 8.2 修复项
+
+| 问题 | 文件 | 说明 |
+|---|---|---|
+| **首屏落地页是后台文章管理** | `useAppNavigation.js` | 默认 `'articles'` → `'dashboard'`。新用户第一眼看到的是 CMS 双栏表格，不是看板 |
+| **移动端表格列被裁** | `style.css` | 原 `table{display:block}` 使 thead/tbody 列宽计算失效，单元格溢出到视口外被 `overflow-x:hidden` 裁掉。补 `thead/tbody{display:table;width:max-content;min-width:100%}` 复原列宽计算 |
+| **KPI 卡彩虹竖线** | `EventRadarPage.vue` | 6 种色（灰/红/橙/橙/青/蓝）在手机上红橙、青蓝不可分辨。收敛为：中性=普通计数 / 风险色=持仓影响 / 主色=当前筛选 |
+| **KPI 渐变竖线错位成"金蓝交错"** | `KnowledgeBase.vue` | 根因是 `editorial-card::before` 用 gold→primary 渐变，卡片高度不一致时每张截到的色段不同。KPI 网格内改为纯色 |
+| **移动端 KPI 栅格孤项** | `EventRadarPage.vue` | 5 张卡在 2 列栅格留半格空洞 → 末项跨满整行 |
+| **事件卡日期被压断** | `EventRadarPage.vue` | 时间列 48px 装不下 `2026-10-31`，折成 `2026-10-`/`31`。移动端改横排 |
+| **持仓页头部按钮溢出** | `PortfolioManagement.vue` | `header-actions` 是 nowrap 横向 flex，4 个按钮超出 390px 被裁 → 移动端允许换行 |
+| **报错裸奔** | `PortfolioRiskOverview.vue` | 纯红字 → 图标 + 淡红容器 + 边框 + 「重试」按钮 |
+| **底部导航图标语言不一** | `MobileApp.vue` | 5 个手写 SVG（持仓是三层叠菱形）→ 统一 `Icon` 组件 |
+| **无数据却涂红** | `DecisionAccuracy.vue` | 已验证 0 条时 `0.0%` 用 `--color-danger`，被读成"判断全错"。改为中性色 + `—` + 说明 |
+| **财务总览页头参差** | `FamilyFinanceDashboard.vue` | 移动端塌成竖排后按钮宽度不一 → 统一铺满等宽 |
+| **标签字号过小** | 8 个组件 | `keyword-tag`(10.56px)/`chip`(10.24px)/`event-type-tag`(9.92px) 等 15 处提到 0.7rem(11.2px)。组件 scoped 样式特异性高于全局，必须改在组件内 |
+| **emoji 换图标** | 20+ 组件 | 知识库分类、通知中心类型、信号灯、共振、分析页签、评级、点赞、关闭/编辑/删除等；`✓ ✗ ⚠` 单色符号保留 |
+
+### 8.3 有意保留
+
+- `🐟 小鱼儿 / 🌸 花无缺`：家庭成员身份标识，属用户数据
+- `✓ ✗ ⚠`：单色文本符号，颜色由容器 CSS 控制，跟随主题
+- `ChatMessage.vue` 中的 emoji：AI 生成内容，不属 UI 装饰
+- 后端预警文本 / 评测用例名称里的 emoji：数据内容，应在生成端处理
+- 导出到 Markdown 文本的 emoji（如 `📈 滚动收益分析`）：纯文本产物，不参与界面渲染
+
+### 8.4 验证
+
+```
+移动端 22 页扫描   横向溢出 0；元素越界仅剩 table（横向滚动容器，符合预期）
+小字 >11px         knowledge 582→0  chat 86→8  alert-center 193→43  event-radar 207→81
+桌面 1440px 回归   table 仍为 display:table；5 页无 pageerror；KPI/简报排版正常
+未定义变量          0 个 / token 185 个
+```
+
+**未完成**（下一批）：按钮权重体系（机会雷达单卡三色按钮）、两套筛选语言统一、`!important` 63 处、`mark` 高亮 9.6px、articles 页 69 处省略号截断。
+
+---
+
 ## 六、附：审计截图
 
 `/tmp/ui-audit/dashboard.png`（看板空白加载态、蓝色错位竖线）

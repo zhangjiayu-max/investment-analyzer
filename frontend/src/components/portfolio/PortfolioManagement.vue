@@ -1,6 +1,7 @@
 <script setup>
 import PortfolioRiskOverview from './PortfolioRiskOverview.vue'
 import MarkdownActions from '../ui/MarkdownActions.vue'
+import Icon from '../ui/Icon.vue'
 import { whatIfScenarios, buildWhatIfRequest } from '../../utils/whatIfScenarios.js'
 import { ref, computed, onMounted, onActivated, onDeactivated, watch, nextTick, onUnmounted } from 'vue'
 
@@ -660,10 +661,10 @@ function signalStatusOf(item) {
 }
 
 const SIGNAL_LIGHT = {
-  green: { icon: '🟢', label: '可买入', cls: 'sig-green' },
-  yellow: { icon: '🟡', label: '接近', cls: 'sig-yellow' },
-  red: { icon: '🔴', label: '等待', cls: 'sig-red' },
-  gray: { icon: '⚪', label: '缺数据', cls: 'sig-gray' },
+  green: { label: '可买入', cls: 'sig-green' },
+  yellow: { label: '接近', cls: 'sig-yellow' },
+  red: { label: '等待', cls: 'sig-red' },
+  gray: { label: '缺数据', cls: 'sig-gray' },
 }
 
 async function patrolWatchlistItems() {
@@ -730,11 +731,11 @@ const bucketChartRef = ref(null)
 let bucketChartInstance = null
 
 const RESONANCE_LEVEL_MAP = {
-  strong: { label: '强共振（看多）', cls: 'resonance-strong', icon: '🚀' },
-  strong_bearish: { label: '强共振（看空）', cls: 'resonance-bearish', icon: '⚠️' },
-  moderate: { label: '中等共振', cls: 'resonance-moderate', icon: '📊' },
-  weak: { label: '弱共振', cls: 'resonance-weak', icon: '💡' },
-  none: { label: '无共振', cls: 'resonance-none', icon: '➖' },
+  strong: { label: '强共振（看多）', cls: 'resonance-strong', icon: 'trending-up' },
+  strong_bearish: { label: '强共振（看空）', cls: 'resonance-bearish', icon: 'trending-down' },
+  moderate: { label: '中等共振', cls: 'resonance-moderate', icon: 'activity' },
+  weak: { label: '弱共振', cls: 'resonance-weak', icon: 'lightbulb' },
+  none: { label: '无共振', cls: 'resonance-none', icon: 'minus' },
 }
 
 const resonanceLevelInfo = computed(() => {
@@ -800,9 +801,11 @@ function renderSignalHistoryChart(code) {
         trigger: 'item',
         formatter: (p) => {
           const v = p.value
-          const hitLabel = v[2] === 1 ? '<span style="color:#10b981">✓ 命中</span>'
-                           : v[2] === 0 ? '<span style="color:#ef4444">✗ 未命中</span>'
-                           : '<span style="color:#9ca3af">待回测</span>'
+          // 「命中/未命中」是成败语义，不是涨跌语义，用 success/danger 而不是 profit/loss，
+          // 否则会和红涨绿跌的约定打架。tooltip 是真实 DOM，var() 可正常解析、跟随主题。
+          const hitLabel = v[2] === 1 ? '<span style="color:var(--color-success)">✓ 命中</span>'
+                           : v[2] === 0 ? '<span style="color:var(--color-danger)">✗ 未命中</span>'
+                           : '<span style="color:var(--color-text-muted)">待回测</span>'
           const conf = v[4] != null ? ` | 置信度 ${v[4]}` : ''
           return `<div style="font-size:12px">${v[0]}<br/>${v[3]}${conf}<br/>涨跌: ${Number(v[1]).toFixed(2)}%<br/>${hitLabel}</div>`
         },
@@ -944,10 +947,10 @@ onUnmounted(() => {
 
 function scoreRatingInfo(rating) {
   return {
-    buy: { icon: '🟢', label: '建议买入', cls: 'score-buy' },
-    watch: { icon: '🟡', label: '观察', cls: 'score-watch' },
-    wait: { icon: '🔴', label: '等待', cls: 'score-wait' },
-  }[rating] || { icon: '⚪', label: rating || '-', cls: '' }
+    buy: { label: '建议买入', cls: 'score-buy' },
+    watch: { label: '观察', cls: 'score-watch' },
+    wait: { label: '等待', cls: 'score-wait' },
+  }[rating] || { label: rating || '-', cls: '' }
 }
 
 // P2-4.3 估值历史图叠加
@@ -1478,7 +1481,7 @@ async function checkBlockedBeforeBuy(fundCode, fundName) {
     return new Promise((resolve) => {
       confirm.value = {
         visible: true,
-        title: '⚠️ 系统建议暂不操作',
+        title: '系统建议暂不操作',
         message: `${fundName || fundCode} 有未确认交易（${blockedSig.summary || '系统建议等待确认后再操作'}）\n\n确认要继续买入吗？`,
         danger: true,
         onConfirm: () => resolve(true),
@@ -1757,17 +1760,17 @@ const modeReportCreatedAt = computed(() => {
 })
 
 const aiModes = [
-  { key: 'panorama', icon: '🔍', label: '全景诊断' },
-  { key: 'deepdive', icon: '🔎', label: '单基金分析' },
-  { key: 'trade-review', icon: '📊', label: '交易复盘' },
-  { key: 'fund-analysis', icon: '🔍', label: '指定基金分析' },
-  { key: 'fee', icon: '💰', label: '费率分析' },
-  { key: 'correlation', icon: '🔗', label: '相关性分析' },
-  { key: 'compare', icon: '⚖️', label: '对比分析' },
-  { key: 'rolling', icon: '📈', label: '滚动收益' },
-  { key: 'four-pots', icon: '🪣', label: '四笔钱' },
-  { key: 'dca', icon: '🔄', label: '定投优化' },
-  { key: 'what-if', icon: '🎯', label: '情景推演' },
+  { key: 'panorama', icon: 'search', label: '全景诊断' },
+  { key: 'deepdive', icon: 'scan-search', label: '单基金分析' },
+  { key: 'trade-review', icon: 'chart', label: '交易复盘' },
+  { key: 'fund-analysis', icon: 'search', label: '指定基金分析' },
+  { key: 'fee', icon: 'coins', label: '费率分析' },
+  { key: 'correlation', icon: 'link', label: '相关性分析' },
+  { key: 'compare', icon: 'scale', label: '对比分析' },
+  { key: 'rolling', icon: 'line-chart', label: '滚动收益' },
+  { key: 'four-pots', icon: 'pie-chart', label: '四笔钱' },
+  { key: 'dca', icon: 'refresh', label: '定投优化' },
+  { key: 'what-if', icon: 'target', label: '情景推演' },
 ]
 
 function switchAiMode(mode) {
@@ -2402,7 +2405,7 @@ async function submitFeedback(feedback) {
   try {
     await submitAnalysisFeedback(modeRecordId.value, feedback, note)
     feedbackGiven.value = feedback
-    showToast(feedback === 'helpful' ? '感谢反馈 🙏' : '已记录，我们会持续改进')
+    showToast(feedback === 'helpful' ? '感谢反馈' : '已记录，我们会持续改进')
   } catch (e) {
     showToast('提交失败', 'error')
   }
@@ -3823,7 +3826,7 @@ function txDisplayAmount(tx) {
               </svg>
               {{ diversificationLoading ? '分析中...' : '刷新分析' }}
             </button>
-            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('diversification')">✕</button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('diversification')"><Icon name="close" size="13" /></button>
           </div>
         </div>
         <div v-if="diversificationLoading" class="loading-state"><div class="spinner"></div></div>
@@ -3932,7 +3935,7 @@ function txDisplayAmount(tx) {
             </div>
           </div>
           <div class="analysis-hint" v-if="diversificationData.max_holding_pct > 40">
-            ⚠️ 单只基金占比超过 40%，仓位较集中，建议适当分散。
+            单只基金占比超过 40%，仓位较集中，建议适当分散。
           </div>
 
           <!-- AI 解读 -->
@@ -4078,7 +4081,7 @@ function txDisplayAmount(tx) {
       <template v-if="activeAnalysisTab === 'tx'">
         <div class="analysis-panel-header">
           <h3>交易行为分析</h3>
-          <button class="btn-ghost btn-sm" @click="switchAnalysisTab('tx')">✕</button>
+          <button class="btn-ghost btn-sm" @click="switchAnalysisTab('tx')"><Icon name="close" size="13" /></button>
         </div>
         <div v-if="txAnalysisData" class="analysis-panel-body">
           <div class="analysis-stats">
@@ -4124,18 +4127,18 @@ function txDisplayAmount(tx) {
           </div>
           <div v-if="modeResult && aiMode === 'trade-review'" class="trade-review-result-inline">
             <div class="result-header">
-              <span class="result-title">📊 交易复盘结果</span>
+              <span class="result-title">交易复盘结果</span>
               <span class="result-time">{{ new Date().toLocaleString() }}</span>
               <MarkdownActions v-if="modeReportStatus === 'done'" :content="modeResult" title="交易复盘分析师-交易复盘" :record-id="modeRecordId" :created-at="modeReportCreatedAt" />
             </div>
             <div class="result-body" v-html="renderMarkdown(modeResult)"></div>
             <div class="result-feedback">
               <template v-if="!feedbackGiven">
-                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用">👍</button>
-                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用">👎</button>
+                <button class="btn-feedback btn-feedback-up" @click="submitFeedback('helpful')" title="有用"><Icon name="thumbs-up" size="14" /></button>
+                <button class="btn-feedback btn-feedback-down" @click="submitFeedback('unhelpful')" title="没用"><Icon name="thumbs-down" size="14" /></button>
               </template>
               <span v-else class="feedback-given-text">
-                {{ feedbackGiven === 'helpful' ? '✅ 已标记有用' : '📝 已记录，感谢反馈' }}
+                {{ feedbackGiven === 'helpful' ? '已标记有用' : '已记录，感谢反馈' }}
               </span>
             </div>
           </div>
@@ -4242,7 +4245,7 @@ function txDisplayAmount(tx) {
         <div class="analysis-panel-header">
           <h3>AI 持仓分析</h3>
           <div class="analysis-panel-actions">
-            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('ai')">✕</button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('ai')"><Icon name="close" size="13" /></button>
           </div>
         </div>
         <div class="analysis-panel-body">
@@ -4251,7 +4254,7 @@ function txDisplayAmount(tx) {
             <button v-for="mode in aiModes" :key="mode.key"
               :class="['ai-mode-tab', { active: aiMode === mode.key }]"
               @click="switchAiMode(mode.key)">
-              <span class="ai-mode-icon">{{ mode.icon }}</span>
+              <span class="ai-mode-icon"><Icon :name="mode.icon" size="15" /></span>
               <span class="ai-mode-label">{{ mode.label }}</span>
             </button>
           </div>
@@ -4282,7 +4285,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="panoramaRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="panoramaShowAll = !panoramaShowAll">
-                <span>📋 历史诊断记录 ({{ panoramaRecords.length }})</span>
+                <span>历史诊断记录 ({{ panoramaRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ panoramaShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4301,10 +4304,10 @@ function txDisplayAmount(tx) {
             <div class="ai-mode-form">
               <select v-model="deepDiveSelectedHolding" class="input-field" style="flex:1">
                 <option value="">请选择基金</option>
-                <optgroup label="📦 我的持仓">
+                <optgroup label="我的持仓">
                   <option v-for="h in holdings.filter(h => (h.shares || 0) > 0)" :key="h.id" :value="'h_'+h.id">{{ h.fund_name }} ({{ h.fund_code }})</option>
                 </optgroup>
-                <optgroup v-if="watchlistItems.filter(w => w.status !== 'bought').length" label="⭐ 我的关注">
+                <optgroup v-if="watchlistItems.filter(w => w.status !== 'bought').length" label="我的关注">
                   <option v-for="w in watchlistItems.filter(w => w.status !== 'bought')" :key="w.id" :value="'w_'+w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
                 </optgroup>
               </select>
@@ -4332,7 +4335,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="deepDiveRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="deepDiveShowAll = !deepDiveShowAll">
-                <span>📋 历史分析记录 ({{ deepDiveRecords.length }})</span>
+                <span>历史分析记录 ({{ deepDiveRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ deepDiveShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4376,7 +4379,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="tradeReviewRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="tradeReviewShowAll = !tradeReviewShowAll">
-                <span>📋 历史复盘记录 ({{ tradeReviewRecords.length }})</span>
+                <span>历史复盘记录 ({{ tradeReviewRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ tradeReviewShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4394,7 +4397,7 @@ function txDisplayAmount(tx) {
             <div class="ai-mode-desc">输入任意基金代码，AI 将结合您的持仓和当前估值数据，分析是否适合建仓、加仓或减仓。</div>
             <div class="ai-mode-form">
               <select v-if="watchlistItems.filter(w => w.status !== 'bought').length" class="input-field" style="flex:1" @change="fundAnalysisCode = $event.target.value">
-                <option value="">⭐ 从关注列表选择</option>
+                <option value="">从关注列表选择</option>
                 <option v-for="w in watchlistItems.filter(w => w.status !== 'bought')" :key="w.id" :value="w.fund_code">{{ w.fund_name }} ({{ w.fund_code }})</option>
               </select>
               <input v-model="fundAnalysisCode" type="text" class="input-field" style="flex:1" placeholder="输入基金代码，如 161725" />
@@ -4421,7 +4424,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="fundAnalysisRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="fundAnalysisShowAll = !fundAnalysisShowAll">
-                <span>📋 历史分析记录 ({{ fundAnalysisRecords.length }})</span>
+                <span>历史分析记录 ({{ fundAnalysisRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ fundAnalysisShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4460,7 +4463,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="feeRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="feeShowAll = !feeShowAll">
-                <span>📋 历史费率分析 ({{ feeRecords.length }})</span>
+                <span>历史费率分析 ({{ feeRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ feeShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4499,7 +4502,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="correlationRecords.length > 0" class="ai-mode-history">
               <div class="ai-mode-history-header" @click="correlationShowAll = !correlationShowAll">
-                <span>📋 历史相关性分析 ({{ correlationRecords.length }})</span>
+                <span>历史相关性分析 ({{ correlationRecords.length }})</span>
                 <span class="ai-mode-history-toggle">{{ correlationShowAll ? '收起' : '展开全部' }}</span>
               </div>
               <div class="ai-mode-history-list">
@@ -4520,7 +4523,7 @@ function txDisplayAmount(tx) {
           <!-- Mode: Rolling Return -->
           <div v-if="aiMode === 'rolling'" class="ai-mode-content">
             <div class="ai-mode-header">
-              <span class="mode-icon">📈</span>
+              <span class="mode-icon"></span>
               <div>
                 <h4>滚动收益分析</h4>
                 <p class="mode-desc">计算任意时点买入持有1-5年的收益分布和胜率</p>
@@ -4535,7 +4538,7 @@ function txDisplayAmount(tx) {
           <!-- Mode: Four Pots -->
           <div v-if="aiMode === 'four-pots'" class="ai-mode-content">
             <div class="ai-mode-header">
-              <span class="mode-icon">🪣</span>
+              <span class="mode-icon"></span>
               <div>
                 <h4>四笔钱归类</h4>
                 <p class="mode-desc">将持仓自动归类到活钱管理/稳健理财/长期投资/保险保障</p>
@@ -4550,7 +4553,7 @@ function txDisplayAmount(tx) {
           <!-- Mode: DCA Optimization -->
           <div v-if="aiMode === 'dca'" class="ai-mode-content">
             <div class="ai-mode-header">
-              <span class="mode-icon">🔄</span>
+              <span class="mode-icon"></span>
               <div>
                 <h4>定投优化建议</h4>
                 <p class="mode-desc">根据估值和恐贪指数，动态调整每只基金的定投金额</p>
@@ -4565,7 +4568,7 @@ function txDisplayAmount(tx) {
           <!-- Mode: What-If -->
           <div v-if="aiMode === 'what-if'" class="ai-mode-content">
             <div class="ai-mode-header">
-              <span class="mode-icon">🎯</span>
+              <span class="mode-icon"></span>
               <div>
                 <h4>情景推演</h4>
                 <p class="mode-desc">模拟不同市场情景下你的持仓表现</p>
@@ -4825,36 +4828,36 @@ function txDisplayAmount(tx) {
             <button class="btn-primary btn-sm" @click="showAddWatchlist = true" style="margin-right:0.5rem">+ 添加关注</button>
             <!-- P0-2.2 一键巡检按钮（60s 防抖） -->
             <button class="btn-secondary btn-sm" @click="patrolWatchlistItems" :disabled="watchlistPatrolling" style="margin-right:0.5rem" title="巡检估值并更新信号灯（60s 防抖）">
-              {{ watchlistPatrolling ? '巡检中...' : '🔍 一键巡检' }}
+              {{ watchlistPatrolling ? '巡检中...' : '一键巡检' }}
             </button>
             <button class="btn-secondary btn-sm" @click="refreshWatchlistNavs" :disabled="watchlistRefreshing" style="margin-right:0.5rem">
               {{ watchlistRefreshing ? '刷新中...' : '刷新净值' }}
             </button>
-            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('watchlist')">✕</button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('watchlist')"><Icon name="close" size="13" /></button>
           </div>
         </div>
 
         <!-- 巡检结果摘要 -->
         <div v-if="patrolResults" class="patrol-summary">
-          <span class="patrol-summary-title">🚦 信号灯统计：</span>
-          <span class="sig-stat sig-green">🟢 {{ patrolResults.all_items?.filter(x => x.signal_status === 'green').length || 0 }} 可买入</span>
-          <span class="sig-stat sig-yellow">🟡 {{ patrolResults.all_items?.filter(x => x.signal_status === 'yellow').length || 0 }} 接近</span>
-          <span class="sig-stat sig-red">🔴 {{ patrolResults.all_items?.filter(x => x.signal_status === 'red').length || 0 }} 等待</span>
-          <span class="sig-stat sig-gray">⚪ {{ patrolResults.all_items?.filter(x => x.signal_status === 'gray').length || 0 }} 缺数据</span>
+          <span class="patrol-summary-title">信号灯统计：</span>
+          <span class="sig-stat sig-green">{{ patrolResults.all_items?.filter(x => x.signal_status === 'green').length || 0 }} 可买入</span>
+          <span class="sig-stat sig-yellow">{{ patrolResults.all_items?.filter(x => x.signal_status === 'yellow').length || 0 }} 接近</span>
+          <span class="sig-stat sig-red">{{ patrolResults.all_items?.filter(x => x.signal_status === 'red').length || 0 }} 等待</span>
+          <span class="sig-stat sig-gray">{{ patrolResults.all_items?.filter(x => x.signal_status === 'gray').length || 0 }} 缺数据</span>
         </div>
 
         <!-- P2-C（2026-07-21）共振分析 + 系统性风险 -->
         <div v-if="resonanceData" class="resonance-panel">
           <div class="resonance-section">
-            <div class="resonance-section-title">📡 关注列表共振</div>
+            <div class="resonance-section-title">关注列表共振</div>
             <div :class="['resonance-card', resonanceLevelClass]">
-              <span class="resonance-icon">{{ resonanceLevelInfo.icon }}</span>
+              <span class="resonance-icon"><Icon :name="resonanceLevelInfo.icon" size="15" /></span>
               <div class="resonance-body">
                 <div class="resonance-label">{{ resonanceLevelInfo.label }}</div>
                 <div class="resonance-stats">
-                  <span>🟢 {{ resonanceData.watchlist_resonance?.green_count || 0 }}</span>
-                  <span>🟡 {{ resonanceData.watchlist_resonance?.yellow_count || 0 }}</span>
-                  <span>🔴 {{ resonanceData.watchlist_resonance?.red_count || 0 }}</span>
+                  <span>{{ resonanceData.watchlist_resonance?.green_count || 0 }}</span>
+                  <span>{{ resonanceData.watchlist_resonance?.yellow_count || 0 }}</span>
+                  <span>{{ resonanceData.watchlist_resonance?.red_count || 0 }}</span>
                   <span>共 {{ resonanceData.watchlist_resonance?.total || 0 }} 只</span>
                 </div>
                 <div class="resonance-suggestion">{{ resonanceData.watchlist_resonance?.suggestion || '' }}</div>
@@ -4869,9 +4872,9 @@ function txDisplayAmount(tx) {
           </div>
 
           <div class="resonance-section">
-            <div class="resonance-section-title">⚠️ 持仓系统性风险</div>
+            <div class="resonance-section-title"><Icon name="shield-alert" size="14" /> 持仓系统性风险</div>
             <div :class="['resonance-card', resonanceData.holding_systemic_risk?.systemic_risk ? 'resonance-bearish' : 'resonance-none']">
-              <span class="resonance-icon">{{ resonanceData.holding_systemic_risk?.systemic_risk ? '⚠️' : '✅' }}</span>
+              <span class="resonance-icon"><Icon v-if="resonanceData.holding_systemic_risk?.systemic_risk" name="warning" size="15" /></span>
               <div class="resonance-body">
                 <div class="resonance-label">
                   {{ resonanceData.holding_systemic_risk?.systemic_risk ? '系统性风险预警' : '无系统性风险' }}
@@ -4889,7 +4892,7 @@ function txDisplayAmount(tx) {
         <!-- P2-E（2026-07-21）信号置信度分桶柱状图 -->
         <div v-if="signalStatsData && (signalStatsData.reviewed || 0) > 0" class="bucket-chart-panel">
           <div class="bucket-header">
-            <span class="bucket-title">📊 信号置信度 vs 命中率分桶</span>
+            <span class="bucket-title">信号置信度 vs 命中率分桶</span>
             <span class="bucket-meta">
               总样本 {{ signalStatsData.reviewed || 0 }} · 命中 {{ signalStatsData.hit_count || 0 }} · 命中率 {{ ((signalStatsData.hit_rate || 0)).toFixed(1) }}%
             </span>
@@ -4932,7 +4935,7 @@ function txDisplayAmount(tx) {
                 </td>
                 <td>
                   <div :class="['signal-light', SIGNAL_LIGHT[signalStatusOf(item).status]?.cls]" :title="signalStatusOf(item).reason">
-                    <span class="signal-icon">{{ SIGNAL_LIGHT[signalStatusOf(item).status]?.icon }}</span>
+                    <span class="signal-icon" aria-hidden="true"></span>
                     <span class="signal-label">{{ SIGNAL_LIGHT[signalStatusOf(item).status]?.label }}</span>
                   </div>
                   <div class="signal-reason">{{ signalStatusOf(item).reason }}</div>
@@ -4965,7 +4968,7 @@ function txDisplayAmount(tx) {
                     <!-- P2-A（2026-07-21）自适应阈值提示 -->
                     <div v-if="item.adaptive_target_pct != null && item.adaptive_target_pct !== item.target_percentile"
                          class="adaptive-hint" :title="item.adaptive_reason || ''">
-                      ⚙️ 自适应 {{ item.adaptive_target_pct.toFixed(0) }}%
+                      自适应 {{ item.adaptive_target_pct.toFixed(0) }}%
                       <span v-if="item.adaptive_reason" class="adaptive-reason">{{ item.adaptive_reason }}</span>
                     </div>
                   </div>
@@ -4980,12 +4983,12 @@ function txDisplayAmount(tx) {
                     @click="loadBuyScore(item)"
                     title="计算买入时机评分（纯规则，无 LLM）"
                   >
-                    {{ buyScoreMap[item.id]?.loading ? '...' : '📊 评分' }}
+                    {{ buyScoreMap[item.id]?.loading ? '...' : '评分' }}
                   </button>
                   <div v-if="buyScoreMap[item.id]?.error" class="score-error">{{ buyScoreMap[item.id].error }}</div>
                   <div v-if="buyScoreMap[item.id]?.score != null" class="score-display" @click="loadBuyScore(item)" style="cursor:pointer">
                     <span :class="['score-total', scoreRatingInfo(buyScoreMap[item.id].rating).cls]">
-                      {{ scoreRatingInfo(buyScoreMap[item.id].rating).icon }} {{ buyScoreMap[item.id].score }}
+                      <span class="score-dot" :class="scoreRatingInfo(buyScoreMap[item.id].rating).cls" aria-hidden="true"></span>{{ buyScoreMap[item.id].score }}
                     </span>
                     <span class="score-rating-label">{{ scoreRatingInfo(buyScoreMap[item.id].rating).label }}</span>
                   </div>
@@ -4993,7 +4996,7 @@ function txDisplayAmount(tx) {
                   <div v-if="expandedScoreId === item.id && buyScoreMap[item.id]?.dimensions" class="score-detail">
                     <div class="score-detail-header">
                       <strong>4 维度评分明细</strong>
-                      <button class="btn-ghost btn-xs" @click="expandedScoreId = null">✕</button>
+                      <button class="btn-ghost btn-xs" @click="expandedScoreId = null"><Icon name="close" size="13" /></button>
                     </div>
                     <div v-for="(d, key) in buyScoreMap[item.id].dimensions" :key="key" class="score-dim-row">
                       <span class="dim-name">{{ { valuation: '估值 50%', price: '净值 25%', correlation: '相关 15%', concentration: '集中 10%' }[key] || key }}</span>
@@ -5013,14 +5016,14 @@ function txDisplayAmount(tx) {
                 <td class="notes-cell" :title="item.notes">{{ item.notes || '-' }}</td>
                 <td class="actions-cell">
                   <button v-if="signalStatusOf(item).status === 'green'" class="btn-primary btn-xs" @click="markWatchlistBought(item)" title="绿灯：一键标记已买入">✓ 买入</button>
-                  <button class="btn-ghost btn-xs" @click="editWatchlistItem(item)" title="编辑">✎</button>
+                  <button class="btn-ghost btn-xs" @click="editWatchlistItem(item)" title="编辑"><Icon name="pencil" size="13" /></button>
                   <!-- P2-4.3 估值历史图叠加 -->
-                  <button class="btn-ghost btn-xs" @click="openValuationChart(item)" title="查看估值历史图">📈</button>
-                  <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看净值走势">📊</button>
+                  <button class="btn-ghost btn-xs" @click="openValuationChart(item)" title="查看估值历史图"></button>
+                  <button class="btn-ghost btn-xs" @click="openWatchlistChart(item)" title="查看净值走势"></button>
                   <!-- P2-E（2026-07-21）信号历史轨迹图 -->
-                  <button class="btn-ghost btn-xs" @click="loadSignalHistory(item)" title="查看信号历史轨迹" :class="{ 'btn-active': expandedHistoryCode === item.fund_code }">🎯</button>
-                  <button class="btn-ghost btn-xs" @click="lookupWatchlistFund(item)" title="查询基金信息">🔍</button>
-                  <button class="btn-ghost btn-xs" style="color:var(--color-danger)" @click="deleteWatchlistItem(item)" title="移除">✕</button>
+                  <button class="btn-ghost btn-xs" @click="loadSignalHistory(item)" title="查看信号历史轨迹" :class="{ 'btn-active': expandedHistoryCode === item.fund_code }"></button>
+                  <button class="btn-ghost btn-xs" @click="lookupWatchlistFund(item)" title="查询基金信息"></button>
+                  <button class="btn-ghost btn-xs" style="color:var(--color-danger)" @click="deleteWatchlistItem(item)" title="移除"><Icon name="close" size="13" /></button>
                 </td>
               </tr>
               <!-- P2-E 信号历史轨迹展开行 -->
@@ -5028,8 +5031,8 @@ function txDisplayAmount(tx) {
                 <td colspan="8">
                   <div class="history-panel">
                     <div class="history-header">
-                      <strong>🎯 {{ item.fund_name }}（{{ item.fund_code }}）信号历史轨迹</strong>
-                      <button class="btn-ghost btn-xs" @click="expandedHistoryCode = null">✕ 关闭</button>
+                      <strong>{{ item.fund_name }}（{{ item.fund_code }}）信号历史轨迹</strong>
+                      <button class="btn-ghost btn-xs" @click="expandedHistoryCode = null"><Icon name="close" size="13" /> 关闭</button>
                     </div>
                     <div v-if="signalHistoryMap[item.fund_code]?.loading" class="loading-state">
                       <div class="spinner"></div><span>加载中...</span>
@@ -5073,7 +5076,7 @@ function txDisplayAmount(tx) {
         <div v-else-if="managerChanges.length" class="manager-changes">
           <div class="changes-header">
             <svg width="16" height="16" fill="none" stroke="#dc2626" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-            <strong>⚠️ 检测到基金经理变更</strong>
+            <strong><Icon name="warning" size="13" /> 检测到基金经理变更</strong>
           </div>
           <div v-for="c in managerChanges" :key="c.fund_code" class="change-item">
             <span class="change-fund">{{ c.fund_code }}</span>
@@ -5134,7 +5137,7 @@ function txDisplayAmount(tx) {
               </svg>
               {{ analyticsLoading ? '分析中...' : '刷新分析' }}
             </button>
-            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('analytics')">✕</button>
+            <button class="btn-ghost btn-sm" @click="switchAnalysisTab('analytics')"><Icon name="close" size="13" /></button>
           </div>
         </div>
 
@@ -5220,7 +5223,7 @@ function txDisplayAmount(tx) {
             </div>
             <div v-if="concentrationData.warnings && concentrationData.warnings.length" class="concentration-warnings">
               <div v-for="(w, i) in concentrationData.warnings" :key="i" class="warning-item">
-                <span class="warning-icon">⚠</span>
+                <span class="warning-icon"><Icon name="warning" size="14" /></span>
                 <span>{{ w }}</span>
               </div>
             </div>
@@ -5311,7 +5314,7 @@ function txDisplayAmount(tx) {
       <div class="summary-card summary-card-cash" @click="showCashModal = true" style="cursor:pointer">
         <div class="summary-label">
           零钱合计
-          <span style="font-size:0.65rem;opacity:0.6;margin-left:4px">✎</span>
+          <span style="font-size:0.65rem;opacity:0.6;margin-left:4px"><Icon name="pencil" size="13" /></span>
         </div>
         <div class="summary-value cash-value font-jet-lg">{{ formatMoney(totalCash) }}</div>
         <div class="summary-sub">可用 {{ formatMoney(summary.available_cash ?? totalCash) }} · 冻结 {{ formatMoney(summary.frozen_cash ?? 0) }} · 应收 {{ formatMoney(summary.receivable_cash ?? 0) }}</div>
@@ -5351,14 +5354,14 @@ function txDisplayAmount(tx) {
           @action="openAddForm"
         />
         <div style="text-align:center;margin-top:1rem">
-          <button class="btn-secondary" @click="switchAnalysisTab('watchlist')">⭐ 查看关注列表</button>
+          <button class="btn-secondary" @click="switchAnalysisTab('watchlist')">查看关注列表</button>
         </div>
       </div>
 
       <!-- 资产类别分布饼图 -->
       <div v-if="holdings.length > 0 && !loading" class="asset-category-section">
         <div class="asset-category-header">
-          <span class="asset-category-title">📊 资产类别分布</span>
+          <span class="asset-category-title">资产类别分布</span>
           <span class="asset-category-count">共 {{ assetCategoryData.length }} 类</span>
         </div>
         <div class="asset-category-chart">
@@ -5447,7 +5450,7 @@ function txDisplayAmount(tx) {
             <td v-else-if="col.key === 'actions'" class="actions-cell">
               <button class="btn-ghost btn-sm btn-primary-text" @click="openAddPurchase(h)" title="买入">↑买</button>
               <button class="btn-ghost btn-sm btn-sell-text" @click="openSell(h)" title="卖出">↓卖</button>
-              <button class="btn-ghost btn-sm btn-analysis-text" @click="openFundAnalysis(h)" title="基金分析">📊</button>
+              <button class="btn-ghost btn-sm btn-analysis-text" @click="openFundAnalysis(h)" title="基金分析"></button>
               <div class="action-more-wrap">
                 <button class="btn-ghost btn-sm" @click="toggleMoreActions(h.id)" title="更多">⋯</button>
                 <div v-if="moreActionsId === h.id" class="action-more-menu">
@@ -5684,7 +5687,7 @@ function txDisplayAmount(tx) {
           <div class="modal-box modal-wide">
             <h3 class="modal-title">
               {{ showAuditLog ? '操作日志' : '交易记录' }}
-              <button v-if="!showAuditLog" class="btn-ghost btn-sm" style="margin-left:auto" @click="loadAuditLog()">📋 操作日志</button>
+              <button v-if="!showAuditLog" class="btn-ghost btn-sm" style="margin-left:auto" @click="loadAuditLog()">操作日志</button>
               <button v-else class="btn-ghost btn-sm" style="margin-left:auto" @click="showAuditLog = false">← 返回交易记录</button>
             </h3>
 
@@ -5786,7 +5789,7 @@ function txDisplayAmount(tx) {
                     <td>
                       <div class="tx-tags-cell">
                         <span v-for="tag in (tx.tags || [])" :key="tag" class="badge badge-neutral badge-sm">{{ tag }}</span>
-                        <button class="btn-ghost btn-xs" @click="openTxTags(tx.id)" title="编辑标签">🏷️</button>
+                        <button class="btn-ghost btn-xs" @click="openTxTags(tx.id)" title="编辑标签"></button>
                       </div>
                     </td>
                     <td>
@@ -5870,7 +5873,7 @@ function txDisplayAmount(tx) {
               <div class="dip-4pct-config-section">
                 <label class="dip-4pct-toggle">
                   <input type="checkbox" v-model="newBuyForm.dip_4pct_enabled" />
-                  <span class="dip-4pct-title">🎯 启用4%定投法（雷牛牛方法论）</span>
+                  <span class="dip-4pct-title">启用4%定投法（雷牛牛方法论）</span>
                 </label>
                 <p class="dip-4pct-desc" v-if="!newBuyForm.dip_4pct_enabled">
                   估值锁底（百分位&lt;门槛）+ 跌幅触发（相对上一买入点跌≥设定值）+ 固定份数（10份）+ 机械纪律
@@ -6608,7 +6611,7 @@ function txDisplayAmount(tx) {
               <div class="tag-list">
                 <span v-for="tag in editingTxTags.tags" :key="tag" class="badge badge-info tag-item">
                   {{ tag }}
-                  <button class="tag-remove" @click="removeTagFromTx(tag)">✕</button>
+                  <button class="tag-remove" @click="removeTagFromTx(tag)"><Icon name="close" size="13" /></button>
                 </span>
                 <span v-if="!editingTxTags.tags.length" class="text-muted">暂无标签</span>
               </div>
@@ -7920,6 +7923,19 @@ select.input-field {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+  /* 头部按钮组原本是 nowrap 的横向 flex，4 个按钮总宽超出 390px 后被裁掉，
+     用户看不到最后一个操作。移动端允许换行。 */
+  .header-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .header-actions .btn-secondary,
+  .header-actions .btn-primary {
+    flex: 1 1 auto;
+    justify-content: center;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
   }
   .portfolio-workbench {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -10167,7 +10183,7 @@ select.input-field {
 .signal-light.sig-yellow { background: var(--color-warning-bg); color: var(--color-warning); }
 .signal-light.sig-red { background: var(--color-loss-bg); color: var(--color-loss); }
 .signal-light.sig-gray { background: var(--color-bg-hover); color: var(--color-text-muted); }
-.signal-icon { font-size: 0.8rem; }
+.signal-icon { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .signal-label { font-size: 0.72rem; }
 .signal-reason {
   font-size: 0.68rem;

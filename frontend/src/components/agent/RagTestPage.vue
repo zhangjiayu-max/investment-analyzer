@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
+import Icon from '../ui/Icon.vue'
 import { testRagSearch, submitRagFeedback } from '../../api'
 import { useToast } from '../../composables/useToast'
 
@@ -7,11 +8,11 @@ const { showToast } = useToast()
 
 // 知识类型选项
 const typeOptions = [
-  { key: 'all', label: '全部', icon: '🔍' },
-  { key: 'book', label: '蒸馏书籍', icon: '📖' },
-  { key: 'author_article', label: '作者文章', icon: '✍️' },
-  { key: 'linked_doc', label: '个人文档', icon: '📎' },
-  { key: 'skill', label: '技能文档', icon: '🛠️' },
+  { key: 'all', label: '全部', icon: '' },
+  { key: 'book', label: '蒸馏书籍', icon: '' },
+  { key: 'author_article', label: '作者文章', icon: '' },
+  { key: 'linked_doc', label: '个人文档', icon: '' },
+  { key: 'skill', label: '技能文档', icon: '' },
 ]
 
 const activeType = ref('all')
@@ -84,7 +85,7 @@ async function giveFeedback(result, rating) {
       rating,
     })
     feedbackGiven.value[key] = true
-    showToast(rating > 0 ? '已标记为有帮助 👍' : '已标记为无帮助 👎', 'success')
+    showToast(rating > 0 ? '已标记为有帮助' : '已标记为无帮助', 'success')
   } catch (e) {
     showToast('反馈失败: ' + (e.response?.data?.detail || e.message), 'error')
   }
@@ -195,7 +196,7 @@ async function giveFeedback(result, rating) {
 
       <!-- 结果列表 -->
       <div v-if="!filteredResults.length" class="empty-results">
-        <span class="empty-icon">📭</span>
+        <span class="empty-icon"></span>
         <p>{{ showOnlyPersonalized ? '没有被个性化加权的结果' : '无命中结果，试试换个查询词？' }}</p>
       </div>
 
@@ -233,13 +234,13 @@ async function giveFeedback(result, rating) {
               :disabled="feedbackGiven[`${r.reference_id}-1`]"
               @click="giveFeedback(r, 1)"
               title="有帮助"
-            >👍</button>
+            ><Icon name="thumbs-up" size="14" /></button>
             <button
               :class="['fb-btn fb-btn--down', { active: feedbackGiven[`${r.reference_id}--1`] }]"
               :disabled="feedbackGiven[`${r.reference_id}--1`]"
               @click="giveFeedback(r, -1)"
               title="无帮助"
-            >👎</button>
+            ><Icon name="thumbs-down" size="14" /></button>
           </div>
         </div>
       </div>
@@ -247,7 +248,7 @@ async function giveFeedback(result, rating) {
 
     <!-- 空状态 -->
     <div v-else-if="!testLoading" class="empty-state">
-      <span class="empty-icon">🔬</span>
+      <span class="empty-icon"><Icon name="microscope" size="28" /></span>
       <p class="empty-title">输入查询词开始测试</p>
       <p class="empty-hint">选择知识类型，输入查询词，查看检索命中效果</p>
     </div>

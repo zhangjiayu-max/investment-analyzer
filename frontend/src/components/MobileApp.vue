@@ -7,6 +7,7 @@ import ChatView from './ChatView.vue'
 import { isDark, toggleDark } from '../composables/useTheme'
 import AlertBell from './task/AlertBell.vue'
 import MobileNotificationCenter from './mobile/MobileNotificationCenter.vue'
+import Icon from './ui/Icon.vue'
 import { mobileMoreGroups, mobileTabs, getVisibleMobileMoreGroups } from '../mobileNavigation.js'
 import { useAppNavigation } from '../composables/useAppNavigation'
 import { isDevMode, setDevMode } from '../navigation.js'
@@ -251,7 +252,7 @@ function toggleDevMode() {
                 @click="navigate(item.key)"
                 :class="['mobile-more-item', { active: activePage === item.key, hot: item.hot }]"
               >
-                <span v-if="item.hot" class="mobile-more-hot">🔥</span>
+                <span v-if="item.hot" class="mobile-more-hot"><Icon name="fire" size="11" /></span>
                 <span class="mobile-more-label">{{ item.label }}</span>
               </button>
             </template>
@@ -284,26 +285,7 @@ function toggleDevMode() {
         @click="navigate(tab.key)"
         :class="['mobile-tab', { active: activePage === tab.key || (tab.key === '__more__' && showMoreMenu) }]"
       >
-        <!-- 看板 -->
-        <svg v-if="tab.icon === 'dashboard'" class="mobile-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
-        </svg>
-        <!-- 对话 -->
-        <svg v-else-if="tab.icon === 'chat'" class="mobile-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-        </svg>
-        <!-- 持仓 -->
-        <svg v-else-if="tab.icon === 'portfolio'" class="mobile-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2 7l10-4 10 4-10 4-10-4zM2 17l10 4 10-4M2 12l10 4 10-4"/>
-        </svg>
-        <!-- 估值 -->
-        <svg v-else-if="tab.icon === 'valuation'" class="mobile-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-        </svg>
-        <!-- 更多 -->
-        <svg v-else-if="tab.icon === 'more'" class="mobile-tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16"/>
-        </svg>
+        <Icon :name="tab.icon" :size="22" class="mobile-tab-icon" />
         <span class="mobile-tab-label">{{ tab.label }}</span>
       </button>
     </nav>
@@ -583,16 +565,16 @@ function toggleDevMode() {
 
 .mobile-more-hot {
   position: absolute;
-  top: 3px;
+  top: 4px;
   right: 4px;
-  font-size: 0.7rem;
-  line-height: 1;
-  filter: saturate(1.2);
+  display: flex;
+  color: var(--color-warning);
+  line-height: 0;
   z-index: 1;
 }
 .mobile-more-item.hot {
-  border-color: rgba(245, 158, 11, 0.3);
-  background: linear-gradient(135deg, rgba(255, 247, 237, 0.5), var(--color-bg-input));
+  border-color: var(--color-warning-border, rgba(245, 158, 11, 0.3));
+  background: var(--color-bg-input);
 }
 .mobile-more-item.hot.active {
   background: var(--color-primary-bg);
@@ -670,7 +652,7 @@ function toggleDevMode() {
 }
 
 .mobile-tab-label {
-  font-size: 0.66rem;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: -0.01em;
 }

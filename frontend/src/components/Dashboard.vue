@@ -810,8 +810,9 @@ function handlePanorama() {
         :class="['btn-canvas-toggle', { active: showDecisionCanvas }]"
         @click="showDecisionCanvas = !showDecisionCanvas"
       >
-        <span class="toggle-icon">{{ showDecisionCanvas ? '📋' : '📋' }}</span>
+        <Icon name="clipboard-list" size="15" class="toggle-icon" />
         <span class="toggle-text">决策画布</span>
+        <Icon :name="showDecisionCanvas ? 'chevron-up' : 'chevron-down'" size="14" class="toggle-chevron" />
       </button>
     </div>
 
@@ -879,7 +880,7 @@ function handlePanorama() {
     <!-- 今日持仓提示 Top 3 摘要 -->
     <div v-if="dailyAdvice || dailyAdviceLoading" class="advice-summary-card card editorial-card">
       <div class="advice-summary-header editorial-card-header">
-        <h3 class="advice-summary-title title">📋 今日持仓提示</h3>
+        <h3 class="advice-summary-title title">今日持仓提示</h3>
         <span v-if="dailyAdvice?.summary?.headline" class="advice-summary-headline">{{ dailyAdvice.summary.headline }}</span>
         <span v-if="dailyAdvice?.generated_at" class="advice-summary-time meta font-jet">{{ dailyAdvice.generated_at.slice(11, 16) }}</span>
       </div>
@@ -894,7 +895,9 @@ function handlePanorama() {
           <span class="advice-summary-suggestion" v-if="signal.suggestion">{{ signal.suggestion }}</span>
         </div>
       </div>
-      <div v-else class="advice-summary-empty">✅ 今日暂无需行动的提示</div>
+      <div v-else class="advice-summary-empty">
+        <Icon name="success" size="15" /> 今日暂无需行动的提示
+      </div>
       <button class="btn-secondary btn-sm advice-summary-btn" @click="emit('navigate', 'portfolio')">
         查看持仓行动工作台 →
       </button>

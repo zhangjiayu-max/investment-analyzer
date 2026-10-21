@@ -1376,7 +1376,7 @@ const tradeSuggestions = computed(() => {
 .tool-icon { font-size: 0.72rem; }
 .tool-icon.spinning { animation: spin 1.5s linear infinite; }
 .tool-name { font-weight: 600; color: var(--color-primary-600); }
-.tool-args { font-size: 0.65rem; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.tool-args { font-size: 0.7rem; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
 .tool-toggle { font-size: 0.6rem; color: var(--color-text-muted); margin-left: auto; transition: transform var(--transition-fast); }
 .tool-toggle.expanded { transform: rotate(180deg); }
 .inline-icon { vertical-align: middle; }
@@ -1526,7 +1526,7 @@ const tradeSuggestions = computed(() => {
   .specialist-analysis { padding: 0.6rem 0.75rem; font-size: 0.78rem; }
   .tool-call-header { gap: 0.3rem; font-size: 0.72rem; }
   .tool-name { font-size: 0.72rem; }
-  .tool-args { max-width: 120px; font-size: 0.62rem; }
+  .tool-args { max-width: 120px; font-size: 0.7rem; }
   .tool-calls-container { padding-left: 0.35rem; }
   .specialist-failed-notice { padding: 0.4rem 0.75rem; font-size: 0.7rem; }
   .tool-empty-notice { padding: 0.35rem 0.6rem; font-size: 0.65rem; }

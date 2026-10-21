@@ -306,7 +306,7 @@ function openKycWizard() {
 }
 
 .conv-time {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
 }
 

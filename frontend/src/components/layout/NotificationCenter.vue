@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
+import Icon from '../ui/Icon.vue'
 
 const props = defineProps({
   // 是否默认展开
@@ -118,19 +119,19 @@ function clearAll() {
 function getIcon(n) {
   const cat = n.category || n.type
   const icons = {
-    watchlist_signal_change: '🔔',
-    valuation: '📊',
-    strategy: '🎯',
-    info: 'ℹ️',
-    warning: '⚠️',
-    error: '❌',
-    success: '✅',
-    alert: '🚨',
-    news: '📰',
-    decision: '🧭',
-    system: '⚙️',
+    watchlist_signal_change: 'bell',
+    valuation: 'chart',
+    strategy: 'target',
+    info: 'info',
+    warning: 'warning',
+    error: 'error',
+    success: 'success',
+    alert: 'siren',
+    news: 'newspaper',
+    decision: 'book-open',
+    system: 'config',
   }
-  return icons[cat] || '📌'
+  return icons[cat] || 'info'
 }
 
 function formatTime(ts) {
@@ -245,7 +246,7 @@ onUnmounted(() => {
                 :class="['notif-item', { unread: !n.read, [`cat-${n.category || n.type}`]: true }]"
                 @click="onNotificationClick(n)"
               >
-                <span class="notif-icon">{{ getIcon(n) }}</span>
+                <span class="notif-icon"><Icon :name="getIcon(n)" size="16" /></span>
                 <div class="notif-content">
                   <div class="notif-title-text">{{ n.title }}</div>
                   <div class="notif-message">{{ n.message }}</div>

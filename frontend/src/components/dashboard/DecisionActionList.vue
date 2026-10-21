@@ -419,7 +419,7 @@ function precheckState(decisionId) {
 .decision-card__status {
   padding: 0.12rem 0.42rem;
   border-radius: var(--radius-xs);
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 800;
   background: var(--color-bg-input);
   color: var(--color-text-secondary);
@@ -479,7 +479,7 @@ function precheckState(decisionId) {
   flex: 0 0 auto;
   min-width: 3.3rem;
   color: var(--color-primary);
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 800;
 }
 

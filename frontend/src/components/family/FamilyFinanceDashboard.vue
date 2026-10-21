@@ -639,7 +639,13 @@ onBeforeUnmount(() => { ++dashboardSequence; ++trendSequence })
 
 @media (max-width: 760px) {
   .finance-page { padding: var(--space-4); }
-  .page-head { flex-direction: column; }
+  /* 页头在手机上塌成竖排后，原本靠 margin-left:auto 右浮的月份选择器和
+     两个宽度不一的按钮会排成参差的左对齐块。这里统一铺满、等宽，主次靠色阶区分。 */
+  .page-head { flex-direction: column; align-items: stretch; gap: 0.55rem; }
+  .month-selector { margin-left: 0; justify-content: space-between; }
+  .month-selector input { flex: 1; width: auto; }
+  .page-head .btn-secondary,
+  .page-head .btn-primary { width: 100%; justify-content: center; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hero-metric strong { font-size: 1.4rem; }
   .trend-summary { flex-wrap: wrap; gap: var(--space-3); }

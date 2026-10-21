@@ -31,7 +31,7 @@ function formatDuration(ms) {
 }
 
 function statusLabel(s) {
-  return { completed: '✅ 完成', failed: '❌ 失败', cancelled: '⏹ 已取消', running: '⏳ 执行中' }[s] || s
+  return { completed: '完成', failed: '失败', cancelled: '已取消', running: '执行中' }[s] || s
 }
 
 function errorCategoryLabel(c) {

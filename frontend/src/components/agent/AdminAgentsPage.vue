@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, onDeactivated, computed } from 'vue'
+import Icon from '../ui/Icon.vue'
 import { listAgents, getAgent, updateAgent, deleteAgent, listAnalysisAgents, updateAnalysisAgent, generateAgentPrompt, listAgentVersions, rollbackAgentPrompt, listAnalysisAgentVersions, rollbackAnalysisAgentPrompt, getAgentRegressionResult } from '../../api'
 import ConfirmDialog from '../layout/ConfirmDialog.vue'
 import AppToast from '../layout/AppToast.vue'
@@ -126,12 +127,12 @@ function scoreColor(score) {
 }
 
 function statusIcon(status) {
-  if (status === 'improved') return '📈'
-  if (status === 'degraded') return '📉'
-  if (status === 'error') return '❌'
+  if (status === 'improved') return 'trending-up'
+  if (status === 'degraded') return 'trending-down'
+  if (status === 'error') return 'error'
   if (status === 'new') return '🆕'
   if (status === 'skipped') return '⏭'
-  return '➡️'
+  return 'minus'
 }
 
 function startEdit() {
@@ -327,10 +328,10 @@ function copyPrompt(text) {
 
 function getAgentIcon(icon) {
   const icons = {
-    chart: '📊', research: '🔍', shield: '🛡️', pie: '🥧', robot: '🤖',
-    newspaper: '📰', search: '🔍', bull: '🐂',
+    chart: '', research: '', shield: '', pie: '', robot: '',
+    newspaper: '', search: '', bull: '',
   }
-  return icons[icon] || '🤖'
+  return icons[icon] || ''
 }
 
 onMounted(loadAgents)

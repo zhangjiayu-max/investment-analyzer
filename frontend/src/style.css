@@ -1049,13 +1049,33 @@ select.input-field {
 
 @media (max-width: 768px) {
   .card { padding: 0.75rem; min-height: auto; }
+  /* 移动端表格：表格自身成为横向滚动容器。
+     关键点是 thead/tbody 必须复原为 table 布局 —— 只把 table 设成 block 会让
+     列宽计算失效，单元格溢出到视口外被 overflow-x:hidden 裁掉，右侧数据直接消失。 */
   table, .data-table, .list-table {
     display: block;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     white-space: nowrap;
     max-width: 100%;
+    overscroll-behavior-x: contain;
   }
+  table > thead,
+  table > tbody {
+    display: table;
+    width: max-content;
+    min-width: 100%;
+    border-collapse: collapse;
+  }
+  table > thead > tr,
+  table > tbody > tr { display: table-row; }
+  table > thead > tr > th,
+  table > tbody > tr > td { display: table-cell; }
+  /* 移动端最小字号兜底：11px 以下在手机上已经无法辨认 */
+  .fin-table { font-size: 0.75rem; }
+  /* 触控目标：可点元素最小 40px（Apple HIG 建议 44，这里对紧凑列表取 40） */
+  .btn:not(.btn-sm):not(.btn-xs) { min-height: 40px; }
+  .filter-tab, .status-tab, .analysis-tab, .seg-btn, .pill-btn { min-height: 32px; }
   /* 在专用滚动容器内的表格保持 table 布局，由容器负责横向滚动 */
   .table-scroll-wrap > table {
     display: table;
@@ -1335,6 +1355,13 @@ body[data-density="compact"] .fin-table th { padding: 0.3rem 0.6rem; }
   .editorial-metric .value { font-size: 1.05rem; }
   .bg-grid { background-size: 20px 20px; }
   .reveal-stagger { animation-delay: 0.03s !important; }
+  /* 标签字号下限 11px：0.62rem(9.9px)/0.66rem(10.6px) 在手机上已难以辨认，
+     这类终端标签承担的是字段名，读不清等于丢失信息层级。 */
+  .terminal-label,
+  .keyword-tag,
+  .item-subcategory,
+  .filter-count,
+  .stat-label { font-size: 0.6875rem; }
 }
 @media (max-width: 480px) {
   .editorial-title-lg { font-size: 1.1rem; }

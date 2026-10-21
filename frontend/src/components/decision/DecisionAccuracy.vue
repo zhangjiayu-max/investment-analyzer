@@ -46,6 +46,9 @@ const overall = computed(() => {
 })
 
 const rateColor = computed(() => {
+  // 没有已验证样本 ≠ 准确率差。0% 涂红会被读成"系统判断全错"，
+  // 实际含义是"还没有样本"，必须用中性色区分开。
+  if (!overall.value.total) return 'var(--color-text-muted)'
   const r = overall.value.rate
   if (r >= 70) return 'var(--color-success)'
   if (r >= 50) return 'var(--color-warning)'
@@ -238,12 +241,15 @@ onMounted(loadAll)
     <!-- 总体准确率 -->
     <section v-if="stats" class="overall-hero editorial-card reveal-stagger">
       <div class="rate-circle" :style="{ borderColor: rateColor }">
-        <span class="rate-number font-jet-lg" :style="{ color: rateColor }">{{ pct(overall.rate) }}</span>
+        <span class="rate-number font-jet-lg" :style="{ color: rateColor }">
+          {{ overall.total ? pct(overall.rate) : '—' }}
+        </span>
       </div>
       <div class="overall-info">
         <span class="overall-title editorial-title">总体准确率</span>
         <div class="overall-meta">
           <span class="terminal-label">已验证 <strong class="font-jet">{{ overall.total }}</strong> 条</span>
+          <span v-if="!overall.total" class="terminal-label">尚未产生样本，暂无准确率</span>
           <span class="terminal-label">正确 <strong class="font-jet positive">{{ overall.correct }}</strong> 条</span>
         </div>
         <span v-if="stats?.period" class="overall-period terminal-label">统计周期：{{ stats.period }}</span>

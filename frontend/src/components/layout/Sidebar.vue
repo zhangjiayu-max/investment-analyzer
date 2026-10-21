@@ -114,7 +114,7 @@ const activeGroup = computed(() => {
         >
           <Icon :name="item.icon" size="18" class="nav-icon" />
           <span class="nav-label">{{ item.label }}</span>
-          <span v-if="item.hot" class="nav-hot-badge">🔥</span>
+          <span v-if="item.hot" class="nav-hot-badge"><Icon name="fire" size="11" /></span>
         </button>
 
         <!-- Group item (has children) -->
@@ -138,7 +138,7 @@ const activeGroup = computed(() => {
             >
               <Icon :name="child.icon" size="16" class="nav-icon" />
               <span class="nav-label">{{ child.label }}</span>
-              <span v-if="child.hot" class="nav-hot-badge">🔥</span>
+              <span v-if="child.hot" class="nav-hot-badge"><Icon name="fire" size="11" /></span>
             </button>
           </div>
         </div>
@@ -315,7 +315,9 @@ const activeGroup = computed(() => {
 
 /* Hot badge */
 .nav-hot-badge {
-  font-size: 10px;
+  display: flex;
+  align-items: center;
+  color: var(--color-gold);
   margin-left: auto;
   flex-shrink: 0;
 }

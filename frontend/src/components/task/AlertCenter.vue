@@ -1,6 +1,7 @@
 <script setup>
 import PortfolioRiskOverview from '../portfolio/PortfolioRiskOverview.vue'
 import { ref, computed, watch } from 'vue'
+import Icon from '../ui/Icon.vue'
 import {
   listAlerts, getUnreadAlertCount, markAlertRead, deleteAlert, scanPortfolioAlerts,
   dailyAdviceAPI, getAlertHistory, comprehensiveInterpretation, acknowledgeAlert,
@@ -527,7 +528,7 @@ usePageRefresh(refreshAll)
         AI 正在综合解读今日全部信号...
       </div>
       <div v-else-if="comprehensiveError" class="comprehensive-error">
-        <span>⚠ {{ comprehensiveError }}</span>
+        <span class="comprehensive-error-text"><Icon name="warning" size="14" /> {{ comprehensiveError }}</span>
       </div>
       <div v-else-if="comprehensiveResult" class="comprehensive-result">
         <div class="comprehensive-result-header editorial-card-header">
@@ -536,7 +537,7 @@ usePageRefresh(refreshAll)
           <span class="signal-count">
             基于 <span class="font-jet">{{ comprehensiveResult.signal_count }}</span> 条信号
           </span>
-          <button class="btn-ghost btn-xs" @click="comprehensiveResult = null">✕</button>
+          <button class="btn-ghost btn-xs" title="关闭" @click="comprehensiveResult = null"><Icon name="close" size="14" /></button>
         </div>
         <div class="comprehensive-text" v-html="renderMarkdown(comprehensiveResult.interpretation)"></div>
       </div>
@@ -625,7 +626,7 @@ usePageRefresh(refreshAll)
       </div>
 
       <div v-else-if="dailyAdvice" class="advice-empty">
-        <span>✅ 今日暂无需行动的持仓提示</span>
+        <span class="advice-empty-text"><Icon name="success" size="15" /> 今日暂无需行动的持仓提示</span>
         <button class="btn-ghost btn-sm" @click="handleAdviceAction(null, 'refresh')">手动生成</button>
       </div>
     </section>
@@ -1355,7 +1356,7 @@ usePageRefresh(refreshAll)
   flex-wrap: wrap;
 }
 .severity-mark {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1473,7 +1474,7 @@ usePageRefresh(refreshAll)
 
 /* 业务确认状态标签 */
 .alert-ack-tag {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1607,7 +1608,7 @@ usePageRefresh(refreshAll)
 
 /* ── P0-2 可靠性徽章 ── */
 .reliability-badge {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;

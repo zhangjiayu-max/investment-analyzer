@@ -339,7 +339,7 @@ function scoreColor(score) {
           <div class="eval-details">
             <div v-for="d in evalResult.details" :key="d.index" class="eval-detail-item">
               <span :class="['relevance-badge', d.relevance]">
-                {{ d.relevance === 'relevant' ? '✅ 相关' : d.relevance === 'partial' ? '⚠️ 部分' : '❌ 不相关' }}
+                {{ d.relevance === 'relevant' ? '相关' : d.relevance === 'partial' ? '部分' : '不相关' }}
               </span>
               <span class="eval-detail-type">{{ d.content_type }}</span>
               <span class="eval-detail-title">{{ d.title }}</span>

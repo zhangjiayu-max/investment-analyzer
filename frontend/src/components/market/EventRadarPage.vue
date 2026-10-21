@@ -1544,7 +1544,7 @@ watch(scrollToFundCode, async (code) => {
                     </template>
                     <!-- Batch2 增强点 3：时间衰减后的有效置信度 -->
                     <template v-if="evt.effective_confidence != null && Math.abs((evt.effective_confidence || 0) - (evt.confidence || 0)) > 0.001">
-                      ⚠️ 有效 {{ Math.round((evt.effective_confidence || 0) * 100) }}%
+                      有效 {{ Math.round((evt.effective_confidence || 0) * 100) }}%
                     </template>
                   </span>
                   <!-- 已有缓存的影响分析标记 -->
@@ -1862,7 +1862,7 @@ watch(scrollToFundCode, async (code) => {
       <!-- ════ 今日操作建议 ════ -->
       <div v-if="watchlist.length" class="daily-advice-banner">
         <div class="da-content">
-          <span class="da-icon">💡</span>
+          <Icon name="lightbulb" size="15" class="da-icon" />
           <span class="da-text" v-if="watchlistStats.canBuy > 0">
             <strong>{{ watchlistStats.canBuy }}</strong> 只基金可上车，建议优先关注<strong>「{{ firstCanBuyFund }}」</strong>
             <span v-if="firstCanBuyInfo">（估值分位{{ firstCanBuyInfo.percentile }}%，距上车价{{ firstCanBuyInfo.distance }}）</span>
@@ -1873,16 +1873,16 @@ watch(scrollToFundCode, async (code) => {
           <span class="da-text" v-else>暂无上车信号，继续等待</span>
         </div>
         <div class="da-tags">
-          <span class="da-tag da-tag-green" :class="{ active: watchlistFilter === 'canBuy' }" @click="toggleWatchlistFilter('canBuy')">🟢 可上车 {{ watchlistStats.canBuy }}</span>
-          <span class="da-tag da-tag-yellow" :class="{ active: watchlistFilter === 'approaching' }" @click="toggleWatchlistFilter('approaching')">🟡 接近 {{ watchlistStats.approaching }}</span>
-          <span class="da-tag da-tag-red" :class="{ active: watchlistFilter === 'waiting' }" @click="toggleWatchlistFilter('waiting')">🔴 等待 {{ watchlistStats.waiting }}</span>
-          <span v-if="watchlistStats.noData" class="da-tag da-tag-gray" :class="{ active: watchlistFilter === 'noData' }" @click="toggleWatchlistFilter('noData')">⚪ 数据不足 {{ watchlistStats.noData }}</span>
+          <span class="da-tag da-tag-green" :class="{ active: watchlistFilter === 'canBuy' }" @click="toggleWatchlistFilter('canBuy')">可上车 {{ watchlistStats.canBuy }}</span>
+          <span class="da-tag da-tag-yellow" :class="{ active: watchlistFilter === 'approaching' }" @click="toggleWatchlistFilter('approaching')">接近 {{ watchlistStats.approaching }}</span>
+          <span class="da-tag da-tag-red" :class="{ active: watchlistFilter === 'waiting' }" @click="toggleWatchlistFilter('waiting')">等待 {{ watchlistStats.waiting }}</span>
+          <span v-if="watchlistStats.noData" class="da-tag da-tag-gray" :class="{ active: watchlistFilter === 'noData' }" @click="toggleWatchlistFilter('noData')">数据不足 {{ watchlistStats.noData }}</span>
           <!-- Batch1 增强点 1：退出信号统计（止盈/止损） -->
           <span v-if="watchlistStats.profitTargets" class="da-tag da-tag-profit" title="已触发止盈目标的持仓">
-            🎯 止盈 {{ watchlistStats.profitTargets }}
+            止盈 {{ watchlistStats.profitTargets }}
           </span>
           <span v-if="watchlistStats.stopLosses" class="da-tag da-tag-stop" title="已触发止损线的持仓">
-            ⛔ 止损 {{ watchlistStats.stopLosses }}
+            止损 {{ watchlistStats.stopLosses }}
           </span>
         </div>
       </div>
@@ -1892,7 +1892,7 @@ watch(scrollToFundCode, async (code) => {
           <div class="collapsible-header-left">
             <Icon :name="expandedPortfolio ? 'chevron-down' : 'chevron-right'" size="14" />
             <Icon name="activity" size="16" class="pi-header-icon" />
-            <span class="collapsible-title">📊 组合智能</span>
+            <span class="collapsible-title">组合智能</span>
             <span v-if="portfolioData?.health_score != null" class="collapsible-badge" :class="scoreColorClass(portfolioData.health_score)">{{ portfolioData.health_score }}分</span>
           </div>
           <button class="btn-pi-refresh" @click.stop="loadPortfolioIntelligence" :disabled="loadingPortfolio">
@@ -2175,7 +2175,7 @@ watch(scrollToFundCode, async (code) => {
           <div class="collapsible-header-left">
             <Icon :name="expandedMasterBacktest ? 'chevron-down' : 'chevron-right'" size="14" />
             <Icon name="target" size="16" class="mb-header-icon" />
-            <span class="collapsible-title">🎯 大师决策回测</span>
+            <span class="collapsible-title">大师决策回测</span>
             <span v-if="masterBacktestStats?.accuracy != null" class="collapsible-badge" :class="masterBacktestStats.accuracy >= 0.6 ? 'score-good' : 'score-warn'">胜率 {{ (masterBacktestStats.accuracy * 100).toFixed(0) }}%</span>
           </div>
           <button class="btn-mb-refresh" @click.stop="verifyMasters" :disabled="verifyingMasters">
@@ -2726,7 +2726,7 @@ watch(scrollToFundCode, async (code) => {
                 class="master-matrix"
               >
                 <div class="mm-header">
-                  <span class="mm-title">🎯 大师理念矩阵</span>
+                  <span class="mm-title">大师理念矩阵</span>
                 </div>
                 <template v-if="fundReports[item.fund_code].master_perspectives.consensus">
                   <div
@@ -3931,22 +3931,26 @@ watch(scrollToFundCode, async (code) => {
   border-color: var(--color-border);
   background: var(--color-bg-secondary);
 }
-.stat-card.stat-active {
-  border-color: var(--color-border);
-  background: var(--color-bg-secondary);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-}
 .stat-card.stat-active .stat-value {
   font-weight: 800;
 }
-.stat-all { border-left-color: var(--color-text-tertiary); }
-.stat-holding { border-left-color: #dc2626; }
-.stat-watchlist-hit { border-left-color: #ea580c; }
-.stat-opportunity { border-left-color: #d97706; }
-/* P0-3（2026-07-21）信号命中率 chip：青色边框区分 */
-.stat-hit-rate { border-left-color: #0891b2; cursor: default; }
-.stat-hit-rate .stat-value { color: #0891b2; }
-.stat-watch { border-left-color: #2563eb; }
+/* 竖线只承载语义，不做装饰。
+   原先 6 种色（灰/红/橙/橙/青/蓝）在手机上红橙、青蓝几乎不可分辨，
+   等于只制造了彩虹感却读不出信息。现在：中性 = 普通计数，
+   风险色 = 持仓影响，主色 = 当前筛选命中。 */
+.stat-card.stat-active {
+  border-color: var(--color-primary);
+  background: var(--color-bg-secondary);
+  box-shadow: inset 0 0 0 1px var(--color-primary-border);
+}
+.stat-all { border-left-color: var(--color-border); }
+.stat-holding { border-left-color: var(--color-danger); }
+.stat-watchlist-hit { border-left-color: var(--color-border); }
+.stat-opportunity { border-left-color: var(--color-border); }
+/* 信号命中率 chip：数值本身有语义，保留强调色 */
+.stat-hit-rate { border-left-color: var(--color-info, var(--color-primary)); cursor: default; }
+.stat-hit-rate .stat-value { color: var(--color-info, var(--color-primary)); }
+.stat-watch { border-left-color: var(--color-border); }
 .stat-value {
   font-size: 1.5rem;
   font-weight: 700;
@@ -4076,7 +4080,7 @@ watch(scrollToFundCode, async (code) => {
   font-family: var(--font-jet);
 }
 .event-date-sub {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   color: var(--color-text-tertiary);
   margin-top: 0.25rem;
   font-family: var(--font-jet);
@@ -4111,7 +4115,7 @@ watch(scrollToFundCode, async (code) => {
 }
 .event-type-tag {
   flex-shrink: 0;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   padding: 0.15rem 0.5rem;
   border-radius: 3px;
   background: var(--color-bg-tertiary);
@@ -4125,7 +4129,7 @@ watch(scrollToFundCode, async (code) => {
   flex-wrap: wrap;
 }
 .relevance-tag, .status-tag, .direction-tag, .confidence-tag {
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   padding: 0.18rem 0.5rem;
   border-radius: 3px;
   font-weight: 500;
@@ -4313,10 +4317,21 @@ watch(scrollToFundCode, async (code) => {
 /* 响应式 */
 @media (max-width: 768px) {
   .event-radar-page { padding: 0.5rem; }
-  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 0.35rem; }
-  .event-time-col { width: 48px; }
-  .event-date-badge { font-size: 0.68rem; padding: 0.15rem 0.35rem; }
-  .event-date-sub { font-size: 0.62rem; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 0.4rem; }
+  /* 5 张卡在 2 列栅格里会留下半格空洞，让末项跨满整行 */
+  .stats-row > .stat-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  /* 时间列由竖排改横排：48px 宽装不下 2026-10-31，会折成 "2026-10-" / "31" */
+  .event-card { flex-direction: column; gap: 0.5rem; padding: 0.75rem 0.85rem; }
+  .event-time-col {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.45rem;
+    width: auto;
+    order: -1;
+  }
+  .event-date-sub { margin-top: 0; }
+  .timeline-line { display: none; }
   .filter-bar { flex-direction: column; align-items: stretch; gap: 0.4rem; }
 
   /* 顶部标题区 —— 纵向布局，避免标题与按钮挤压 */
@@ -4351,7 +4366,7 @@ watch(scrollToFundCode, async (code) => {
   .event-content-col { flex: 1; min-width: 0; }
   .event-title { font-size: 0.84rem; line-height: 1.35; word-break: break-word; }
   .event-title-row { gap: 0.3rem; margin-bottom: 0.3rem; flex-wrap: wrap; }
-  .event-type-tag { font-size: 0.62rem; padding: 0.1rem 0.35rem; }
+  .event-type-tag { font-size: 0.7rem; padding: 0.1rem 0.35rem; }
   .event-meta-row { gap: 0.25rem; }
   .relevance-tag,
   .status-tag,
@@ -4359,8 +4374,8 @@ watch(scrollToFundCode, async (code) => {
   .confidence-tag,
   .time-frame-tag { font-size: 0.62rem; padding: 0.12rem 0.35rem; }
   .event-summary { font-size: 0.76rem; line-height: 1.5; margin-bottom: 0.4rem; word-break: break-word; }
-  .section-label { font-size: 0.64rem; }
-  .chip { font-size: 0.64rem; padding: 0.1rem 0.35rem; }
+  .section-label { font-size: 0.7rem; }
+  .chip { font-size: 0.7rem; padding: 0.1rem 0.35rem; }
   
   /* 验证标签在移动端更小 */
   .verify-tag { font-size: 0.62rem; padding: 0.12rem 0.4rem; }
@@ -4368,7 +4383,7 @@ watch(scrollToFundCode, async (code) => {
   /* ── 事件卡片内容格式优化 ── */
   /* 事件段落间距收紧，标签更紧凑 */
   .event-section { margin-top: 0.4rem; }
-  .section-label { font-size: 0.66rem; margin-right: 0.35rem; }
+  .section-label { font-size: 0.7rem; margin-right: 0.35rem; }
   .tag-list { gap: 0.25rem; }
 
   /* 候选基金卡片 —— 移动端换行，避免名称与按钮挤压 */

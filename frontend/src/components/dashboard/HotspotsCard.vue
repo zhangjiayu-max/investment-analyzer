@@ -1001,7 +1001,7 @@ const verdictMeta = {
   margin-bottom: 0.3rem;
 }
 .sector-tag {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
   background: var(--color-info-bg);

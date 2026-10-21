@@ -1,5 +1,6 @@
 <script setup>
 import MarkdownActions from '../ui/MarkdownActions.vue'
+import Icon from '../ui/Icon.vue'
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
   listEvalCases, createEvalCase, updateEvalCase, deleteEvalCase, runEvalCase, runEvalBatch,
@@ -104,7 +105,7 @@ async function loadAgents() {
       // 用 agent_key（如 valuation_expert）作为 value
       const key = agent.agent_key
       if (!analysisTypeOptions.value.find(o => o.value === key)) {
-        analysisTypeOptions.value.push({ value: key, label: `${agent.icon || '🤖'} ${agent.name}` })
+        analysisTypeOptions.value.push({ value: key, label: `${agent.icon || ''} ${agent.name}` })
       }
     })
   } catch (e) {
@@ -369,9 +370,9 @@ function formatDuration(ms) {
 }
 
 function runStatusIcon(r) {
-  if (r.error_msg || r.score_status === 'error') return '❌'
+  if (r.error_msg || r.score_status === 'error') return 'error'
   if (r.score_status === 'skipped') return '⏭'
-  if (r.score !== null && r.score > 0) return '✅'
+  if (r.score !== null && r.score > 0) return 'success'
   return '⏳'
 }
 function scoreStateLabel(r) { return { pending:'评分中...',skipped:'已跳过评分',error:'评分失败' }[r.score_status] || '待评分' }
@@ -445,21 +446,21 @@ onUnmounted(() => {
       </div>
       <div class="header-actions">
         <button class="btn-primary btn-sm" @click="loadAll" :disabled="loading">
-          {{ loading ? '加载中...' : '🔄 刷新' }}
+          {{ loading ? '加载中...' : '刷新' }}
         </button>
         <!-- 桌面端：4 个次级操作按钮 -->
         <template v-if="!isMobile">
           <button class="btn-secondary btn-sm" @click="confirmAction('自动生成用例', '从现有对话和反馈生成新用例？', doAutoGenerate)" :disabled="autoGenerating">
-            {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
+            {{ autoGenerating ? '生成中...' : '自动生成用例' }}
           </button>
           <button class="btn-secondary btn-sm" @click="confirmAction('批量转化', '将未转化的 Bad Case 创建为评测用例？', doBatchConvert)" :disabled="converting">
-            {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
+            {{ converting ? '转化中...' : 'BadCase→用例' }}
           </button>
           <button class="btn-secondary btn-sm" @click="confirmAction('提取对话', '从真实对话提取用例并生成质量标准？', doExtractConversations)" :disabled="extracting">
-            {{ extracting ? '提取中...' : '💬 对话→用例' }}
+            {{ extracting ? '提取中...' : '对话→用例' }}
           </button>
           <button class="btn-secondary btn-sm" @click="confirmAction('自动回归', '执行真实 Agent 回归并评分，最多20条？', doAutoRegression)" :disabled="regressing">
-            {{ regressing ? '回归中...' : '🚀 自动回归' }}
+            {{ regressing ? '回归中...' : '自动回归' }}
           </button>
         </template>
         <!-- 移动端：「更多操作」下拉 -->
@@ -470,16 +471,16 @@ onUnmounted(() => {
           <Transition name="fade">
             <div v-if="showMoreMenu" class="more-dropdown" @click="showMoreMenu = false">
               <button class="more-item" @click="confirmAction('自动生成用例', '从现有对话和反馈生成新用例？', doAutoGenerate)" :disabled="autoGenerating">
-                {{ autoGenerating ? '生成中...' : '✨ 自动生成用例' }}
+                {{ autoGenerating ? '生成中...' : '自动生成用例' }}
               </button>
               <button class="more-item" @click="confirmAction('批量转化', '将未转化的 Bad Case 创建为评测用例？', doBatchConvert)" :disabled="converting">
-                {{ converting ? '转化中...' : '🧲 BadCase→用例' }}
+                {{ converting ? '转化中...' : 'BadCase→用例' }}
               </button>
               <button class="more-item" @click="confirmAction('提取对话', '从真实对话提取用例并生成质量标准？', doExtractConversations)" :disabled="extracting">
-                {{ extracting ? '提取中...' : '💬 对话→用例' }}
+                {{ extracting ? '提取中...' : '对话→用例' }}
               </button>
               <button class="more-item" @click="confirmAction('自动回归', '执行真实 Agent 回归并评分，最多20条？', doAutoRegression)" :disabled="regressing">
-                {{ regressing ? '回归中...' : '🚀 自动回归' }}
+                {{ regressing ? '回归中...' : '自动回归' }}
               </button>
             </div>
           </Transition>
@@ -517,7 +518,7 @@ onUnmounted(() => {
       </div>
       <div v-if="regressionResult.degraded?.length" class="degraded-list">
         <div v-for="d in regressionResult.degraded" :key="d.case_id" class="degraded-item">
-          ⚠️ {{ d.name }} — 近3次分数: <span class="font-jet">{{ d.scores?.join(', ') }}</span>
+          {{ d.name }} — 近3次分数: <span class="font-jet">{{ d.scores?.join(', ') }}</span>
         </div>
       </div>
       <div class="regression-details">
@@ -631,13 +632,13 @@ onUnmounted(() => {
             <div v-if="c.description" class="case-desc">{{ c.description }}</div>
             <div class="case-actions">
               <button class="btn-secondary btn-xs" @click="toggleCaseDetail(c.id)">
-                {{ expandedCases.has(c.id) ? '收起' : '📋 详情' }}
+                {{ expandedCases.has(c.id) ? '收起' : '详情' }}
               </button>
               <button class="btn-secondary btn-xs" :disabled="evalBusy" @click="confirmAction('运行评测', `运行「${c.name}」并进行质量评估？`, () => doRun(c))">
                 {{ runningCases.has(c.id) ? '⏳ 运行中' : '▶ 运行' }}
               </button>
-              <button class="btn-secondary btn-xs" @click="openEdit(c)">✏️ 编辑</button>
-              <button class="btn-danger btn-xs" @click="confirmBeforeDelete(c)">🗑️</button>
+              <button class="btn-secondary btn-xs" @click="openEdit(c)"><Icon name="pencil" size="12" /> 编辑</button>
+              <button class="btn-danger btn-xs" title="删除" @click="confirmBeforeDelete(c)"><Icon name="trash" size="12" /></button>
             </div>
 
             <!-- 详情展开 -->
@@ -646,12 +647,12 @@ onUnmounted(() => {
                 <div class="detail-block">
                   <label>输入参数</label>
                   <pre class="detail-code">{{ formatParams(c.input_params) }}</pre>
-                  <button class="copy-btn" @click="copyToClipboard(formatParams(c.input_params), '输入参数')">📋 复制</button>
+                  <button class="copy-btn" @click="copyToClipboard(formatParams(c.input_params), '输入参数')">复制</button>
                 </div>
                 <div class="detail-block">
                   <label>期望质量标准</label>
                   <div class="detail-quality">{{ c.expected_quality || '未设置' }}</div>
-                  <button class="copy-btn" @click="copyToClipboard(c.expected_quality || '', '质量标准')">📋 复制</button>
+                  <button class="copy-btn" @click="copyToClipboard(c.expected_quality || '', '质量标准')">复制</button>
                 </div>
                 <div v-if="c.description" class="detail-block">
                   <label>描述</label>
@@ -736,7 +737,7 @@ onUnmounted(() => {
         <div class="run-detail" :class="{ 'mobile-hide': isMobile && mobileRunView !== 'detail' }" v-if="runDetail">
           <div class="detail-header">
             <h4 class="section-title terminal-label">运行详情</h4>
-            <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null; mobileRunView = 'list'">✕ 关闭</button>
+            <button class="btn-secondary btn-xs" @click="runDetail = null; selectedRun = null; mobileRunView = 'list'"><Icon name="close" size="12" /> 关闭</button>
           </div>
 
           <!-- Meta Grid -->
@@ -775,7 +776,7 @@ onUnmounted(() => {
 
           <!-- Error -->
           <div v-if="runDetail.error_msg" class="error-card">
-            <span class="error-icon">❌</span>
+            <span class="error-icon"><Icon name="error" size="15" /></span>
             <span>{{ runDetail.error_msg }}</span>
           </div>
 
@@ -783,7 +784,7 @@ onUnmounted(() => {
           <div v-if="runDetail.input_params && runDetail.input_params !== '{}'" class="detail-section">
             <div class="detail-section-head">
               <h5 class="terminal-label">输入参数</h5>
-              <button class="copy-btn" @click="copyToClipboard(runDetail.input_params, '输入参数')">📋 复制</button>
+              <button class="copy-btn" @click="copyToClipboard(runDetail.input_params, '输入参数')">复制</button>
             </div>
             <pre class="code-block">{{ (() => { try { return JSON.stringify(JSON.parse(runDetail.input_params), null, 2) } catch { return runDetail.input_params } })() }}</pre>
           </div>
@@ -792,7 +793,7 @@ onUnmounted(() => {
           <div v-if="runDetail.expected_quality" class="detail-section">
             <div class="detail-section-head">
               <h5 class="terminal-label">预期质量标准</h5>
-              <button class="copy-btn" @click="copyToClipboard(runDetail.expected_quality, '质量标准')">📋 复制</button>
+              <button class="copy-btn" @click="copyToClipboard(runDetail.expected_quality, '质量标准')">复制</button>
             </div>
             <pre class="code-block quality-block">{{ runDetail.expected_quality }}</pre>
           </div>

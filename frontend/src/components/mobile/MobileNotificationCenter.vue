@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
+import Icon from '../ui/Icon.vue'
 
 const props = defineProps({
   modelValue: {
@@ -79,19 +80,19 @@ function markAllAsRead() {
 function getNotificationIcon(n) {
   const cat = n.category || n.type
   const icons = {
-    info: 'ℹ️',
-    warning: '⚠️',
-    error: '❌',
-    success: '✅',
-    valuation: '📊',
-    strategy: '🎯',
-    watchlist_signal_change: '🔔',
-    alert: '🚨',
-    news: '📰',
-    decision: '🧭',
-    system: '⚙️',
+    info: 'info',
+    warning: 'warning',
+    error: 'error',
+    success: 'success',
+    valuation: 'chart',
+    strategy: 'target',
+    watchlist_signal_change: 'bell',
+    alert: 'siren',
+    news: 'newspaper',
+    decision: 'book-open',
+    system: 'config',
   }
-  return icons[cat] || '📌'
+  return icons[cat] || 'info'
 }
 
 function formatTime(ts) {
@@ -154,7 +155,7 @@ onUnmounted(() => {
             :class="['notification-item', { unread: !notification.read }]"
             @click="onNotificationClick(notification)"
           >
-            <span class="notification-icon">{{ getNotificationIcon(notification) }}</span>
+            <span class="notification-icon"><Icon :name="getNotificationIcon(notification)" size="16" /></span>
             <div class="notification-content">
               <div class="notification-title-text">{{ notification.title }}</div>
               <div class="notification-message">{{ notification.message }}</div>
