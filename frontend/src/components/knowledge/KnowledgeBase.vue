@@ -672,10 +672,16 @@ function renderContent(content) {
   .search-eyebrow {
     align-self: flex-start;
   }
+  /* 筛选 pills 保持横排换行：改成 column 会把每个药丸拉成整行宽度，
+     一屏只能看到 1 个筛选项，横向浪费严重。让标签单独占一行即可。 */
   .filter-bar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.5rem;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+  }
+  .filter-label {
+    width: 100%;
   }
   .item-importance {
     margin-left: 0;

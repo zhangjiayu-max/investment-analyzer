@@ -1483,7 +1483,9 @@ watch(scrollToFundCode, async (code) => {
                 <template v-if="isTrendEvent(evt)">趋势</template>
                 <template v-else>{{ formatDate(evt.expected_date) }}</template>
               </div>
-              <div class="event-date-sub">{{ evt.expected_date || (isTrendEvent(evt) ? timeFrameLabel(evt.time_frame) : '') }}</div>
+              <!-- 副标题只在趋势事件显示时间区间：定时事件 badge 里已经是完整日期，
+                   再贴一条一模一样的日期只会制造重复信息。 -->
+              <div v-if="isTrendEvent(evt) && evt.time_frame" class="event-date-sub">{{ timeFrameLabel(evt.time_frame) }}</div>
               <div v-if="idx < filteredEvents.length - 1" class="timeline-line"></div>
             </div>
 
