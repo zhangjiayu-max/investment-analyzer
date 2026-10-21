@@ -407,6 +407,7 @@ def diagnose_behavior(user_id: str = "default", period_days: int = 90) -> dict:
             user_id=user_id, start_date=start_date, end_date=end_date,
             limit=10000, include_system=False,
         )
+        txs = [tx for tx in txs if tx.get("status") in {"confirmed", "settled"}]
     except Exception as e:
         logger.error(f"获取交易记录失败: {e}")
         txs = []

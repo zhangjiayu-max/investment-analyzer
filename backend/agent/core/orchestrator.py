@@ -571,11 +571,33 @@ def resolve_confirm(confirm_id: str, user_choice: str):
 def _execute_specialist_cached(tool_name: str, query: str,
                                 cancel_event=None, prebuilt_context: str = "",
                                 budget_mode: str = "normal", trace_id: str = "") -> str:
-    """带缓存的专家执行。同一专家+同一上下文 5 分钟内复用，支持语义缓存。"""
+    """专家缓存仅在同一请求、完整上下文与运行配置一致时复用。"""
     from db.config import get_config_int, get_config_float
 
     # 从 tool_name 提取 agent_key(去掉 consult_ 前缀)
     agent_key = tool_name.replace("consult_", "") if tool_name.startswith("consult_") else tool_name
+
+    # 先对原始上下文取指纹，角色过滤省略的信息也属于请求身份。
+    # 缺少请求追踪或无法读取配置时禁用缓存，不回退成跨会话的公共键。
+    context_hash = None
+    if trace_id:
+        try:
+            from db._conn import DB_PATH
+            from db.config import list_configs
+            cost_routing = _is_cost_routing_enabled()
+            scope = {
+                "database": str(DB_PATH), "trace_id": trace_id,
+                "context": prebuilt_context,
+                "budget_mode": budget_mode, "cost_routing": cost_routing,
+                "model": _get_model_for_agent(agent_key, budget_mode) if cost_routing else MODEL,
+                "agent": load_specialist_agents().get(agent_key),
+                "config": {row["key"]: row["value"] for row in list_configs()},
+            }
+            context_hash = hashlib.sha256(json.dumps(
+                scope, sort_keys=True, ensure_ascii=False, default=str
+            ).encode("utf-8")).hexdigest()
+        except Exception as exc:
+            logger.debug("专家缓存作用域不可用，本次独立执行: %s", exc)
 
     # 缺口 4：上下文隔离 — 按 agent_key 过滤上下文（白名单+优先级+预算填充）
     try:
@@ -583,8 +605,6 @@ def _execute_specialist_cached(tool_name: str, query: str,
         prebuilt_context = filter_context_for_agent(prebuilt_context, agent_key)
     except Exception as _e:
         logger.debug(f"上下文过滤跳过: {_e}")
-
-    context_hash = hashlib.md5(prebuilt_context.encode("utf-8")).hexdigest()[:16] if prebuilt_context else ""
 
     # 应用配置覆盖默认缓存参数（线程安全）
     try:
@@ -594,11 +614,10 @@ def _execute_specialist_cached(tool_name: str, query: str,
     except Exception:
         pass
 
-    cached = expert_cache.get(query, agent_key, context_hash=context_hash)
+    cached = expert_cache.get(query, agent_key, context_hash=context_hash) if context_hash else None
     if cached is not None:
         logger.info(f"专家缓存命中: {tool_name}")
-        cached["_cached"] = True
-        return json.dumps(cached, ensure_ascii=False)
+        return json.dumps({**cached, "_cached": True}, ensure_ascii=False)
 
     result_str = _execute_specialist(tool_name, query,
                                      cancel_event=cancel_event,
@@ -607,7 +626,7 @@ def _execute_specialist_cached(tool_name: str, query: str,
                                      trace_id=trace_id)
     try:
         obj = json.loads(result_str)
-        if "error" not in obj:
+        if context_hash and "error" not in obj:
             expert_cache.put(query, agent_key, obj, context_hash=context_hash)
     except Exception:
         pass

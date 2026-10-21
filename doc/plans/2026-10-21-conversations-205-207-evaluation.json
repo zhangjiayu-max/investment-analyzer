@@ -1,0 +1,833 @@
+{
+  "evaluated_on": "2026-10-21",
+  "method": "existing_rule_evaluator_plus_manual_source_audit",
+  "scope": "latest assistant message per conversation; earlier failures in 205 checked separately",
+  "llm_judge_used": false,
+  "evolution_triggered": false,
+  "evaluations": [
+    {
+      "conversation_id": 205,
+      "message_id": 612,
+      "auto_score": 49,
+      "auto_score_breakdown": {
+        "execution": 72.7,
+        "data": 88.3,
+        "collaboration": 65.0,
+        "response": 100,
+        "accuracy": 60,
+        "completeness": 100,
+        "practicality": 100,
+        "timeliness": 100,
+        "risk_warning": 80
+      },
+      "dimensions": [
+        {
+          "name": "execution",
+          "score": 72.68,
+          "weight": 0.15,
+          "metrics": {
+            "duration_score": 92.8,
+            "duration_seconds": 192.0,
+            "duration_status": "recorded",
+            "duration_source": "stream_channels",
+            "duplicate_calls": 1,
+            "duplicate_penalty": 15
+          },
+          "details": [
+            "耗时 192s（simple复杂度阈值: 良好<30s）",
+            "检测到 1 次重复调用（扣15分）"
+          ]
+        },
+        {
+          "name": "data",
+          "score": 88.33333333333333,
+          "weight": 0.2,
+          "metrics": {
+            "rag_hits": 2,
+            "rag_rate": 0.6666666666666666,
+            "tool_success_rate": 1.0,
+            "successful_tools": 15,
+            "total_tools": 15,
+            "has_portfolio_data": true,
+            "has_valuation_data": true,
+            "is_bond_topic": false,
+            "has_asset_allocation_data": true
+          },
+          "details": [
+            "RAG命中: 2/3 (67%)",
+            "工具调用成功率: 15/15 (100%)",
+            "✓ 引用了用户持仓数据",
+            "✓ 引用了估值数据"
+          ]
+        },
+        {
+          "name": "collaboration",
+          "score": 65.0,
+          "weight": 0.15,
+          "metrics": {
+            "specialist_coverage": 1.0,
+            "expected_specialists": 1,
+            "actual_specialists": 3,
+            "has_cross_review": false,
+            "has_arbitration": false,
+            "has_disagreement": false
+          },
+          "details": [
+            "专家覆盖: 3/1 (100%)"
+          ]
+        },
+        {
+          "name": "response",
+          "score": 100,
+          "weight": 0.15,
+          "metrics": {
+            "structure": {
+              "headers": true,
+              "tables": true,
+              "lists": true,
+              "bold": true
+            },
+            "data_citation": {
+              "numbers": true,
+              "percentages": true,
+              "specific_data": true
+            },
+            "has_risk_warning": true,
+            "actionability_score": 100,
+            "action_keywords_count": 7,
+            "has_confidence_statement": true
+          },
+          "details": [
+            "结构化: ✓ 标题 ✓ 表格",
+            "数据引用: ✓ 具体指标",
+            "✓ 包含风险提示",
+            "可操作性: 7 个行动关键词",
+            "✓ 包含置信度声明"
+          ]
+        },
+        {
+          "name": "accuracy",
+          "score": 60,
+          "weight": 0.1,
+          "metrics": {
+            "total_data_points": 101,
+            "unique_data_points": 39,
+            "repeated_mentions": 62,
+            "cross_validated_count": 0,
+            "has_source_attribution": true,
+            "incomplete_tool_results": 8,
+            "verification_status": "unverified",
+            "quality_gates": {
+              "source_type": "unverified",
+              "metric_type": "unverified",
+              "unit": "unverified",
+              "date": "unverified",
+              "causal_evidence": "unverified",
+              "intent": "unverified"
+            },
+            "factual_issues": [],
+            "has_data_contradiction": false
+          },
+          "details": [
+            "重复引用不构成交叉核验，规则检查不能证明全部事实正确。",
+            "事实未核验：来源类型、指标类型、单位、日期、因果与意图需要明确核验记录。"
+          ]
+        },
+        {
+          "name": "completeness",
+          "score": 100,
+          "weight": 0.1,
+          "metrics": {
+            "coverage_rate": 1.0,
+            "covered_aspects": 5,
+            "total_aspects": 5,
+            "content_length": 7348
+          },
+          "details": [
+            "✓ 覆盖：估值分析",
+            "✓ 覆盖：风险评估",
+            "✓ 覆盖：市场环境",
+            "✓ 覆盖：操作建议",
+            "✓ 覆盖：配置建议",
+            "✓ 内容详尽（7348字）"
+          ]
+        },
+        {
+          "name": "practicality",
+          "score": 100,
+          "weight": 0.05,
+          "metrics": {
+            "vague_expressions": 0,
+            "practicality_score": 100
+          },
+          "details": [
+            "✓ 包含：具体操作",
+            "✓ 包含：具体金额/比例",
+            "✓ 包含：触发条件",
+            "✓ 包含：时间框架"
+          ]
+        },
+        {
+          "name": "timeliness",
+          "score": 100,
+          "weight": 0.05,
+          "metrics": {
+            "has_recent_date": true,
+            "has_stale_data_marker": true
+          },
+          "details": [
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了相对时间：今天|今日",
+            "✓ 引用了相对时间：近期|最近|最新"
+          ]
+        },
+        {
+          "name": "risk_warning",
+          "score": 80,
+          "weight": 0.05,
+          "metrics": {
+            "risk_score": 80,
+            "has_risk_warning": true,
+            "full_content_len": 7348,
+            "arbitration_text_len": 0
+          },
+          "details": [
+            "✓ 包含：直接风险提示",
+            "✓ 包含：风险类型",
+            "✓ 包含：风险量化",
+            "✓ 包含：风险应对"
+          ]
+        }
+      ],
+      "metadata": {
+        "complexity": "simple",
+        "specialist_count": 3,
+        "duration_ms": 192000.0,
+        "duration_source": "stream_channels",
+        "verification_status": "unverified",
+        "score_cap": 49,
+        "execution_status": "failed",
+        "completion_status": "degraded",
+        "has_cross_review": false,
+        "has_arbitration": false
+      },
+      "suggestions": [
+        "🤝 建议增加专家分歧识别，让仲裁法官更好地综合不同观点",
+        "整体评分上限49分：交付状态或事实核验门槛未通过；规则评分仅作质量诊断。",
+        "人工审计：message 612 仅恢复专家结果，综合报告因进程重启未完成；前两次为连接失败。",
+        "人工审计：缺乏资金/做空证据时不应断言资金撤离与情绪踩踏；原因咨询不应擅自扩展为具体交易方案。"
+      ],
+      "saved_evaluation_id": 23
+    },
+    {
+      "conversation_id": 206,
+      "message_id": 614,
+      "auto_score": 49,
+      "auto_score_breakdown": {
+        "execution": 80.0,
+        "data": 73.8,
+        "collaboration": 80.0,
+        "response": 100,
+        "accuracy": 40,
+        "completeness": 100,
+        "practicality": 65,
+        "timeliness": 100,
+        "risk_warning": 80
+      },
+      "dimensions": [
+        {
+          "name": "execution",
+          "score": 80.0,
+          "weight": 0.15,
+          "metrics": {
+            "duration_score": 80,
+            "duration_seconds": 225.931,
+            "duration_status": "recorded",
+            "duration_source": "execution_traces",
+            "duplicate_calls": 0,
+            "duplicate_penalty": 0
+          },
+          "details": [
+            "耗时 226s（complex复杂度阈值: 良好<120s）"
+          ]
+        },
+        {
+          "name": "data",
+          "score": 73.75,
+          "weight": 0.2,
+          "metrics": {
+            "rag_hits": 1,
+            "rag_rate": 0.25,
+            "tool_success_rate": 1.0,
+            "successful_tools": 37,
+            "total_tools": 37,
+            "has_portfolio_data": true,
+            "has_valuation_data": true,
+            "is_bond_topic": false,
+            "has_asset_allocation_data": true
+          },
+          "details": [
+            "RAG命中: 1/4 (25%)",
+            "工具调用成功率: 37/37 (100%)",
+            "✓ 引用了用户持仓数据",
+            "✓ 引用了估值数据"
+          ]
+        },
+        {
+          "name": "collaboration",
+          "score": 80.0,
+          "weight": 0.15,
+          "metrics": {
+            "specialist_coverage": 1.0,
+            "expected_specialists": 2,
+            "actual_specialists": 4,
+            "has_cross_review": false,
+            "has_arbitration": {
+              "verdict": "建议观望等待",
+              "confidence": "low",
+              "key_conflicts": [],
+              "reasoning": "【裁决】观望等待（consensus模式）\n【分歧】专家立场一致，未检测到方向性冲突\n【解决】0 位专家立场一致支持该方向，采纳共识结论\n【置信度依据】未能从专家分析中识别明确立场，置信度低",
+              "expert_verdicts": [
+                {
+                  "agent": "资产配置师",
+                  "agent_key": "allocation_advisor",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                },
+                {
+                  "agent": "行为金融学专家",
+                  "agent_key": "behavioral_advisor",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                },
+                {
+                  "agent": "风险管理师",
+                  "agent_key": "risk_assessor",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                }
+              ],
+              "stance_source": "keyword_fallback",
+              "consistency_warning": "",
+              "asset_actions": [],
+              "portfolio_stance": "watch"
+            },
+            "has_disagreement": false
+          },
+          "details": [
+            "专家覆盖: 4/2 (100%)",
+            "⚠ complex任务未触发交叉审阅",
+            "✓ 触发了仲裁"
+          ]
+        },
+        {
+          "name": "response",
+          "score": 100,
+          "weight": 0.15,
+          "metrics": {
+            "structure": {
+              "headers": true,
+              "tables": true,
+              "lists": true,
+              "bold": true
+            },
+            "data_citation": {
+              "numbers": true,
+              "percentages": true,
+              "specific_data": true
+            },
+            "has_risk_warning": true,
+            "actionability_score": 100,
+            "action_keywords_count": 7,
+            "has_confidence_statement": true
+          },
+          "details": [
+            "结构化: ✓ 标题 ✓ 表格",
+            "数据引用: ✓ 具体指标",
+            "✓ 包含风险提示",
+            "可操作性: 7 个行动关键词",
+            "✓ 包含置信度声明"
+          ]
+        },
+        {
+          "name": "accuracy",
+          "score": 40,
+          "weight": 0.1,
+          "metrics": {
+            "total_data_points": 13,
+            "unique_data_points": 12,
+            "repeated_mentions": 1,
+            "cross_validated_count": 0,
+            "has_source_attribution": true,
+            "incomplete_tool_results": 0,
+            "verification_status": "failed",
+            "quality_gates": {
+              "source_type": "unverified",
+              "metric_type": "unverified",
+              "unit": "unverified",
+              "date": "unverified",
+              "causal_evidence": "not_applicable",
+              "intent": "unverified"
+            },
+            "factual_issues": [
+              "cross_review_budget_exhausted"
+            ],
+            "has_data_contradiction": true
+          },
+          "details": [
+            "重复引用不构成交叉核验，规则检查不能证明全部事实正确。",
+            "事实或意图门槛未通过：cross_review_budget_exhausted"
+          ]
+        },
+        {
+          "name": "completeness",
+          "score": 100,
+          "weight": 0.1,
+          "metrics": {
+            "coverage_rate": 1.0,
+            "covered_aspects": 5,
+            "total_aspects": 5,
+            "content_length": 4810
+          },
+          "details": [
+            "✓ 覆盖：估值分析",
+            "✓ 覆盖：风险评估",
+            "✓ 覆盖：市场环境",
+            "✓ 覆盖：操作建议",
+            "✓ 覆盖：配置建议",
+            "✓ 内容详尽（4810字）"
+          ]
+        },
+        {
+          "name": "practicality",
+          "score": 65,
+          "weight": 0.05,
+          "metrics": {
+            "vague_expressions": 1,
+            "practicality_score": 65
+          },
+          "details": [
+            "✓ 包含：具体操作",
+            "✓ 包含：具体金额/比例",
+            "✓ 包含：触发条件",
+            "⚠ 包含 1 个模糊表达"
+          ]
+        },
+        {
+          "name": "timeliness",
+          "score": 100,
+          "weight": 0.05,
+          "metrics": {
+            "has_recent_date": true,
+            "has_stale_data_marker": true
+          },
+          "details": [
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-16",
+            "✓ 引用了近期日期：2026-10-18",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-16",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-19",
+            "✓ 引用了近期日期：2026-10-18",
+            "✓ 引用了相对时间：近期|最近|最新"
+          ]
+        },
+        {
+          "name": "risk_warning",
+          "score": 80,
+          "weight": 0.05,
+          "metrics": {
+            "risk_score": 80,
+            "has_risk_warning": true,
+            "full_content_len": 4810,
+            "arbitration_text_len": 248
+          },
+          "details": [
+            "✓ 包含：直接风险提示",
+            "✓ 包含：风险量化",
+            "✓ 包含：风险应对",
+            "✓ 包含：免责声明"
+          ]
+        }
+      ],
+      "metadata": {
+        "complexity": "complex",
+        "specialist_count": 4,
+        "duration_ms": 225931,
+        "duration_source": "execution_traces",
+        "verification_status": "failed",
+        "score_cap": 49,
+        "execution_status": "failed",
+        "completion_status": "degraded",
+        "has_cross_review": false,
+        "has_arbitration": true
+      },
+      "suggestions": [
+        "整体评分上限49分：交付状态或事实核验门槛未通过；规则评分仅作质量诊断。",
+        "人工审计：三位专家全部截断，审查预算耗尽；需统一输入成本与输出额度口径。",
+        "人工审计：最近交易上下文混入假设交易，不能解释为流水滞后或真实频繁加仓。",
+        "人工审计：全 unknown 专家不能形成共识；当前降级应明确展示实际原因。"
+      ],
+      "saved_evaluation_id": 24
+    },
+    {
+      "conversation_id": 207,
+      "message_id": 616,
+      "auto_score": 49,
+      "auto_score_breakdown": {
+        "execution": 80.0,
+        "data": 65.0,
+        "collaboration": 80.0,
+        "response": 100,
+        "accuracy": 40,
+        "completeness": 100,
+        "practicality": 100,
+        "timeliness": 100,
+        "risk_warning": 80
+      },
+      "dimensions": [
+        {
+          "name": "execution",
+          "score": 80.0,
+          "weight": 0.15,
+          "metrics": {
+            "duration_score": 80,
+            "duration_seconds": 236.401,
+            "duration_status": "recorded",
+            "duration_source": "execution_traces",
+            "duplicate_calls": 0,
+            "duplicate_penalty": 0
+          },
+          "details": [
+            "耗时 236s（complex复杂度阈值: 良好<120s）"
+          ]
+        },
+        {
+          "name": "data",
+          "score": 65.0,
+          "weight": 0.2,
+          "metrics": {
+            "rag_hits": 0,
+            "rag_rate": 0.0,
+            "tool_success_rate": 1.0,
+            "successful_tools": 41,
+            "total_tools": 41,
+            "has_portfolio_data": true,
+            "has_valuation_data": true,
+            "is_bond_topic": false,
+            "has_asset_allocation_data": true
+          },
+          "details": [
+            "RAG命中: 0/4 (0%)",
+            "工具调用成功率: 41/41 (100%)",
+            "✓ 引用了用户持仓数据",
+            "✓ 引用了估值数据"
+          ]
+        },
+        {
+          "name": "collaboration",
+          "score": 80.0,
+          "weight": 0.15,
+          "metrics": {
+            "specialist_coverage": 1.0,
+            "expected_specialists": 2,
+            "actual_specialists": 4,
+            "has_cross_review": false,
+            "has_arbitration": {
+              "verdict": "建议观望等待",
+              "confidence": "low",
+              "key_conflicts": [],
+              "reasoning": "【裁决】观望等待（consensus模式）\n【分歧】专家立场一致，未检测到方向性冲突\n【解决】0 位专家立场一致支持该方向，采纳共识结论\n【置信度依据】未能从专家分析中识别明确立场，置信度低",
+              "expert_verdicts": [
+                {
+                  "agent": "估值分析师",
+                  "agent_key": "valuation_expert",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                },
+                {
+                  "agent": "风险管理师",
+                  "agent_key": "risk_assessor",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                },
+                {
+                  "agent": "资产配置师",
+                  "agent_key": "allocation_advisor",
+                  "verdict": "unknown",
+                  "confidence": 0.0,
+                  "source": "keyword_fallback"
+                }
+              ],
+              "stance_source": "keyword_fallback",
+              "consistency_warning": "",
+              "asset_actions": [],
+              "portfolio_stance": "watch"
+            },
+            "has_disagreement": false
+          },
+          "details": [
+            "专家覆盖: 4/2 (100%)",
+            "⚠ complex任务未触发交叉审阅",
+            "✓ 触发了仲裁"
+          ]
+        },
+        {
+          "name": "response",
+          "score": 100,
+          "weight": 0.15,
+          "metrics": {
+            "structure": {
+              "headers": true,
+              "tables": true,
+              "lists": true,
+              "bold": true
+            },
+            "data_citation": {
+              "numbers": true,
+              "percentages": true,
+              "specific_data": true
+            },
+            "has_risk_warning": true,
+            "actionability_score": 100,
+            "action_keywords_count": 7,
+            "has_confidence_statement": true
+          },
+          "details": [
+            "结构化: ✓ 标题 ✓ 表格",
+            "数据引用: ✓ 具体指标",
+            "✓ 包含风险提示",
+            "可操作性: 7 个行动关键词",
+            "✓ 包含置信度声明"
+          ]
+        },
+        {
+          "name": "accuracy",
+          "score": 40,
+          "weight": 0.1,
+          "metrics": {
+            "total_data_points": 40,
+            "unique_data_points": 31,
+            "repeated_mentions": 9,
+            "cross_validated_count": 0,
+            "has_source_attribution": true,
+            "incomplete_tool_results": 0,
+            "verification_status": "failed",
+            "quality_gates": {
+              "source_type": "unverified",
+              "metric_type": "unverified",
+              "unit": "unverified",
+              "date": "unverified",
+              "causal_evidence": "not_applicable",
+              "intent": "unverified"
+            },
+            "factual_issues": [
+              "cross_review_budget_exhausted"
+            ],
+            "has_data_contradiction": true
+          },
+          "details": [
+            "重复引用不构成交叉核验，规则检查不能证明全部事实正确。",
+            "事实或意图门槛未通过：cross_review_budget_exhausted"
+          ]
+        },
+        {
+          "name": "completeness",
+          "score": 100,
+          "weight": 0.1,
+          "metrics": {
+            "coverage_rate": 1.0,
+            "covered_aspects": 5,
+            "total_aspects": 5,
+            "content_length": 6746
+          },
+          "details": [
+            "✓ 覆盖：估值分析",
+            "✓ 覆盖：风险评估",
+            "✓ 覆盖：市场环境",
+            "✓ 覆盖：操作建议",
+            "✓ 覆盖：配置建议",
+            "✓ 内容详尽（6746字）"
+          ]
+        },
+        {
+          "name": "practicality",
+          "score": 100,
+          "weight": 0.05,
+          "metrics": {
+            "vague_expressions": 0,
+            "practicality_score": 100
+          },
+          "details": [
+            "✓ 包含：具体操作",
+            "✓ 包含：具体金额/比例",
+            "✓ 包含：触发条件",
+            "✓ 包含：时间框架"
+          ]
+        },
+        {
+          "name": "timeliness",
+          "score": 100,
+          "weight": 0.05,
+          "metrics": {
+            "has_recent_date": true,
+            "has_stale_data_marker": true
+          },
+          "details": [
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-21",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了近期日期：2026-10-20",
+            "✓ 引用了相对时间：今天|今日",
+            "✓ 引用了相对时间：近期|最近|最新"
+          ]
+        },
+        {
+          "name": "risk_warning",
+          "score": 80,
+          "weight": 0.05,
+          "metrics": {
+            "risk_score": 80,
+            "has_risk_warning": true,
+            "full_content_len": 6746,
+            "arbitration_text_len": 246
+          },
+          "details": [
+            "✓ 包含：直接风险提示",
+            "✓ 包含：风险类型",
+            "✓ 包含：风险量化",
+            "✓ 包含：风险应对"
+          ]
+        }
+      ],
+      "metadata": {
+        "complexity": "complex",
+        "specialist_count": 4,
+        "duration_ms": 236401,
+        "duration_source": "execution_traces",
+        "verification_status": "failed",
+        "score_cap": 49,
+        "execution_status": "failed",
+        "completion_status": "degraded",
+        "has_cross_review": false,
+        "has_arbitration": true
+      },
+      "suggestions": [
+        "📚 知识库引用不足（0%），建议增加RAG检索提升数据支撑",
+        "整体评分上限49分：交付状态或事实核验门槛未通过；规则评分仅作质量诊断。",
+        "人工审计：所谓10月20日已买入21986.07元对应交易680—683，全部is_hypothetical=1，不得用于真实成交、冷却期和行为诊断。",
+        "人工审计：三位专家全部截断，审查预算耗尽；需压缩综合输入并保障专家与审查输出。",
+        "人工审计：仲裁没有有效支持票，不能宣称专家一致；降低权益目标的前提表述方向错误。",
+        "人工审计：昨收数据不能反驳今日盘中观察，今日涨跌表述需核对数据日期。"
+      ],
+      "saved_evaluation_id": 25
+    }
+  ],
+  "reproductions": {
+    "output_limit": 1333,
+    "review_remaining_after_10000_tokens": 0,
+    "arbitration": {
+      "query": "今天有什么可以加仓的",
+      "final_stance": "watch",
+      "portfolio_stance": "watch",
+      "asset_actions": [],
+      "arbitration_mode": "consensus",
+      "reasons": [],
+      "supporting_agents": [],
+      "shared_evidence": {},
+      "disagreements": [],
+      "verdict": "建议观望等待",
+      "confidence": "low",
+      "key_conflicts": [],
+      "reasoning": "【裁决】观望等待（consensus模式）\n【分歧】专家立场一致，未检测到方向性冲突\n【解决】0 位专家立场一致支持该方向，采纳共识结论\n【置信度依据】未能从专家分析中识别明确立场，置信度低",
+      "has_valuation_data": false,
+      "valuation_gap": false,
+      "expert_verdicts": [
+        {
+          "agent": "估值分析师",
+          "agent_key": "valuation_expert",
+          "verdict": "unknown",
+          "confidence": 0.0,
+          "source": "keyword_fallback"
+        },
+        {
+          "agent": "风险管理师",
+          "agent_key": "risk_assessor",
+          "verdict": "unknown",
+          "confidence": 0.0,
+          "source": "keyword_fallback"
+        },
+        {
+          "agent": "资产配置师",
+          "agent_key": "allocation_advisor",
+          "verdict": "unknown",
+          "confidence": 0.0,
+          "source": "keyword_fallback"
+        }
+      ],
+      "stance_source": "keyword_fallback",
+      "invalid_specialists": [
+        "allocation_advisor",
+        "risk_assessor",
+        "valuation_expert"
+      ],
+      "consistency_warning": ""
+    },
+    "hypothetical_transactions": [
+      {
+        "id": 680,
+        "fund_code": "020256",
+        "amount": 4385.71,
+        "transaction_date": "2026-10-20",
+        "status": "confirmed",
+        "is_hypothetical": 1
+      },
+      {
+        "id": 681,
+        "fund_code": "013309",
+        "amount": 8381.31,
+        "transaction_date": "2026-10-20",
+        "status": "confirmed",
+        "is_hypothetical": 1
+      },
+      {
+        "id": 682,
+        "fund_code": "012725",
+        "amount": 4970.28,
+        "transaction_date": "2026-10-20",
+        "status": "confirmed",
+        "is_hypothetical": 1
+      },
+      {
+        "id": 683,
+        "fund_code": "008929",
+        "amount": 4248.77,
+        "transaction_date": "2026-10-20",
+        "status": "confirmed",
+        "is_hypothetical": 1
+      }
+    ],
+    "hypothetical_total": 21986.07
+  }
+}

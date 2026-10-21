@@ -195,31 +195,38 @@ def build_portfolio_context(user_id: str = "default", snapshot: dict | None = No
 
         # ── 最近交易记录（10条）──
         try:
-            from db._conn import _get_conn as _get_conn_inner
-            _conn = _get_conn_inner()
-            _trades = _conn.execute("""
-                SELECT transaction_date, fund_code, fund_name, transaction_type, amount, shares, status
-                FROM portfolio_transactions
-                WHERE user_id = ? AND status IN ('confirmed', 'pending')
-                ORDER BY transaction_date DESC, created_at DESC
-                LIMIT 10
-            """, (user_id,)).fetchall()
-            _conn.close()
-            if _trades:
+            from db.portfolio import list_transactions
+            # 按状态分别限量，避免待确认记录挤掉真实成交；公共查询排除系统/假设。
+            completed = sorted(
+                list_transactions(user_id=user_id, status="confirmed", limit=10)
+                + list_transactions(user_id=user_id, status="settled", limit=10),
+                key=lambda row: (row.get("transaction_date") or "", row.get("id") or 0),
+                reverse=True,
+            )[:10]
+            pending = sorted(
+                list_transactions(user_id=user_id, status="pending", limit=10)
+                + list_transactions(user_id=user_id, status="submitted", limit=10),
+                key=lambda row: (row.get("transaction_date") or "", row.get("id") or 0),
+                reverse=True,
+            )[:10]
+            for title, _trades in (("最近真实成交", completed), ("待确认交易（不计入成交或冷却期）", pending)):
+                if not _trades:
+                    continue
                 lines.append("")
-                lines.append("### 最近交易记录")
+                lines.append(f"### {title}")
                 lines.append("| 日期 | 基金 | 操作 | 金额 | 份额 | 状态 |")
                 lines.append("|------|------|------|------|------|------|")
                 for _t in _trades:
                     _td = dict(_t) if not isinstance(_t, dict) else _t
                     _type_label = {"buy": "买入", "sell": "卖出", "dividend": "分红"}.get(_td.get("transaction_type", ""), _td.get("transaction_type", ""))
-                    _status_label = {"confirmed": "已确认", "pending": "待确认"}.get(_td.get("status", ""), _td.get("status", ""))
+                    _status_label = {"confirmed": "已确认", "settled": "已结算", "pending": "待确认", "submitted": "已提交待确认"}.get(_td.get("status", ""), _td.get("status", ""))
                     _name = _td.get("fund_name") or _td.get("fund_code", "未知")
                     _amt = _td.get("amount", 0) or 0
                     _shares = _td.get("shares", 0) or 0
                     lines.append(f"| {_td.get('transaction_date', '')} | {_name} | {_type_label} | ¥{_amt:,.0f} | {_shares:,.0f} | {_status_label} |")
                 lines.append("")
-                lines.append("> ⚠️ 请务必结合上述交易记录分析。用户近期已执行的操作（尤其是已卖出的基金）不应再建议卖出。")
+            if completed or pending:
+                lines.append("> 仅真实已确认/已结算记录可用于执行、冷却期或交易频率判断；待确认记录仅表示待处理，不能描述为已执行。")
         except Exception as _te:
             logger.debug(f"交易记录注入失败: {_te}")
 

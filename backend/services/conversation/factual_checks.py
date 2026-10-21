@@ -44,10 +44,14 @@ def _date(value):
         return None
 
 
-def _market_reasoning_issues(content, calls):
+def _market_reasoning_issues(content, calls, as_of=None):
     """保守拦截已明确矛盾的归因逻辑，不把规则匹配当成事实核验。"""
     issues = []
-    missing_flow = re.search(r"(?:没有|缺少|缺乏|未取得|未获取)[^。\n]{0,16}(?:资金流|卖空|做空)[^。\n]{0,12}(?:数据|证据)", content)
+    missing_flow = re.search(r"(?:没有|缺少|缺乏|未取得|未获取)[^。\n]{0,16}(?:资金流|卖空|做空)[^。\n]{0,12}(?:数据|证据)|"
+                             r"(?:资金流|卖空|做空)[^。\n]{0,12}(?:数据|证据)[^。\n]{0,8}(?:未取得|未获取|缺失)", content)
+    from services.conversation.answer_fact_guards import market_cause_claims
+    if missing_flow and any(market_cause_claims(_sentences(content))):
+        issues.append("unsupported_market_causation")
     for sentence in _sentences(content):
         limited = re.search(r"不能|无法|不足以|不代表|不等于|待验证|待核验|待核实|仅为假设|只是.*假设|是否|[？?]", sentence)
         if not limited:
@@ -75,7 +79,7 @@ def _market_reasoning_issues(content, calls):
                 valid = not isinstance(point, bool) and math.isfinite(float(point)) and float(point) > 0
             except (ValueError, TypeError):
                 valid = False
-            if name and valid and _date(stamp) == date.today():
+            if name and valid and _date(stamp) == (as_of or date.today()):
                 yield re.sub(r"指数$", "", str(name))
             for child in value.values():
                 if isinstance(child, (dict, list)):
@@ -131,7 +135,8 @@ def _recent_counts(data, as_of):
 
 
 def check_final_facts(content: str, snapshot: dict | None = None,
-                      tool_calls: list | None = None) -> list[str]:
+                      tool_calls: list | None = None, *, original_query: str | None = None,
+                      actions: list | None = None) -> list[str]:
     """返回稳定 issue code 列表；不修改正文、快照或工具记录，不访问外部状态。
 
     交易窗口参考 exact snapshot.as_of。支持 snapshot.transaction_evidence
@@ -142,7 +147,15 @@ def check_final_facts(content: str, snapshot: dict | None = None,
     sentences = _sentences(content)
     issues = []
     calls = list(_calls(tool_calls))
-    issues.extend(_market_reasoning_issues(content or "", calls))
+    issues.extend(_market_reasoning_issues(content or "", calls, _date(snapshot.get("as_of"))))
+    from services.conversation.answer_fact_guards import (
+        dated_quote_issues, evidence_direction_issues, nonreal_trade_issues, unrequested_trade_plan,
+    )
+    issues.extend(evidence_direction_issues(sentences, snapshot))
+    issues.extend(dated_quote_issues(sentences, calls, _date(snapshot.get("as_of")), _date))
+    issues.extend(nonreal_trade_issues(sentences, snapshot, calls))
+    if unrequested_trade_plan(content, original_query, actions, sentences):
+        issues.append("unrequested_trade_plan")
     available_temperature = any(
         name == "get_bond_temperature" and isinstance(data, dict)
         and isinstance(data.get("temperature"), (int, float))
@@ -207,3 +220,24 @@ def check_final_facts(content: str, snapshot: dict | None = None,
                 if int(number) != known[key]:
                     issues.append("recent_30d_trade_count_mismatch")
     return list(dict.fromkeys(issues))
+
+
+def check_final_fact_status(content: str, snapshot: dict | None = None,
+                            tool_calls: list | None = None, *, original_query: str | None = None,
+                            actions: list | None = None) -> dict:
+    """区分已证伪与未核验；未取得资金数据不能证明资金归因本身是假的。
+
+    legacy check_final_facts 保留原 issue 接口。质量门禁和评测应使用本接口，
+    issues 记明确矛盾，unverified 记待补证据，均不修改或压缩原始工具记录。
+    """
+    from services.conversation.answer_fact_guards import has_market_cause_evidence, market_cause_claims, trade_execution_status
+    legacy = check_final_facts(content, snapshot, tool_calls, original_query=original_query, actions=actions)
+    issues = [issue for issue in legacy if issue != "unsupported_market_causation"]
+    unverified = trade_execution_status(_sentences(content), snapshot if isinstance(snapshot, dict) else {}, list(_calls(tool_calls)))["unverified"]
+    calls = list(_calls(tool_calls))
+    as_of = _date((snapshot or {}).get("as_of")) if isinstance(snapshot, dict) else None
+    claims = list(market_cause_claims(_sentences(content)))
+    if (any(not has_market_cause_evidence(claim, calls, as_of, _date) for claim in claims)
+            or ("unsupported_market_causation" in legacy and not claims)):
+        unverified.append("market_causation_unverified")
+    return {"issues": issues, "unverified": unverified}

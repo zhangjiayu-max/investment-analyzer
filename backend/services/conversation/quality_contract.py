@@ -33,25 +33,17 @@ def tool_evidence(tool_calls: list[dict]) -> list[dict]:
     return evidence
 
 
-def compact_tool_evidence(tool_calls: list[dict]) -> list[dict]:
+def compact_tool_evidence(tool_calls: list[dict], max_chars: int = 32000) -> list[dict]:
     """按工具压缩且保留 JSON 结构；不整体截断而丢失靠后的工具事实。"""
-    def compact(value):
-        if isinstance(value, dict):
-            return {key: compact(child) for key, child in value.items()}
-        if isinstance(value, list):
-            items = [compact(child) for child in value[:40]]
-            if len(value) > 40:
-                items.append({"omitted_items": len(value) - 40})
-            return items
-        if isinstance(value, str) and len(value) > 1000:
-            return {"preview": value[:1000], "preview_truncated": True}
-        return value
+    from services.llm.context_budget import summarize_evidence
     unique = {}
     for entry in tool_evidence(tool_calls):
         # 以工具+原始数据去重；不得把相同指标但数值/日期不同的证据合并。
         key = json.dumps([entry["tool"], entry["data"]], sort_keys=True, ensure_ascii=False, default=str)
-        unique.setdefault(key, {**entry, "data": compact(entry["data"])})
-    return list(unique.values())
+        unique.setdefault(key, entry)
+    entries = list(unique.values())
+    allowance = max(100, min(6000, max_chars // max(1, len(entries)) - 160))
+    return [{**entry, 'data': summarize_evidence(entry['data'], allowance)} for entry in entries]
 
 
 def reconcile_reflection_evidence(reflection: dict, tool_calls: list[dict]) -> dict:
@@ -104,7 +96,11 @@ def calibrate_confidence_text(content: str, confidence: float) -> str:
 def finalize_answer_event(event: dict) -> dict:
     """流式正常/超时收尾共用质量门禁；旧引擎缺少验收证据时不授权候选。"""
     from agent.infra.output_quality import is_valid_analysis, validate_specialist_output
+    from services.conversation.delivery_status import delivery_metadata, has_delivery_content
     result = dict(event)
+    if not has_delivery_content(result.get("content", "")):
+        result.update(completion_status="failed", quality_status="degraded", confidence=0.0)
+        return delivery_metadata(result.get("content", ""), result)
     status = result.get("completion_status", "completed")
     quality = result.get("quality_status", "unverified")
     experts = result.get("specialist_results") or []
@@ -121,7 +117,7 @@ def finalize_answer_event(event: dict) -> dict:
             result["arbitration"] = {**result["arbitration"], "confidence": "low",
                                      "confidence_score": result["confidence"]}
     result.update(completion_status=status, quality_status=quality)
-    return result
+    return delivery_metadata(result.get('content', ''), result)
 
 
 def _fund_codes(value) -> set[str]:

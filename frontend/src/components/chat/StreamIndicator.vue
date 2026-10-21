@@ -129,7 +129,10 @@ function formatElapsed(ms) {
       </div>
     </div>
     <!-- 阶段进度条 -->
-    <div v-if="currentStream.totalPhases > 0" class="stream-progress">
+    <div v-if="currentStream.streamStatus === 'degraded'" class="stream-status delivery-degraded">
+      <span>{{ currentStream.statusMessage || '分析已生成，部分核验未完成。' }}</span>
+    </div>
+    <div v-else-if="currentStream.totalPhases > 0" class="stream-progress">
       <div class="progress-bar-container">
         <div class="progress-bar-fill" :style="{ width: currentStream.progressPct + '%' }"></div>
       </div>

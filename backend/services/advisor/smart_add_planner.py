@@ -1034,6 +1034,7 @@ def _get_current_month_buy_amount(user_id: str) -> float | None:
                    WHERE user_id = ? AND transaction_type = 'buy'
                      AND transaction_date >= ?
                      AND (status IN ('confirmed', 'settled', 'pending', 'submitted') OR status IS NULL)
+                     AND COALESCE(is_system, 0) = 0
                      AND (is_hypothetical = 0 OR is_hypothetical IS NULL)""",
                 (user_id, month_start),
             ).fetchone()
@@ -1409,8 +1410,8 @@ def _check_cooldown(fund_code: str, cfg: dict) -> tuple[bool, int, float, str]:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total_amount FROM portfolio_transactions "
                 "WHERE fund_code=? AND transaction_type='buy' "
-                "AND user_id=? AND transaction_date >= ? AND status IN ('confirmed','pending','submitted') "
-                "AND (is_hypothetical=0 OR is_hypothetical IS NULL)",
+                "AND user_id=? AND transaction_date >= ? AND status IN ('confirmed','settled') "
+                "AND COALESCE(is_system,0)=0 AND COALESCE(is_hypothetical,0)=0",
                 (fund_code, cfg.get("user_id", "default"), cutoff),
             ).fetchone()
             count = row["cnt"] if row else 0
@@ -1433,9 +1434,9 @@ def _get_last_buy_price(fund_code: str, user_id: str = "default") -> Optional[fl
         try:
             row = conn.execute(
                 "SELECT price FROM portfolio_transactions "
-                "WHERE fund_code=? AND transaction_type='buy' AND status='confirmed' "
-                "AND user_id=? AND (is_hypothetical=0 OR is_hypothetical IS NULL) AND price IS NOT NULL AND price > 0 "
-                "ORDER BY transaction_date DESC LIMIT 1",
+                "WHERE fund_code=? AND transaction_type='buy' AND status IN ('confirmed','settled') "
+                "AND user_id=? AND COALESCE(is_system,0)=0 AND COALESCE(is_hypothetical,0)=0 AND price IS NOT NULL AND price > 0 "
+                "ORDER BY transaction_date DESC, id DESC LIMIT 1",
                 (fund_code, user_id),
             ).fetchone()
             return float(row["price"]) if row else None

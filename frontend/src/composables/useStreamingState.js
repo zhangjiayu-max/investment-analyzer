@@ -6,6 +6,7 @@
  */
 
 import { reactive, computed, onUnmounted } from 'vue'
+import { chatDeliveryStatus } from '../utils/chatDeliveryStatus'
 
 // 每个对话的流式状态结构
 function createStreamState() {
@@ -197,7 +198,12 @@ function handleStreamEvent(convId, event, callbacks = {}) {
       break
 
     case 'answer':
-      state.streamStatus = 'answering'
+      if (chatDeliveryStatus(data).execution_status === 'degraded') {
+        state.streamStatus = 'degraded'
+        state.statusMessage = chatDeliveryStatus(data).delivery_message
+        state.progressPct = 100
+        _finishStream(convId, state, null)
+      } else state.streamStatus = 'answering'
       // 回调通知 ChatView 添加消息
       if (callbacks.onAnswer) {
         callbacks.onAnswer(convId, data, state)

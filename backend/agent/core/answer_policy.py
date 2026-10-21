@@ -68,7 +68,7 @@ def _load_policy(name: str) -> str:
 
 def build_answer_policy(query: str) -> str:
     """专家、交叉审阅、综合入口共用；配置由 analysis_agents 管理。"""
-    parts = [_load_policy("投资回答证据边界")]
+    parts = [_load_policy("投资回答证据边界"), _load_policy("交易事实与时效校验约束")]
     if has_explicit_action_intent(query):
         parts.append(_load_policy("交易建议回答约束"))
     elif has_attribution_intent(query):

@@ -392,9 +392,10 @@ def _build_recent_decisions(snapshot: dict | None = None) -> dict:
                 """SELECT transaction_type, fund_code, fund_name,
                           amount, notes, status, created_at
                    FROM portfolio_transactions
-                   WHERE status IN ('pending', 'submitted')
+                   WHERE status IN ('pending', 'submitted') AND user_id = ?
+                     AND COALESCE(is_system, 0) = 0 AND COALESCE(is_hypothetical, 0) = 0
                    ORDER BY created_at DESC
-                   LIMIT 10"""
+                   LIMIT 10""", ((snapshot or {}).get("user_id", "default"),)
             ).fetchall()
             for r in rows:
                 result["pending_actions"].append({

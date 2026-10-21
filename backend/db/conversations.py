@@ -4,7 +4,7 @@ from datetime import datetime
 
 from db._conn import _get_conn
 
-VALID_EXECUTION_STATUSES = {"queued", "streaming", "resuming", "completed", "failed", "cancelled", "timeout"}
+VALID_EXECUTION_STATUSES = {"queued", "streaming", "resuming", "completed", "degraded", "failed", "cancelled", "timeout"}
 RECOVERABLE_EXECUTION_STATUSES = {"queued", "streaming", "resuming", "failed", "cancelled", "timeout"}
 
 
@@ -254,8 +254,11 @@ def get_latest_recoverable_assistant(conv_id: int) -> dict | None:
         ).fetchall()
         for row in rows:
             item = dict(row)
-            meta = _load_metadata(item.get("metadata"))
+            from services.conversation.delivery_status import delivery_metadata
+            meta = delivery_metadata(item.get("content", ""), _load_metadata(item.get("metadata")))
             status = meta.get("execution_status")
+            if status in {"completed", "degraded", "clarification"}:
+                return None
             if status in RECOVERABLE_EXECUTION_STATUSES:
                 item["metadata"] = meta
                 item["execution_status"] = status
@@ -386,7 +389,7 @@ def get_conversation_progress(conv_id: int) -> dict:
 
     # 获取最新的 assistant 消息
     msg = conn.execute("""
-        SELECT id, metadata FROM messages
+        SELECT id, content, metadata FROM messages
         WHERE conversation_id = ? AND role = 'assistant'
         ORDER BY id DESC LIMIT 1
     """, (conv_id,)).fetchone()
@@ -402,6 +405,8 @@ def get_conversation_progress(conv_id: int) -> dict:
     except Exception:
         pass
 
+    from services.conversation.delivery_status import delivery_metadata
+    metadata = delivery_metadata(msg['content'], metadata)
     status = metadata.get('execution_status', 'unknown')
 
     # 从 agent_runs 获取已完成的专家数量
@@ -424,6 +429,10 @@ def get_conversation_progress(conv_id: int) -> dict:
 
     return {
         "status": status,
+        "completion_status": metadata.get("completion_status"),
+        "quality_status": metadata.get("quality_status"),
+        "delivery_message": metadata.get("delivery_message"),
+        "delivery_reasons": metadata.get("delivery_reasons", []),
         "message_id": msg['id'],
         "completed_specialists": completed_runs,
         "total_specialists": total_runs,

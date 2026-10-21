@@ -27,7 +27,7 @@ def test_available_market_quote_must_not_be_claimed_missing():
     from services.conversation.factual_checks import check_final_facts
     calls = [{"name": "eastmoney_finance_data", "arguments": {"code": "HSTECH"},
               "result": {"data": {"index_name": "恒生科技", "current_point": 4045.91, "as_of": "2026-10-20 16:08"}}}]
-    assert "market_quote_falsely_missing" in check_final_facts("恒生科技实时点位本轮未取得。", {}, calls)
+    assert "market_quote_falsely_missing" in check_final_facts("恒生科技实时点位本轮未取得。", {"as_of": "2026-10-20"}, calls)
     assert check_final_facts("本轮未取得恒生互联网实时点位。", {}, calls) == []
 
 
@@ -75,4 +75,4 @@ def test_eastmoney_named_columns_are_exposed_as_quote_evidence(monkeypatch):
     assert observation["current_point"] == 4045.91
     assert observation["as_of"] == "2026-10-20 16:08"
     calls = [{"name": "eastmoney_finance_data", "result": result}]
-    assert "market_quote_falsely_missing" in check_final_facts("恒生科技实时点位本轮未取得。", {}, calls)
+    assert "market_quote_falsely_missing" in check_final_facts("恒生科技实时点位本轮未取得。", {"as_of": "2026-10-20"}, calls)

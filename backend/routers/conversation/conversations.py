@@ -34,6 +34,7 @@ from agent.multi_agent import run_specialist
 from services.rag import build_rag_context_with_details, log_rag_search
 from services.llm_service import _call_llm, MODEL, ORCHESTRATOR_PROMPT
 from infra.output_reviewer import review_output
+from services.conversation.delivery_status import delivery_metadata, has_delivery_content
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +309,8 @@ async def get_messages_api(conv_id: int, limit: int = 50, offset: int = 0):
                 msg["metadata"] = json.loads(msg["metadata"])
             except Exception:
                 pass
+        if msg.get("role") == "assistant" and isinstance(msg.get("metadata"), dict):
+            msg["metadata"] = delivery_metadata(msg.get("content", ""), msg["metadata"])
     return {"conversation": conv, "messages": msgs}
 
 
@@ -413,7 +416,10 @@ async def resume_conversation(conv_id: int, request: Request):
                     meta = _json.loads(meta)
                 except Exception:
                     meta = {}
-            if isinstance(meta, dict) and meta.get("execution_status") == "failed":
+            meta = delivery_metadata(msg.get("content", ""), meta if isinstance(meta, dict) else {})
+            if meta.get("execution_status") == "degraded":
+                raise HTTPException(409, "分析已生成，部分核验未完成；如需重试请点击重新生成，不能继续已结束的执行。")
+            if meta.get("execution_status") == "failed":
                 logger.info(f"恢复对话 {conv_id}：最后一条 assistant 消息为 failed，拒绝自动恢复")
                 raise HTTPException(409, "对话上次执行失败，不会自动恢复。如需重试请点击重试按钮。")
             break  # 只检查最后一条 assistant 消息
@@ -593,6 +599,7 @@ async def resume_conversation(conv_id: int, request: Request):
                     except Exception:
                         meta = {}
 
+                meta = delivery_metadata(msgs[0].get("content", ""), meta)
                 status = meta.get("execution_status", "unknown")
 
                 # 推送新增的专家结果
@@ -637,10 +644,11 @@ async def resume_conversation(conv_id: int, request: Request):
                     })
 
                 # 任务结束
-                if status == "completed":
+                if status in {"completed", "degraded"}:
                     yield _sse_event("answer", {
                         "content": msgs[0].get("content", ""),
                         "specialist_results": spec_results,
+                        **{key: meta[key] for key in ("execution_status", "completion_status", "quality_status", "delivery_message", "delivery_reasons") if key in meta},
                     })
                     total_ms = meta.get("phase_timings", {}).get("total_ms", 0)
                     yield _sse_event("done", {
@@ -798,6 +806,8 @@ async def resume_conversation(conv_id: int, request: Request):
                 if not client_disconnected:
                     yield _sse_event("answer_chunk", event)
             elif event_type == "answer":
+                from services.conversation.quality_contract import finalize_answer_event
+                event = delivery_metadata(event.get("content", ""), finalize_answer_event(event))
                 final_content = event.get("content", final_content)
                 specialist_results_so_far = event.get("specialist_results", specialist_results_so_far)
                 tool_calls_so_far = event.get("tool_calls", tool_calls_so_far)
@@ -805,11 +815,11 @@ async def resume_conversation(conv_id: int, request: Request):
 
                 duration_ms = int((time.time() - request_start) * 1000)
                 saved = update_message_content_and_metadata(stream_msg_id, final_content, {
-                    "execution_status": "completed",
+                    **{key: event[key] for key in ("execution_status", "completion_status", "quality_status", "quality_issues", "reflection", "cross_review_status", "delivery_message", "delivery_reasons", "arbitration", "budget_usage") if key in event},
                     "complexity": final_complexity,
                     "specialist_results": [
                         {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                         for s in specialist_results_so_far
                     ],
                     "tool_calls": tool_calls_so_far,
@@ -824,6 +834,7 @@ async def resume_conversation(conv_id: int, request: Request):
                 if not client_disconnected:
                     yield _sse_event("answer", {
                         "content": final_content,
+                        **{key: event[key] for key in ("execution_status", "completion_status", "quality_status", "delivery_message", "delivery_reasons") if key in event},
                         "specialist_results": specialist_results_so_far,
                         "complexity": final_complexity,
                         "duration_ms": duration_ms,
@@ -1008,7 +1019,8 @@ async def retry_conversation_message_api(conv_id: int, message_id: int):
     finally:
         conn.close()
 
-    if success_run and target_meta.get('execution_status') != 'cancelled':
+    target_meta = delivery_metadata(target.get('content', ''), target_meta)
+    if success_run and target_meta.get('execution_status') not in {'cancelled', 'degraded'}:
         # 原消息已有成功专家 → 只跑综合阶段，原地恢复
         from services.conv_recovery import resume_synthesis_only
         result = await asyncio.to_thread(resume_synthesis_only, message_id, conv_id)
@@ -1078,12 +1090,14 @@ async def resume_synthesis_api(conv_id: int, message_id: int):
 
     conn = _get_conn()
     try:
-        target = conn.execute("SELECT metadata FROM messages WHERE id=? AND conversation_id=? AND role='assistant'",
+        target = conn.execute("SELECT content,metadata FROM messages WHERE id=? AND conversation_id=? AND role='assistant'",
                               (message_id,conv_id)).fetchone()
         if target is None:
             raise HTTPException(404, "助手消息不存在")
         if json.loads(target['metadata'] or '{}').get('execution_status') == 'cancelled':
             raise HTTPException(409, "任务已取消，请点击重新生成创建新的执行。")
+        if delivery_metadata(target['content'], json.loads(target['metadata'] or '{}')).get('execution_status') == 'degraded':
+            raise HTTPException(409, "降级结果已交付，请点击重新生成创建新的执行。")
     finally:
         conn.close()
     from services.conv_recovery import resume_synthesis_only
@@ -1213,13 +1227,16 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
     metadata_dict = {
         "specialist_results": [
             {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
             for s in specialist_results
         ],
         "tool_calls": llm_result.get("tool_calls", []),
         "reasoning_trail": llm_result.get("reasoning_trail"),
     }
-    metadata = json.dumps(metadata_dict, ensure_ascii=False) if specialist_results else None
+    metadata_dict.update({key: llm_result[key] for key in ("completion_status", "quality_status", "quality_issues", "reflection", "cross_review_status", "budget_usage", "arbitration") if key in llm_result})
+    metadata_dict.setdefault("completion_status", "completed" if has_delivery_content(answer) else "failed")
+    metadata_dict = delivery_metadata(answer, metadata_dict)
+    metadata = json.dumps(metadata_dict, ensure_ascii=False)
     msg_id = create_message(conv_id, "assistant", answer, metadata=metadata)
 
     # 5.5. 基金代码幻觉验证（事后异步校验，不阻塞回复）
@@ -1254,7 +1271,7 @@ async def send_message_api(conv_id: int, req: SendMessageRequest):
         "answer": answer,
         "specialist_results": [
             {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", ""), "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
             for s in specialist_results
         ],
         "rag": {
@@ -1686,7 +1703,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "icon": result.get("icon", ""),
                         "analysis": result.get("analysis", ""),
                         "duration_ms": result.get("duration_ms", 0),
-                        **{k: result[k] for k in ("verdict", "confidence", "status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in result},
+                        **{k: result[k] for k in ("verdict", "confidence", "status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in result},
                     }
                     append_stream_event(channel_id, "specialist_done", _spec_done_data)
                     yield _sse_event("specialist_done", _spec_done_data)
@@ -1724,7 +1741,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     metadata_dict = {
                         "specialist_results": [
                             {"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000], "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                             for s in specialist_results
                         ],
                         "complexity": complexity,
@@ -1738,7 +1755,8 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             or not update_message_content_and_metadata(stream_msg_id, answer, metadata_dict)):
                         cancel_stream_channel(channel_id)
                         return
-                    _answer_data = {'content':answer, 'specialist_results':specialist_results}
+                    _answer_data = {'content':answer, 'specialist_results':specialist_results,
+                                    **{key: metadata_dict[key] for key in ('execution_status', 'completion_status', 'quality_status') if key in metadata_dict}}
                     append_stream_event(channel_id, 'answer', _answer_data)
                     yield _sse_event('answer', _answer_data)
                     msg_id = stream_msg_id
@@ -1880,7 +1898,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 except Exception as e:
                     logger.warning(f"增量保存进度失败: {e}")
 
-            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None, completion_status="completed", reflection=None, cross_review_status=None, confidence=0.0, phase_timings=None, quality_status="unverified", quality_issues=None):
+            def _save_final(content, spec_results, tool_calls, orch_ms, arbitration=None, cross_review_results=None, completion_status="completed", reflection=None, cross_review_status=None, confidence=0.0, phase_timings=None, quality_status="unverified", quality_issues=None, budget_usage=None):
                 total_ms = int((time.time() - request_start) * 1000)
                 pt = {**(phase_timings or {}), "orchestrator_ms": orch_ms, "total_ms": total_ms}
                 from services.conversation.quality_contract import merge_specialist_results, selected_asset_actions
@@ -1893,21 +1911,24 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     content = review["content"]
                 except Exception:
                     pass
+                execution_status = delivery_metadata(content, {
+                    "completion_status": completion_status, "quality_status": quality_status,
+                }).get("execution_status", "failed")
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                         # P0 修复（2026-08-02）：持久化结构化 verdict/confidence，消除下游幻觉
                         "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                        for s in final_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                         "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                        for s in final_results if s.get("is_cross_review")]
                 # P2-G 修复 conv#131：Pipeline 路径下 _prod_spec_results 可能未捕获 cross_review_done 事件
                 # 此时使用 EVENT_ANSWER 携带的 cross_review_results 作为兜底
                 if not p2 and cross_review_results:
                     p2 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                             "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                            for s in cross_review_results if isinstance(s, dict)]
                 if stream_msg_id > 0:
                     # P0 修复（2026-08-02）：tool_calls 字段归一化（tool → name）
@@ -1922,13 +1943,12 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             _norm_tool_calls.append(tc)
                     # 构建 metadata（含仲裁结果，让前端可见对话链路完整四阶段）
                     _meta = {
-                        "execution_status": "completed" if completion_status == "completed" else "failed", "complexity": complexity,
+                        "execution_status": execution_status, "complexity": complexity,
                         "completion_status": completion_status, "quality_status": quality_status, "quality_issues": quality_issues or [], "confidence": confidence, "reflection": reflection, "cross_review_status": cross_review_status,
                         "specialist_results": p1, "cross_review_results": p2,
-                        "tool_calls": _norm_tool_calls, "phase_timings": pt, "trace_id": trace_id,
+                        "tool_calls": _norm_tool_calls, "phase_timings": pt, "trace_id": trace_id, "budget_usage": budget_usage or {},
                     }
-                    if completion_status != "completed":
-                        _meta["error_message"] = "综合报告未完整完成，以下内容为降级结果，请重新生成。"
+                    _meta = delivery_metadata(content, _meta)
                     if arbitration:
                         # 截断仲裁摘要避免 metadata 过大
                         _meta["arbitration"] = {
@@ -1938,6 +1958,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             "reasoning": arbitration.get("reasoning", "")[:800],
                             # P0 修复（2026-08-02）：持久化结构化字段
                             "expert_verdicts": (arbitration.get("expert_verdicts", []) or [])[:10],
+                            **{key: arbitration[key] for key in ("arbitration_mode", "supporting_agents", "valid_specialist_count", "voting_specialist_count") if key in arbitration},
                             "stance_source": arbitration.get("stance_source", ""),
                             "consistency_warning": (arbitration.get("consistency_warning", "") or "")[:300],
                             "asset_actions": arbitration.get("asset_actions", []),
@@ -1959,7 +1980,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         agent_key="chat_turn", agent_name="对话整体",
                         query=effective_query[:500], result=content[:3000],
                         tool_calls=json.dumps(pt, ensure_ascii=False), duration_ms=total_ms,
-                        trace_id=trace_id, status="success" if completion_status == "completed" else "failed")
+                        trace_id=trace_id, status="success" if execution_status == "completed" else execution_status)
                 except Exception as e:
                     logger.warning(f"记录 agent_runs 失败: {e}")
                 log_rag_search(conversation_id=conv_id, message_id=stream_msg_id, query=effective_query,
@@ -1970,7 +1991,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                     rag_low_quality=rag_result.get("rag_low_quality", False))
                 qm = _calculate_quality_metrics(final_results, rag_result, tool_calls)
                 _save_execution_trace(trace_id, conv_id, effective_query, complexity,
-                    "completed" if completion_status == "completed" else "failed", total_ms, pt,
+                    execution_status, total_ms, pt,
                     "none" if completion_status == "completed" else "quality", qm)
 
                 # 自动检测可执行建议 → 创建决策候选
@@ -2000,11 +2021,11 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 # P0 修复（2026-08-02）：失败路径也补全 verdict/confidence，保持 schema 一致
                 p1 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                         "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                        for s in _prod_spec_results if not s.get("is_cross_review")]
                 p2 = [{"agent_key": s["agent_key"], "agent": s.get("agent", ""), "icon": s.get("icon", ""), "analysis": s.get("analysis", "")[:3000],
                         "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                        for s in _prod_spec_results if s.get("is_cross_review")]
                 update_message_content_and_metadata(stream_msg_id, f"❌ 执行失败: {err_msg}", {
                     "execution_status": "failed", "complexity": complexity,
@@ -2071,7 +2092,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                             pass
                         if event.get("type") == "answer":
                             from services.conversation.quality_contract import finalize_answer_event
-                            event = finalize_answer_event(event)
+                            event = delivery_metadata(event.get("content", ""), finalize_answer_event(event))
                         # P2-1：在每个事件前检查总耗时
                         elapsed = time.time() - producer_started
                         if elapsed >= abort_at_sec:
@@ -2089,14 +2110,15 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                                         completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"),
                                         confidence=event.get("confidence", 0.0), phase_timings=event.get("phase_timings"),
                                         quality_status=event.get("quality_status", "unverified"), quality_issues=event.get("quality_issues", []),
+                                        budget_usage=event.get("budget_usage"),
                                     )
                                     event = dict(event)
                                     event["content"] = reviewed
                                     try:
-                                        if event.get("completion_status", "completed") == "completed":
+                                        if event.get("execution_status") in {"completed", "degraded"}:
                                             complete_stream_channel(channel_id)
                                         else:
-                                            fail_stream_channel(channel_id, "分析质量校验未通过")
+                                            fail_stream_channel(channel_id, "未生成有效分析")
                                     except Exception as _e:
                                         logger.warning(f"[trace:{trace_id}] 超时收尾标记 channel 完成失败: {_e}")
                                     logger.info(f"[P0-1] trace:{trace_id} 超时退出前成功保存综合报告")
@@ -2125,22 +2147,22 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         # === 在线程中持久化（独立于 SSE 连接）===
                         if et == "specialist_done":
                             # 修复 conv 192：用 .get() 安全访问，避免自纠错重跑等场景字段缺失抛 KeyError
-                            _prod_spec_results.append({"verdict": event.get("verdict", "unknown"), "confidence": event.get("confidence", 0.0), "asset_actions": event.get("asset_actions", []), "agent_key": event.get("agent_key", ""), "agent": event.get("agent", ""), "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0)})
+                            _prod_spec_results.append({"verdict": event.get("verdict", "unknown"), "confidence": event.get("confidence", 0.0), "asset_actions": event.get("asset_actions", []), "agent_key": event.get("agent_key", ""), "agent": event.get("agent", ""), "icon": event.get("icon", "🤖"), "analysis": event.get("analysis", ""), "duration_ms": event.get("duration_ms", 0), **{key: event[key] for key in ("status", "completion_status", "output_quality", "finish_reason") if key in event}})
                             _save_progress("streaming")
                             # 注：orchestrator.py 已创建并更新 agent_run 记录，此处不再重复创建
                         elif et == "cross_review_done":
                             _prod_spec_results.append({"agent_key": event.get("agent_key"), "agent": event.get("agent"), "icon": event.get("icon"), "analysis": event.get("analysis"), "duration_ms": event.get("duration_ms"), "is_cross_review": True})
                             _save_progress("streaming")
                         elif et == "answer":
-                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"), completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"), confidence=event.get("confidence", 0.0), phase_timings=event.get("phase_timings"), quality_status=event.get("quality_status", "unverified"), quality_issues=event.get("quality_issues", []))
+                            reviewed = _save_final(event.get("content", ""), event.get("specialist_results", []), event.get("tool_calls", []), int((time.time() - _prod_start) * 1000), arbitration=event.get("arbitration"), cross_review_results=event.get("cross_review_results"), completion_status=event.get("completion_status", "completed"), reflection=event.get("reflection"), cross_review_status=event.get("cross_review_status"), confidence=event.get("confidence", 0.0), phase_timings=event.get("phase_timings"), quality_status=event.get("quality_status", "unverified"), quality_issues=event.get("quality_issues", []), budget_usage=event.get("budget_usage"))
                             event = dict(event)
                             event["content"] = reviewed
                             # 标记 channel 完成
                             try:
-                                if event.get("completion_status", "completed") == "completed":
+                                if event.get("execution_status") in {"completed", "degraded"}:
                                     complete_stream_channel(channel_id)
                                 else:
-                                    fail_stream_channel(channel_id, error_message="分析质量校验未通过")
+                                    fail_stream_channel(channel_id, error_message="未生成有效分析")
                             except Exception as _e:
                                 logger.warning(f"[trace:{trace_id}] 标记 channel 完成失败: {_e}")
                         elif et == "clarification":
@@ -2310,6 +2332,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "agent": event.get("agent"),
                         "icon": event.get("icon"),
                         "analysis": event.get("analysis"),
+                        **{key: event[key] for key in ("status", "completion_status", "output_quality", "finish_reason") if key in event},
                         "duration_ms": event.get("duration_ms"),
                     })
                     # 进度
@@ -2345,6 +2368,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                         "agent": event.get("agent"),
                         "icon": event.get("icon"),
                         "analysis": event.get("analysis"),
+                        **{key: event[key] for key in ("status", "completion_status", "output_quality", "finish_reason") if key in event},
                         "duration_ms": event.get("duration_ms"),
                     })
 
@@ -2368,6 +2392,7 @@ async def send_message_stream(conv_id: int, req: SendMessageRequest, request: Re
                 if not client_disconnected:
                     yield _sse_event("answer", {
                         "content": event.get("content", ""),
+                        **{key: event[key] for key in ("execution_status", "completion_status", "quality_status", "quality_issues", "delivery_message", "delivery_reasons", "budget_usage") if key in event},
                         "specialist_results": event.get("specialist_results", []),
                     })
 
@@ -2584,6 +2609,8 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                     et = event.get("type")
                     # 持久化关键事件到消息
                     if et == "answer":
+                        from services.conversation.quality_contract import finalize_answer_event
+                        event = delivery_metadata(event.get("content", ""), finalize_answer_event(event))
                         content = event.get("content", "")
                         spec_results = event.get("specialist_results", [])
                         arbitration = event.get("arbitration")
@@ -2592,10 +2619,10 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                             p1 = [{"agent_key": s.get("agent_key", ""), "agent": s.get("agent", ""),
                                    "icon": s.get("icon", ""), "analysis": (s.get("analysis", "") or "")[:3000],
                                    "verdict": s.get("verdict", "unknown"), "confidence": s.get("confidence", 0.0),
-                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance") if k in s}}
+                        **{k: s[k] for k in ("status", "completion_status", "output_quality", "asset_actions", "portfolio_stance", "context_usage", "tokens_used", "tokens_source", "budget_exhausted") if k in s}}
                                   for s in spec_results if not s.get("is_cross_review")]
                             _meta = {
-                                "execution_status": "completed",
+                                **{key: event[key] for key in ("execution_status", "completion_status", "quality_status", "quality_issues", "reflection", "cross_review_status", "delivery_message", "delivery_reasons", "arbitration", "budget_usage") if key in event},
                                 "specialist_results": p1,
                                 "trace_id": trace_id,
                             }
@@ -2607,6 +2634,7 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                                     "reasoning": arbitration.get("reasoning", "")[:800],
                                     # P0 修复（2026-08-02）：持久化结构化字段
                                     "expert_verdicts": (arbitration.get("expert_verdicts", []) or [])[:10],
+                                    **{key: arbitration[key] for key in ("arbitration_mode", "supporting_agents", "valid_specialist_count", "voting_specialist_count") if key in arbitration},
                                     "stance_source": arbitration.get("stance_source", ""),
                                     "consistency_warning": (arbitration.get("consistency_warning", "") or "")[:300],
                                 }
@@ -2697,6 +2725,7 @@ async def clarify_answer_stream(conv_id: int, request: Request):
                 if not await request.is_disconnected():
                     yield _sse_event("answer", {
                         "content": event.get("content", ""),
+                        **{key: event[key] for key in ("execution_status", "completion_status", "quality_status", "quality_issues", "delivery_message", "delivery_reasons", "budget_usage") if key in event},
                         "specialist_results": event.get("specialist_results", []),
                     })
             elif et == "degrade":

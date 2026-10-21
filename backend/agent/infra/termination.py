@@ -269,4 +269,16 @@ def get_token_budget_for_complexity(complexity: str) -> dict:
             "max_specialists": 6,
         },
     }
-    return defaults.get(complexity, defaults["medium"])
+    level = complexity if complexity in defaults else 'medium'
+    budget = dict(defaults[level])
+    # 成本额度含所有往返的输入+输出；独立输出上限不能再由它除以专家数。
+    costs = {
+        'simple': {'execution': 80000, 'review': 25000, 'synthesis': 30000, 'max_total': 150000},
+        'medium': {'execution': 180000, 'review': 40000, 'synthesis': 50000, 'max_total': 290000},
+        'complex': {'execution': 240000, 'review': 60000, 'synthesis': 70000, 'max_total': 400000},
+    }
+    for phase, amount in costs[level].items():
+        budget[phase] = TerminationChecker._get_config_int_safe(f'pipeline.{level}.{phase}_cost_tokens', amount)
+    budget['specialist_output'] = TerminationChecker._get_config_int_safe('llm.max_tokens_agent', 8000)
+    budget['review_output'] = TerminationChecker._get_config_int_safe('pipeline.review_output_tokens', 6000)
+    return budget

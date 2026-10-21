@@ -12,7 +12,7 @@ def test_recovery_preserves_markdown_first_chapter_and_disagreement():
     answer = _merge_runs_to_answer([{"agent_name": "估值", "result": first}, {"agent_name": "风险", "result": second}])
     assert first in answer and second in answer
     assert "✅" not in answer
-    assert "降级" in answer and "未通过" in answer and "分歧" in answer
+    assert "仅专家结果" in answer and "综合报告未生成" in answer and "分歧" in answer
 
 
 @pytest.mark.parametrize("prefix", ['{"verdict":"hold","confidence":0.5}\n', '```json\n{"verdict":"hold"}\n```\n'])
@@ -157,10 +157,12 @@ def test_degraded_recovery_cannot_be_finalized_as_completed():
     from services.conv_recovery import _finalize_recovery
     conv = create_conversation("失败综合")
     msg = create_message(conv, "assistant", "占位")
-    assert not _finalize_recovery(msg, conv, "无效综合", {"completion_status": "degraded"})["ok"]
+    assert _finalize_recovery(msg, conv, "待复核综合", {"completion_status": "degraded"})["ok"]
     conn = _get_conn()
     try:
-        assert conn.execute("SELECT content FROM messages WHERE id=?", (msg,)).fetchone()[0] == "占位"
+        row = conn.execute("SELECT content,metadata FROM messages WHERE id=?", (msg,)).fetchone()
+        assert row["content"] == "待复核综合"
+        assert json.loads(row["metadata"])["execution_status"] == "degraded"
     finally:
         conn.close()
 
@@ -174,10 +176,12 @@ def test_checkpoint_recovery_does_not_erase_degraded_answer_status(monkeypatch):
     msg = create_message(conv, "assistant", "占位")
     monkeypatch.setattr(orchestrator, "orchestrate_stream", lambda **kwargs: iter([
         {"type": "answer", "content": "未通过综合", "completion_status": "degraded", "quality_issues": ["单位冲突"]}]))
-    assert _recover_via_orchestrate_stream(msg, conv, {}) == ""
+    assert _recover_via_orchestrate_stream(msg, conv, {}) == "未通过综合"
     conn = _get_conn()
     try:
-        assert conn.execute("SELECT content FROM messages WHERE id=?", (msg,)).fetchone()[0] == "占位"
+        row = conn.execute("SELECT content,metadata FROM messages WHERE id=?", (msg,)).fetchone()
+        assert row["content"] == "未通过综合"
+        assert json.loads(row["metadata"])["execution_status"] == "degraded"
     finally:
         conn.close()
 
@@ -284,7 +288,9 @@ def test_late_auto_retry_respects_cancellation_and_quality_terminal(monkeypatch,
         if terminal == "cancelled":
             assert meta["execution_status"] == "cancelled" and row["content"] == "已取消"
         else:
-            assert meta["execution_status"] == "failed" and meta["completion_status"] == "degraded"
+            assert meta["execution_status"] == "degraded" and meta["completion_status"] == "degraded"
+            assert row["content"] == "迟到综合"
+            assert meta["recovery_type"] == "synthesis"
     finally:
         conn.close()
 
@@ -300,7 +306,7 @@ def test_recovery_does_not_drop_quality_status_when_completion_says_completed():
         assert _apply_recovery(conn, msg, "降级回答", True,
                                {"completion_status": "completed", "quality_status": "degraded", "quality_issues": ["unverified_unit"]})
         metadata = json.loads(conn.execute("SELECT metadata FROM messages WHERE id=?", (msg,)).fetchone()[0])
-        assert metadata["execution_status"] == "failed"
+        assert metadata["execution_status"] == "degraded"
         assert metadata["quality_issues"] == ["unverified_unit"]
     finally:
         conn.close()
