@@ -306,7 +306,7 @@ function emitSend() {
         <textarea
           ref="textareaRef"
           :value="inputText"
-          :placeholder="sending ? '正在执行中，请稍候...' : '输入消息... @指定专家 (Shift+Enter 换行)'"
+          :placeholder="sending ? '正在执行中，请稍候...' : '输入消息… 可用 @ 指定专家'"
           class="chat-input"
           :disabled="sending"
           @keydown="handleKeydown"
@@ -750,6 +750,8 @@ function emitSend() {
 .dark .btn-upload-image:hover { background: var(--color-primary-bg); }
 
 @media (max-width: 768px) {
+  /* 手机没有 Shift 键，快捷键提示属无效信息 */
+  .input-hint-text { display: none; }
   .chat-input-area { padding: 0.6rem 0.75rem; }
   .chat-input { font-size: 0.88rem; padding: 0.5rem 0.6rem; }
   .btn-send { width: 38px; height: 38px; }

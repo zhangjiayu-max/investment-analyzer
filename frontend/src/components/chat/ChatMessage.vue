@@ -1482,15 +1482,42 @@ const tradeSuggestions = computed(() => {
 }
 
 /* Markdown 样式 */
+/* 排版层级
+   原先 h1/h2/h3 统一 0.9rem，而正文是 0.88rem —— 标题只比正文大 0.3px，
+   层级等于不存在；段落间距 0.3rem(≈5px) 也远小于 1.7 的行高，长回答是一整坨。
+   这里按 标题 / 正文 / 辅助 三档重排，并给足段间距。 */
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
-.markdown-body :deep(h3) { margin-top: 0.75rem; margin-bottom: 0.6rem; font-size: 0.9rem; }
-.markdown-body :deep(p) { margin: 0.3rem 0; }
+.markdown-body :deep(h3),
+.markdown-body :deep(h4) {
+  font-weight: 650;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+.markdown-body :deep(h1) { font-size: 1.02rem; margin: 1.1rem 0 0.55rem; }
+.markdown-body :deep(h2) { font-size: 0.96rem; margin: 1rem 0 0.5rem; }
+.markdown-body :deep(h3) { font-size: 0.92rem; margin: 0.9rem 0 0.45rem; }
+.markdown-body :deep(h4) { font-size: 0.89rem; margin: 0.8rem 0 0.4rem; }
+.markdown-body :deep(*:first-child) { margin-top: 0; }
+
+.markdown-body :deep(p) { margin: 0 0 0.6rem; line-height: 1.78; }
+.markdown-body :deep(p:last-child) { margin-bottom: 0; }
+
 .markdown-body :deep(ul),
-.markdown-body :deep(ol) { padding-left: 1.2rem; margin: 0.3rem 0; }
-.markdown-body :deep(code) { background: rgba(255, 255, 255, 0.06); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.8rem; }
-.dark .markdown-body :deep(code) { background: rgba(255,255,255,0.1); }
-.markdown-body :deep(strong) { font-weight: 600; }
+.markdown-body :deep(ol) { padding-left: 1.25rem; margin: 0.45rem 0 0.65rem; }
+.markdown-body :deep(li) { margin-bottom: 0.25rem; line-height: 1.72; }
+.markdown-body :deep(li:last-child) { margin-bottom: 0; }
+
+/* 行内代码：原来写死 rgba(255,255,255,.06)，亮色主题是白底白块、完全看不见 */
+.markdown-body :deep(code) {
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border-light);
+  padding: 0.08rem 0.32rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+.markdown-body :deep(strong) { font-weight: 650; color: var(--color-text-primary); }
 .markdown-body :deep(table) { width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.8rem; }
 .markdown-body :deep(th),
 .markdown-body :deep(td) { padding: 0.35rem 0.6rem; border: 1px solid var(--color-border); text-align: left; }

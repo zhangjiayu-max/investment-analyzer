@@ -121,7 +121,7 @@ const activeGroup = computed(() => {
         <div v-else class="nav-group">
           <button
             @click="toggleGroup(item.key)"
-            :class="['nav-item', 'nav-group-header', { active: activeGroup === item.key }]"
+            :class="['nav-item', 'nav-group-header', { 'nav-group-active': activeGroup === item.key }]"
             :title="item.desc || item.label"
           >
             <Icon :name="item.icon" size="18" class="nav-icon" />
@@ -336,6 +336,15 @@ const activeGroup = computed(() => {
 }
 
 .nav-group-header { position: relative; }
+/* 分组头：子项激活时只做「半激活」—— 文字与图标提亮、不铺底色、不加左侧竖条。
+   此前分组头与子项共用 .active，父子同时带底色和金色竖线，看不出谁在生效。 */
+.nav-group-header.nav-group-active {
+  color: var(--color-text-primary);
+  font-weight: 600;
+  background: transparent;
+}
+.nav-group-header.nav-group-active .nav-icon { color: var(--color-primary); opacity: 1; }
+.dark .nav-group-header.nav-group-active { color: var(--color-text-primary); background: transparent; }
 
 .chevron {
   margin-left: auto;

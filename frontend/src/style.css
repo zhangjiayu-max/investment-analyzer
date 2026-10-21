@@ -23,6 +23,13 @@
   --color-danger: #dc2626;
   --color-info: #2563eb;
 
+  /* AI 生成内容标识色：用于「AI 解读 / 大师回测 / 组合智能」等区块的图标与左侧竖线，
+     与普通行情数据区分开。此前硬编码 #7c3aed + rgba(124,58,237,.04)，
+     暗色下那层 0.04 透明底几乎不可见。 */
+  --color-ai: #7c3aed;
+  --color-ai-bg: rgba(124, 58, 237, 0.06);
+  --color-ai-border: rgba(124, 58, 237, 0.26);
+
   /* Financial — 红涨绿跌 */
   --color-profit: #dc2626;
   --color-profit-bg: #fef2f2;
@@ -284,6 +291,9 @@
   --color-warning: #fbbf24;
   --color-danger: #f87171;
   --color-info: #d4a843;
+  --color-ai: #a78bfa;
+  --color-ai-bg: rgba(167, 139, 250, 0.12);
+  --color-ai-border: rgba(167, 139, 250, 0.3);
 
   --color-profit: #f87171;
   --color-profit-bg: rgba(248, 113, 113, 0.10);

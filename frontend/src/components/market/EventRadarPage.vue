@@ -3865,44 +3865,17 @@ watch(scrollToFundCode, async (code) => {
 }
 .header-actions { flex-shrink: 0; }
 
-.scan-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  border: none;
-  cursor: pointer;
-  transition: all 0.15s;
-  background: var(--color-primary);
-  color: white;
-}
-.scan-btn:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
-.scan-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* 分析文章按钮 */
-.analyze-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 0.9rem;
-  border-radius: 6px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  border: 1px solid var(--color-border);
-  cursor: pointer;
-  transition: all 0.15s;
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  margin-right: 0.5rem;
-}
-.analyze-btn:hover:not(:disabled) {
-  border-color: #7c3aed;
-  color: #7c3aed;
-}
-.analyze-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+/* 三个操作按钮统一走 .btn 体系（btn-secondary / btn-primary），此处只做尺寸微调。
+   原先 verify/analyze/scan 各自重复定义了整套外观，且 analyze-btn 的 hover 写死
+   紫色 #7c3aed，导致同一操作区出现 白描边 / 紫描边 / 蓝实心 三种不同权重，
+   用户判断不出哪个是主操作。现在只有「立即扫描」是 primary，其余为 secondary。 */
+.header-actions .verify-btn,
+.header-actions .analyze-btn,
+.header-actions .scan-btn,
+.header-actions .btn { margin-right: 0; }
+.verify-btn,
+.analyze-btn,
+.scan-btn { padding: 0.5rem 0.95rem; font-size: 0.82rem; }
 
 /* 统计卡片 */
 .stats-row {
@@ -4177,22 +4150,22 @@ watch(scrollToFundCode, async (code) => {
   border-radius: 3px;
   font-size: 0.66rem;
   font-weight: 500;
-  background: rgba(16, 185, 129, 0.12);
-  color: #059669;
-  border: 1px solid rgba(16, 185, 129, 0.3);
+  background: var(--color-profit-bg);
+  color: var(--color-profit);
+  border: 1px solid var(--color-profit-light);
 }
 
 /* ── 趋势事件样式 ── */
 .event-card.event-card-trend {
-  border-left: 3px solid #7c3aed;
+  border-left: 3px solid var(--color-ai);
 }
 .event-card.event-card-trend .event-date-badge {
-  background: rgba(124,58,237,0.1);
-  color: #7c3aed;
+  background: var(--color-ai-bg);
+  color: var(--color-ai);
 }
 .event-type-tag.event-type-trend {
-  background: rgba(124,58,237,0.1);
-  color: #7c3aed;
+  background: var(--color-ai-bg);
+  color: var(--color-ai);
 }
 .time-frame-tag {
   font-size: 0.68rem;
@@ -4202,17 +4175,17 @@ watch(scrollToFundCode, async (code) => {
 }
 .time-frame-tag.tf-short { background: rgba(234,88,12,0.1); color: #ea580c; }
 .time-frame-tag.tf-medium { background: rgba(217,119,6,0.1); color: #d97706; }
-.time-frame-tag.tf-long { background: rgba(124,58,237,0.1); color: #7c3aed; }
+.time-frame-tag.tf-long { background: var(--color-ai-bg); color: var(--color-ai); }
 
 /* 趋势证据区域 */
 .trend-evidence {
-  background: rgba(124,58,237,0.04);
-  border-left: 2px solid rgba(124,58,237,0.3);
+  background: var(--color-ai-bg);
+  border-left: 2px solid var(--color-ai-border);
   border-radius: 4px;
   padding: 0.5rem 0.6rem;
 }
 .trend-evidence .section-label {
-  color: #7c3aed;
+  color: var(--color-ai);
 }
 .evidence-text {
   font-size: 0.78rem;
@@ -4256,7 +4229,7 @@ watch(scrollToFundCode, async (code) => {
 }
 .chip-theme {
   background: rgba(168,85,247,0.08);
-  color: #7c3aed;
+  color: var(--color-ai);
 }
 
 /* 持仓列表 */
@@ -4348,8 +4321,18 @@ watch(scrollToFundCode, async (code) => {
   .header-actions .analyze-btn,
   .header-actions .verify-btn { margin-right: 0; padding: 0.35rem 0.6rem; font-size: 0.72rem; }
 
-  /* 主Tab —— 允许换行，避免3个标签挤压 */
-  .main-tabs { flex-wrap: wrap; gap: 0.15rem; }
+  /* 主 Tab：5 个页签在 390px 下需 397px，会被压成竖排。
+     收紧间距 + 隐藏数字徽章后刚好放下，仍超出时可横向滚动。 */
+  .main-tabs {
+    flex-wrap: nowrap;
+    gap: 0.1rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .main-tabs::-webkit-scrollbar { display: none; }
+  /* 徽章在移动端挤占了 tab 文字的空间，导致「事件雷达」被压成竖排 */
+  .main-tab .tab-badge { display: none; }
   .main-tab { padding: 0.35rem 0.5rem; font-size: 0.74rem; }
 
   /* 筛选区 —— 允许换行，控制最大宽度 */
@@ -4518,27 +4501,6 @@ watch(scrollToFundCode, async (code) => {
   .da-tag { font-size: 0.64rem; padding: 0.16rem 0.4rem; }
 }
 
-/* ── 验证按钮 ── */
-.verify-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 0.9rem;
-  border-radius: 6px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  border: 1px solid var(--color-border);
-  cursor: pointer;
-  transition: all 0.15s;
-  background: var(--color-bg-card);
-  color: var(--color-text-secondary);
-  margin-right: 0.5rem;
-}
-.verify-btn:hover:not(:disabled) {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-.verify-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ── 准确率统计面板 ── */
 .accuracy-panel {
@@ -4751,6 +4713,8 @@ watch(scrollToFundCode, async (code) => {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+  white-space: nowrap;
+  flex-shrink: 0;
   padding: 0.55rem 0.9rem;
   border: none;
   background: transparent;
@@ -4843,6 +4807,35 @@ watch(scrollToFundCode, async (code) => {
   color: #16a34a;
   white-space: nowrap;
 }
+
+/* 事件卡内三个次要操作（估算金额 / 深度解读 / 受益标的）原为 绿 / 紫 / 红 三色描边。
+   三者权级相同，颜色却在暗示不同语义（红色会被读成危险操作），噪声大于信息量。
+   统一为中性描边，靠图标区分功能，hover 时才用主色提亮。 */
+.btn-event-amount,
+.btn-event-impact,
+.btn-beneficiary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.32rem 0.7rem;
+  border-radius: 6px;
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  font-size: 0.72rem;
+  font-weight: 500;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.btn-event-amount:hover:not(:disabled),
+.btn-event-impact:hover:not(:disabled),
+.btn-beneficiary:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary-300);
+  background: var(--color-primary-50);
+}
+.btn-event-amount:disabled,
+.btn-event-impact:disabled,
+.btn-beneficiary:disabled { cursor: wait; opacity: 0.7; }
 .event-impact-section {
   margin-top: 0.6rem;
   padding-top: 0.5rem;
@@ -4852,27 +4845,9 @@ watch(scrollToFundCode, async (code) => {
   align-items: center;
   gap: 0.5rem;
 }
-.btn-event-impact {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.32rem 0.7rem;
-  background: linear-gradient(135deg, rgba(37,99,235,0.08), rgba(139,92,246,0.08));
-  color: #4f46e5;
-  border: 1px solid rgba(79,70,229,0.25);
-  border-radius: 4px;
-  font-size: 0.74rem;
-  cursor: pointer;
-  transition: all 0.18s;
-  font-weight: 500;
-}
 .btn-event-impact:hover:not(:disabled) {
   background: linear-gradient(135deg, rgba(37,99,235,0.15), rgba(139,92,246,0.15));
   border-color: rgba(79,70,229,0.5);
-}
-.btn-event-impact:disabled {
-  cursor: wait;
-  opacity: 0.7;
 }
 .btn-impact-toggle {
   display: inline-flex;
@@ -4907,28 +4882,6 @@ watch(scrollToFundCode, async (code) => {
 }
 
 /* ── Batch2 增强点 2：事件金额影响（纯计算） ── */
-.btn-event-amount {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.32rem 0.7rem;
-  background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(20,184,166,0.08));
-  color: #059669;
-  border: 1px solid rgba(16,185,129,0.3);
-  border-radius: 4px;
-  font-size: 0.74rem;
-  cursor: pointer;
-  transition: all 0.18s;
-  font-weight: 500;
-}
-.btn-event-amount:hover:not(:disabled) {
-  background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(20,184,166,0.15));
-  border-color: rgba(16,185,129,0.5);
-}
-.btn-event-amount:disabled {
-  cursor: wait;
-  opacity: 0.7;
-}
 .amount-summary {
   font-weight: 700;
   padding-left: 0.3rem;
@@ -4947,7 +4900,7 @@ watch(scrollToFundCode, async (code) => {
   padding: 0.5rem 0.65rem;
   background: var(--color-bg-tertiary);
   border-radius: 4px;
-  border-left: 3px solid #059669;
+  border-left: 3px solid var(--color-profit);
   font-size: 0.78rem;
 }
 .amount-row {
@@ -6012,7 +5965,7 @@ watch(scrollToFundCode, async (code) => {
   border-bottom: 1px solid var(--color-border-light);
 }
 .article-dialog-icon {
-  color: #7c3aed;
+  color: var(--color-ai);
   flex-shrink: 0;
 }
 .article-dialog-title {
@@ -6063,7 +6016,7 @@ watch(scrollToFundCode, async (code) => {
 }
 .article-url-input:focus {
   outline: none;
-  border-color: #7c3aed;
+  border-color: var(--color-ai);
 }
 .article-url-input:disabled {
   opacity: 0.6;
@@ -6114,7 +6067,7 @@ watch(scrollToFundCode, async (code) => {
   gap: 0.4rem;
   padding: 0.5rem 1rem;
   border: none;
-  background: #7c3aed;
+  background: var(--color-ai);
   color: white;
   border-radius: 6px;
   font-size: 0.82rem;
@@ -6132,8 +6085,8 @@ watch(scrollToFundCode, async (code) => {
 .fund-report-block {
   margin-top: 0.3rem;
   padding: 0.6rem;
-  background: linear-gradient(135deg, rgba(124,58,237,0.04), rgba(37,99,235,0.04));
-  border: 1px solid rgba(124,58,237,0.15);
+  background: linear-gradient(135deg, var(--color-ai-bg), rgba(37,99,235,0.04));
+  border: 1px solid var(--color-ai-border);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
@@ -6172,9 +6125,9 @@ watch(scrollToFundCode, async (code) => {
   gap: 0.3rem;
   font-size: 0.75rem;
   font-weight: 600;
-  color: #7c3aed;
+  color: var(--color-ai);
 }
-.report-title-icon { color: #7c3aed; }
+.report-title-icon { color: var(--color-ai); }
 .report-summary {
   display: inline-flex;
   align-items: center;
@@ -6281,11 +6234,11 @@ watch(scrollToFundCode, async (code) => {
   align-items: flex-start;
   gap: 0.35rem;
   padding: 0.4rem 0.5rem;
-  background: rgba(124,58,237,0.04);
-  border-left: 2px solid rgba(124,58,237,0.3);
+  background: var(--color-ai-bg);
+  border-left: 2px solid var(--color-ai-border);
   border-radius: 4px;
 }
-.report-view-icon { color: #7c3aed; flex-shrink: 0; margin-top: 1px; }
+.report-view-icon { color: var(--color-ai); flex-shrink: 0; margin-top: 1px; }
 .report-view-text {
   font-size: 0.72rem;
   color: var(--color-text-secondary);
@@ -6315,9 +6268,9 @@ watch(scrollToFundCode, async (code) => {
   justify-content: center;
 }
 .btn-report-refresh:hover:not(:disabled) {
-  border-color: #7c3aed;
-  color: #7c3aed;
-  background: rgba(124,58,237,0.04);
+  border-color: var(--color-ai);
+  color: var(--color-ai);
+  background: var(--color-ai-bg);
 }
 .btn-report-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn-report-detail:hover {
@@ -6358,7 +6311,7 @@ watch(scrollToFundCode, async (code) => {
   border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
 }
-.report-detail-header-icon { color: #7c3aed; flex-shrink: 0; }
+.report-detail-header-icon { color: var(--color-ai); flex-shrink: 0; }
 .report-detail-title {
   flex: 1;
   font-size: 0.95rem;
@@ -6446,8 +6399,8 @@ watch(scrollToFundCode, async (code) => {
 /* 段永平视角 */
 .report-detail-view {
   padding: 0.6rem 0.7rem;
-  background: rgba(124,58,237,0.04);
-  border-left: 3px solid rgba(124,58,237,0.3);
+  background: var(--color-ai-bg);
+  border-left: 3px solid var(--color-ai-border);
   border-radius: 4px;
 }
 .report-detail-view-title {
@@ -6456,7 +6409,7 @@ watch(scrollToFundCode, async (code) => {
   gap: 0.3rem;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #7c3aed;
+  color: var(--color-ai);
   margin-bottom: 0.3rem;
 }
 .report-detail-view-text {
@@ -6671,7 +6624,7 @@ watch(scrollToFundCode, async (code) => {
   gap: 0.4rem;
 }
 .report-detail-section-icon {
-  color: #7c3aed;
+  color: var(--color-ai);
   flex-shrink: 0;
   margin-right: 0.15rem;
   vertical-align: -1px;
@@ -6750,7 +6703,7 @@ watch(scrollToFundCode, async (code) => {
   padding: 0.35rem 0.5rem;
   background: var(--color-bg-card);
   border-radius: 4px;
-  border-left: 2px solid rgba(124,58,237,0.3);
+  border-left: 2px solid var(--color-ai-border);
 }
 
 /* ── 弹窗内调仓动作详情 ── */
@@ -6775,8 +6728,8 @@ watch(scrollToFundCode, async (code) => {
 /* ── 大师理念矩阵 ── */
 .master-matrix {
   padding: 0.45rem 0.5rem;
-  background: rgba(124, 58, 237, 0.04);
-  border-left: 2px solid rgba(124, 58, 237, 0.3);
+  background: var(--color-ai-bg);
+  border-left: 2px solid var(--color-ai-border);
   border-radius: 4px;
   display: flex;
   flex-direction: column;
@@ -6951,7 +6904,7 @@ watch(scrollToFundCode, async (code) => {
   align-items: center;
   gap: 0.4rem;
 }
-.pi-header-icon { color: #7c3aed; flex-shrink: 0; }
+.pi-header-icon { color: var(--color-ai); flex-shrink: 0; }
 .pi-title {
   font-size: 0.9rem;
   font-weight: 700;
@@ -6972,8 +6925,8 @@ watch(scrollToFundCode, async (code) => {
   transition: all 0.15s;
 }
 .btn-pi-refresh:hover:not(:disabled) {
-  border-color: #7c3aed;
-  color: #7c3aed;
+  border-color: var(--color-ai);
+  color: var(--color-ai);
 }
 .btn-pi-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
 
@@ -7239,7 +7192,7 @@ watch(scrollToFundCode, async (code) => {
   align-items: center;
   gap: 0.4rem;
 }
-.mb-header-icon { color: #7c3aed; flex-shrink: 0; }
+.mb-header-icon { color: var(--color-ai); flex-shrink: 0; }
 .mb-title {
   font-size: 0.9rem;
   font-weight: 700;
@@ -7260,8 +7213,8 @@ watch(scrollToFundCode, async (code) => {
   transition: all 0.15s;
 }
 .btn-mb-refresh:hover:not(:disabled) {
-  border-color: #7c3aed;
-  color: #7c3aed;
+  border-color: var(--color-ai);
+  color: var(--color-ai);
 }
 .btn-mb-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
 
@@ -7860,25 +7813,10 @@ watch(scrollToFundCode, async (code) => {
   align-items: center;
   gap: 0.5rem;
 }
-.btn-beneficiary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.32rem 0.7rem;
-  background: linear-gradient(135deg, rgba(220,38,38,0.08), rgba(234,88,12,0.08));
-  color: #dc2626;
-  border: 1px solid rgba(220,38,38,0.25);
-  border-radius: 4px;
-  font-size: 0.74rem;
-  cursor: pointer;
-  transition: all 0.18s;
-  font-weight: 500;
-}
 .btn-beneficiary:hover:not(:disabled) {
   background: linear-gradient(135deg, rgba(220,38,38,0.15), rgba(234,88,12,0.15));
   border-color: rgba(220,38,38,0.5);
 }
-.btn-beneficiary:disabled { cursor: wait; opacity: 0.7; }
 .beneficiary-count {
   margin-left: 0.2rem;
   padding: 0.1rem 0.4rem;
