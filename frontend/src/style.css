@@ -1232,8 +1232,11 @@ body[data-density="compact"] .fin-table th { padding: 0.3rem 0.6rem; }
   bottom: 0.15rem;
   width: 3px;
   border-radius: 2px;
-  background: linear-gradient(180deg, var(--color-gold) 0%, var(--color-primary) 100%);
-  opacity: 0.9;
+  /* 用纯金色而非 gold→primary 渐变：渐变在高度超过 ~120px 的卡片上会露出
+     中间的橙紫过渡段（文章列表、风险概览都踩过），看起来像渲染错误。
+     3px 宽的装饰条本来就承担不了"渐变叙事"。 */
+  background: var(--color-gold);
+  opacity: 0.72;
 }
 .editorial-card-header {
   display: flex;

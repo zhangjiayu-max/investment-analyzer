@@ -947,6 +947,13 @@ usePageRefresh(refreshAll)
   border-bottom: 1px solid var(--color-border);
 }
 .ac-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
   background: none;
   border: none;
   padding: 0.625rem 1rem;
@@ -963,6 +970,9 @@ usePageRefresh(refreshAll)
 .ac-tab-label {
   font-family: var(--font-serif);
   letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ac-tab-eyebrow {
   opacity: 0.55;
@@ -1064,6 +1074,12 @@ usePageRefresh(refreshAll)
   gap: 0.875rem;
 }
 @media (max-width: 768px) {
+  /* 三个中文标签在 390px 下放不下英文副标，隐藏后正好；标签本身省略而非换行 */
+  .ac-tab-eyebrow { display: none; }
+  .alert-panel-eyebrow { display: none; }
+  .ac-tab { padding: 0.6rem 0.4rem; font-size: 0.8rem; gap: 0.3rem; }
+  .ac-tabs { overflow-x: auto; scrollbar-width: none; }
+  .ac-tabs::-webkit-scrollbar { display: none; }
   .advice-cards-grid { grid-template-columns: 1fr; }
 }
 .advice-card {
@@ -1302,6 +1318,7 @@ usePageRefresh(refreshAll)
 .alert-panel-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;            /* 5 个子元素在窄屏必须能换行，否则互相挤压重叠 */
   gap: 0.5rem;
   padding: 0.75rem 1.25rem;
   background: var(--color-bg-hover);
@@ -1309,6 +1326,10 @@ usePageRefresh(refreshAll)
   font-weight: 600;
   border-bottom: 1px solid var(--color-border);
   margin-bottom: 0;
+}
+.alert-panel-header .title {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 .alert-panel-eyebrow {
   margin-left: auto;
@@ -1427,7 +1448,7 @@ usePageRefresh(refreshAll)
   border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
   background: transparent;
   color: var(--color-text-secondary);
-  border-radius: 12px;
+  border-radius: var(--radius-full);
   font-size: 0.72rem;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1437,7 +1458,7 @@ usePageRefresh(refreshAll)
   color: var(--color-text-primary);
 }
 .filter-chip.active {
-  background: var(--color-accent, #4fd1c5);
+  background: var(--color-primary);
   color: var(--color-bg-primary, #0a0e1a);
   border-color: var(--color-accent, #4fd1c5);
   font-weight: 600;

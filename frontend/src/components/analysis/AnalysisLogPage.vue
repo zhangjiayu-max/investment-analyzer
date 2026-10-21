@@ -623,7 +623,7 @@ onMounted(async () => {
 .filter-select { padding: 0.4rem 0.6rem; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-card); color: var(--color-text-primary); font-size: 0.8rem; }
 .filter-input { padding: 0.4rem 0.6rem; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-card); color: var(--color-text-primary); font-size: 0.8rem; min-width: 140px; }
 .filter-input::placeholder { color: var(--color-text-tertiary); }
-.filter-btn { padding: 0.4rem 0.8rem; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-card); color: var(--color-text-secondary); cursor: pointer; font-size: 0.8rem; }
+.filter-btn { padding: 0.4rem 0.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-full); background: var(--color-bg-card); color: var(--color-text-secondary); cursor: pointer; font-size: 0.8rem; }
 .filter-btn:hover { border-color: var(--color-text-tertiary); }
 .refresh-btn { margin-left: auto; }
 

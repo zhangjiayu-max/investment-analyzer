@@ -936,13 +936,30 @@ async function handleOnlineQuery() {
   }
 }
 
-const SOURCE_LABELS = {
+// 数据来源显示名。后端 final_source 是组合串：[expired_][online_]<source>[_cached]，
+// 共 14 种取值，原先的映射表只覆盖 6 个，其余直接把英文原样吐给用户
+// （local_failed_online_disabled / online_akshare_cached / expired_ttfund …）。
+// 这里改为「基础名 + 状态标签」解析，新增来源不必再改映射。
+const SOURCE_NAMES = {
   leiniuniu: '雷牛牛',
   dd_luosiding: '螺丝钉',
-  expired_leiniuniu: '过期数据',
-  akshare: 'akshare在线',
-  ttfund: '天天基金在线',
-  failed: '查询失败',
+  liuyi: '六亿',
+  akshare: 'akshare',
+  ttfund: '天天基金',
+}
+
+function sourceLabel(key) {
+  if (!key) return ''
+  if (key === 'failed') return '查询失败'
+  if (key === 'local_failed_online_disabled') return '本地失败·在线停用'
+  let s = key
+  const tags = []
+  if (s.startsWith('expired_')) { tags.push('过期'); s = s.slice(8) }
+  if (s.startsWith('online_')) { tags.push('在线'); s = s.slice(7) }
+  if (s.endsWith('_cached')) { tags.push('缓存'); s = s.slice(0, -7) }
+  if (s.endsWith('_online')) { tags.push('在线'); s = s.slice(0, -7) }
+  const name = SOURCE_NAMES[s] || s
+  return tags.length ? `${name}·${tags.join('·')}` : name
 }
 // 切换指数或指标类型时重新加载数据
 watch([selectedCode, selectedMetric], () => {
@@ -998,8 +1015,8 @@ defineExpose({ loadHistory: refreshValuationData })
     <!-- ════════ 估值查询监控卡片（闭环兜底可观测） ════════ -->
     <div v-if="queryStats && queryStats.total > 0" class="card query-stats-card">
       <div class="query-stats-header">
-        <span class="terminal-label">📊 数据健康（近{{ queryStats.days }}天）</span>
-        <button class="btn-ghost btn-sm" @click="loadQueryStats" title="刷新统计">↻</button>
+        <span class="terminal-label">数据健康（近{{ queryStats.days }}天）</span>
+        <button class="btn-ghost btn-sm" @click="loadQueryStats" title="刷新统计"><Icon name="refresh" size="13" /></button>
       </div>
       <div class="query-stats-body">
         <div class="query-stat-item">
@@ -1009,7 +1026,7 @@ defineExpose({ loadHistory: refreshValuationData })
         <div class="query-stat-item" v-for="(pct, src) in queryStats.source_percent" :key="src"
              :class="{ 'stat-failed': src === 'failed' }">
           <span class="stat-num">{{ pct }}%</span>
-          <span class="stat-lbl">{{ SOURCE_LABELS[src] || src }}</span>
+          <span class="stat-lbl">{{ sourceLabel(src) }}</span>
         </div>
         <div class="query-stat-item">
           <span class="stat-num">{{ queryStats.online_fallback_count }}</span>

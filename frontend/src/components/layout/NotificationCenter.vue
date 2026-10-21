@@ -364,7 +364,7 @@ onUnmounted(() => {
 
 .filter-chip {
   padding: 0.25rem 0.65rem;
-  border-radius: 12px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--color-border, #374151);
   background: transparent;
   color: var(--color-text-muted, #9ca3af);
@@ -378,7 +378,7 @@ onUnmounted(() => {
 }
 
 .filter-chip.active {
-  background: var(--color-primary-500, #3b82f6);
+  background: var(--color-primary);
   color: white;
   border-color: var(--color-primary-500, #3b82f6);
 }

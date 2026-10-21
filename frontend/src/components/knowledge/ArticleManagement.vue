@@ -622,7 +622,7 @@ function closePreview() { previewImage.value = null }
       <!-- Empty State -->
       <div v-if="!selectedArticle" class="empty-panel card editorial-card">
         <svg width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"/></svg>
-        <p class="empty-title">请从左侧选择一篇文章</p>
+        <p class="empty-title">选择一篇文章查看详情</p>
         <p class="empty-desc">选择后可下载图片并运行 AI 分析</p>
       </div>
     </div>
