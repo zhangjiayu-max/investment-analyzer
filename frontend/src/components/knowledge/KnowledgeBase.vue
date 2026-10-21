@@ -16,6 +16,39 @@ const activeSubcategory = ref('')
 const activeSource = ref('')
 const books = ref([])
 
+// ── 两级筛选：分类 → 子分类 ─────────────────────────────
+// 原先 31 个子分类平铺成 5 行 pill（含 6 个「best_practice, performance」这类
+// 内容多维标签，count 只有 1~2），用户面对 30+ 个选项无法决策。
+// 改为先选分类（5 个），再显示该分类下的子分类（最多 12 个）。
+const categoryOptions = computed(() => {
+  const cats = stats.value?.categories || {}
+  return Object.entries(cats)
+    .map(([key, count]) => ({ key, count, label: categoryMap[key]?.label || key }))
+    .sort((a, b) => b.count - a.count)
+})
+
+const totalCount = computed(() =>
+  categoryOptions.value.reduce((sum, c) => sum + c.count, 0))
+
+const visibleSubcategories = computed(() => {
+  if (!activeCategory.value) return []
+  return (stats.value?.subcategories || [])
+    .filter(s => s.category === activeCategory.value)
+    // 含逗号的是内容的多维标签组合，不是真正的子分类，混进来会造成选项爆炸
+    .filter(s => !String(s.subcategory).includes(','))
+    .sort((a, b) => b.count - a.count)
+})
+
+const activeCategoryLabel = computed(() =>
+  activeCategory.value ? (categoryMap[activeCategory.value]?.label || activeCategory.value) : '')
+
+function resetFilter() {
+  activeCategory.value = ''
+  activeSubcategory.value = ''
+  activeSource.value = ''
+  loadItems()
+}
+
 const confirm = ref({ visible: false, title: '', message: '', danger: false, onConfirm: null })
 
 // 分类映射（icon 走统一 Icon 组件，不再用 emoji：emoji 在各系统渲染不一致，
@@ -26,9 +59,26 @@ const categoryMap = {
   book: { label: '书籍', icon: 'book-open' },
   article: { label: '文章', icon: 'newspaper' },
   note: { label: '个人笔记', icon: 'pen-line' },
+  fund: { label: '基金指标', icon: 'chart' },
 }
 
 const subcategoryMap = {
+  // 书籍类
+  case: '案例',
+  indicator: '指标',
+  formula: '公式',
+  // 笔记类（工程实践）
+  best_practice: '最佳实践',
+  llm_engineering: 'LLM 工程',
+  performance: '性能',
+  prompt_engineering: 'Prompt 工程',
+  architecture: '架构',
+  agent: 'Agent',
+  rag: 'RAG',
+  debugging: '调试',
+  tool_eval: '工具评测',
+  devops: 'DevOps',
+  'fund-indicator': '基金指标',
   valuation: '估值',
   risk: '风险',
   fund: '基金',
@@ -193,8 +243,48 @@ function importanceClass(score) {
       <button v-if="searchQuery" class="btn-ghost" @click="searchQuery = ''; loadItems()">清除</button>
     </div>
 
-    <!-- 书籍列表 -->
-    <div v-if="activeCategory === 'book' && books.length" class="books-section">
+    <!-- 两级筛选：先选分类，再选该分类下的子分类 -->
+    <div v-if="categoryOptions.length" class="filter-block">
+      <!-- 第一级：分类 -->
+      <div class="filter-row">
+        <span class="terminal-label filter-label">FILTER · 分类</span>
+        <button :class="['filter-btn', 'filter-cat', { active: !activeCategory }]" @click="resetFilter()">
+          <span>全部</span>
+          <span class="filter-count font-jet">{{ totalCount }}</span>
+        </button>
+        <button
+          v-for="c in categoryOptions"
+          :key="c.key"
+          :class="['filter-btn', 'filter-cat', { active: activeCategory === c.key }]"
+          @click="filterByCategory(c.key)"
+        >
+          <span>{{ c.label }}</span>
+          <span class="filter-count font-jet">{{ c.count }}</span>
+        </button>
+      </div>
+
+      <!-- 第二级：该分类下的子分类（含逗号的多维标签组合已过滤） -->
+      <div v-if="visibleSubcategories.length" class="filter-row filter-row-sub">
+        <span class="terminal-label filter-label">{{ activeCategoryLabel }} · 细分</span>
+        <button :class="['filter-btn', 'filter-sub', { active: !activeSubcategory }]"
+                @click="activeSubcategory = ''; activeSource = ''; loadItems()">
+          <span>全部</span>
+        </button>
+        <button
+          v-for="s in visibleSubcategories"
+          :key="s.subcategory"
+          :class="['filter-btn', 'filter-sub', { active: activeSubcategory === s.subcategory }]"
+          @click="filterBySubcategory(s.subcategory)"
+        >
+          <span>{{ subcategoryMap[s.subcategory] || s.subcategory }}</span>
+          <span class="filter-count font-jet">{{ s.count }}</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 书籍列表：仅在「选书籍、未选子分类」时作为浏览入口显示。
+         一旦选了子分类，用户是在查具体条目，37 本书的网格只会把结果推远。 -->
+    <div v-if="activeCategory === 'book' && books.length && !activeSubcategory" class="books-section">
       <div class="books-header editorial-card-header">
         <h3 class="title">已蒸馏书籍</h3>
         <span class="meta font-jet">{{ books.length }} VOLUMES</span>
@@ -216,20 +306,6 @@ function importanceClass(score) {
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- 子分类筛选 -->
-    <div v-if="stats?.subcategories?.length" class="filter-bar">
-      <span class="terminal-label filter-label">FILTER · 筛选</span>
-      <button
-        v-for="sub in stats.subcategories"
-        :key="`${sub.category}-${sub.subcategory}`"
-        :class="['filter-btn', { active: activeSubcategory === sub.subcategory && activeCategory === sub.category }]"
-        @click="activeCategory = sub.category; activeSubcategory = sub.subcategory; loadItems()"
-      >
-        <span>{{ categoryMap[sub.category]?.label || sub.category }}·{{ subcategoryMap[sub.subcategory] || sub.subcategory }}</span>
-        <span class="filter-count font-jet">{{ sub.count }}</span>
-      </button>
     </div>
 
     <!-- 知识列表 -->
@@ -393,8 +469,49 @@ function renderContent(content) {
   align-items: center;
   margin-bottom: 1.5rem;
 }
+
+/* ── 两级筛选 ── */
+.filter-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1.4rem;
+}
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
 .filter-label {
   flex-shrink: 0;
+  min-width: 5.5rem;
+}
+.filter-cat {
+  font-weight: 500;
+}
+/* 第二级刻意降权：字号更小、透明底、文字更淡。
+   两级如果同权重，用户会分不清「选了分类」和「选了细分」。 */
+.filter-sub {
+  font-size: 0.74rem;
+  padding: 0.26rem 0.62rem;
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+.filter-sub .filter-count {
+  opacity: 0.7;
+}
+.filter-sub:hover {
+  color: var(--color-text-secondary);
+}
+.filter-sub.active {
+  background: var(--color-primary-50);
+  color: var(--color-primary);
+  border-color: var(--color-primary-300);
+  font-weight: 600;
+}
+.dark .filter-sub.active {
+  background: var(--color-primary-bg);
 }
 .filter-btn {
   display: inline-flex;
@@ -673,15 +790,40 @@ function renderContent(content) {
     align-self: flex-start;
   }
   /* 筛选 pills 保持横排换行：改成 column 会把每个药丸拉成整行宽度，
-     一屏只能看到 1 个筛选项，横向浪费严重。让标签单独占一行即可。 */
+     一屏只能看到 1 个筛选项。让标签独占一行即可。 */
   .filter-bar {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.45rem;
   }
+  /* 6 张 KPI 卡在 390px 下占 3 行近 500px，把筛选区顶到视口之外。
+     压缩卡片内距与数字字号，让「分类筛选」回到首屏。 */
+  .stats-grid {
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .stat-card {
+    padding: 0.6rem 0.7rem;
+  }
+  .stat-value {
+    font-size: 1.12rem;
+  }
+  .stat-label {
+    font-size: 0.68rem;
+  }
+  .filter-row {
+    gap: 0.4rem;
+  }
   .filter-label {
     width: 100%;
+    min-width: 0;
+    margin-bottom: 0.1rem;
+  }
+  .filter-row-sub {
+    padding-left: 0;
+    padding-top: 0.15rem;
+    border-top: 1px dashed var(--color-border-light);
   }
   .item-importance {
     margin-left: 0;
