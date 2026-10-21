@@ -968,15 +968,15 @@ const tradeSuggestions = computed(() => {
 }
 
 .eval-status--good {
-  background: #f6ffed;
+  background: var(--color-success-bg);
 }
 
 .eval-status--ok {
-  background: #fffbe6;
+  background: var(--color-warning-bg);
 }
 
 .eval-status--bad {
-  background: #fff2f0;
+  background: var(--color-danger-bg);
 }
 
 @keyframes pulse {
@@ -1049,10 +1049,10 @@ const tradeSuggestions = computed(() => {
   font-weight: 500;
 }
 
-.eval-level--good { background: #f6ffed; color: #52c41a; }
-.eval-level--ok { background: #fffbe6; color: #faad14; }
-.eval-level--bad { background: #fff7e6; color: #fa8c16; }
-.eval-level--very-bad { background: #fff2f0; color: #ff4d4f; }
+.eval-level--good { background: var(--color-success-bg); color: var(--color-success); }
+.eval-level--ok { background: var(--color-warning-bg); color: var(--color-warning); }
+.eval-level--bad { background: var(--color-warning-bg); color: var(--color-warning); }
+.eval-level--very-bad { background: var(--color-danger-bg); color: var(--color-danger); }
 
 .eval-dimensions {
   display: flex;
@@ -1314,9 +1314,9 @@ const tradeSuggestions = computed(() => {
 .execution-toggle-icon { font-size: 0.9rem; }
 
 .execution-complexity { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; font-weight: 600; }
-.complexity-simple { background: #dcfce7; color: #166534; }
-.complexity-medium { background: #fef9c3; color: #854d0e; }
-.complexity-complex { background: #fee2e2; color: #991b1b; }
+.complexity-simple { background: var(--color-success-bg); color: var(--color-success); }
+.complexity-medium { background: var(--color-warning-bg); color: var(--color-warning); }
+.complexity-complex { background: var(--color-danger-bg); color: var(--color-danger); }
 
 .execution-total-time { margin-left: auto; font-weight: 600; color: var(--color-text-primary); }
 .execution-toggle-arrow { color: var(--color-text-muted); font-size: 0.75rem; transition: transform var(--transition-fast); }
@@ -1819,7 +1819,7 @@ const tradeSuggestions = computed(() => {
   padding: 4px 10px;
   font-size: 12px;
   border: 1px solid var(--color-border, #d1d5db);
-  background: white;
+  background: var(--color-bg-card);
   color: var(--color-text-secondary, #4b5563);
   border-radius: 4px;
   cursor: pointer;

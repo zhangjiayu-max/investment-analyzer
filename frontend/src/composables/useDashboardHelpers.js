@@ -2,6 +2,8 @@
  * Shared helper functions for Dashboard and its sub-components.
  */
 
+import { renderMarkdown } from './useMarkdown'
+
 export const assessmentColors = {
   extreme: { bg: '#dc2626', label: '极度低估' },
   undervalued: { bg: '#f59e0b', label: '低估' },
@@ -52,13 +54,9 @@ export function formatBriefingTime(ts) {
 
 export function renderBriefing(text) {
   if (!text) return ''
-  const html = text
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/^\s*[-*]\s+(.*)/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/gs, m => `<ul>${m}</ul>`)
-    .replace(/\n/g, '<br>')
-  // DOMPurify must be called at the component level since it's a dependency
-  return html
+  // 统一走全站 Markdown 管线（marked + DOMPurify），
+  // 旧实现只处理 **加粗** 与 - 列表，### 标题会原样带井号输出。
+  return renderMarkdown(text)
 }
 
 export function getBondTempLabel(temp) {

@@ -204,6 +204,65 @@
   --color-status-fair: var(--color-text-secondary);
   --color-status-overvalued: var(--color-warning);
   --color-status-risk: var(--color-danger);
+
+  /* ══ 兼容别名层 ══
+     历史组件引用了这批变量名但从未定义，导致 var() 无效、
+     属性回落到 initial/inherit（骨架屏透明、涨跌色丢失、遮罩失效）。
+     此处统一映射到主 token，禁止再新增无定义的变量名。 */
+  /* 背景层级 */
+  --color-bg-primary: var(--color-bg-card);
+  --color-bg-elevated: var(--color-bg-card);
+  --color-bg-white: var(--color-bg-card);
+  --color-bg-soft: #f7f9fb;
+  --color-bg-tertiary: #eef1f5;
+  --color-bg-muted: #eef1f5;
+  --color-bg-sunken: #eef1f5;
+  --color-bg-dark: #111827;
+
+  /* 表面 */
+  --color-surface: var(--color-bg-card);
+  --color-surface-hover: var(--color-bg-secondary);
+  --color-card: var(--color-bg-card);
+  --color-card-bg: var(--color-bg-card);
+  --card-bg: var(--color-bg-input);
+  --card-color: var(--color-primary);
+
+  /* 涨跌别名 */
+  --color-up: var(--color-profit);
+  --color-down: var(--color-loss);
+  --color-profit-light: var(--color-profit-bg);
+  --color-loss-light: var(--color-loss-bg);
+  --color-warning-light: var(--color-warning-bg);
+
+  /* 边框 */
+  --color-border-soft: var(--color-border-light);
+  --color-border-lighter: #f1f5f9;
+
+  /* 功能色 */
+  --color-skeleton: #e9edf2;
+  --color-overlay: rgba(15, 23, 42, 0.45);
+  --color-muted: var(--color-text-muted);
+  --text-tertiary: var(--color-text-tertiary);
+  --ring-pct: 0;
+  --color-link: var(--color-primary-600);
+  --color-gold-bg: rgba(201, 168, 76, 0.12);
+  --color-purple: #7c3aed;
+  --color-purple-bg: rgba(124, 58, 237, 0.1);
+  --color-purple-border: rgba(124, 58, 237, 0.25);
+
+  /* 形状与阴影 */
+  --radius-full: 999px;
+  --shadow-elevated: 0 8px 24px rgba(15, 23, 42, 0.1);
+  --shadow-floating: 0 12px 32px rgba(15, 23, 42, 0.14);
+  --font-jet: var(--font-num-mono);
+
+  /* 旧命名别名（ActionCard 等组件用 var(--x, 硬编码浅色)，
+     变量缺定义时会回落到浅色，暗色主题即破功） */
+  --surface: var(--color-bg-card);
+  --surface-2: var(--color-bg-secondary);
+  --accent: var(--color-primary);
+  --border: var(--color-border);
+  --text-primary: var(--color-text-primary);
 }
 
 /* ══════════════════════════════════════════════════════
@@ -315,6 +374,25 @@
 
   --font-num-display: 'SF Pro Display', -apple-system, 'PingFang SC', sans-serif;
   --font-num-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', monospace;
+
+  /* 兼容别名层（暗色覆写，与亮色同名 token 一一对应） */
+  --color-bg-soft: #131820;
+  --color-bg-tertiary: #1b212b;
+  --color-bg-muted: #1b212b;
+  --color-bg-sunken: #10151c;
+  --color-bg-dark: #010409;
+
+  --color-border-lighter: #21262d;
+
+  --color-skeleton: #232a34;
+  --color-overlay: rgba(1, 4, 9, 0.72);
+  --color-gold-bg: rgba(212, 168, 67, 0.14);
+  --color-purple: #a78bfa;
+  --color-purple-bg: rgba(167, 139, 250, 0.12);
+  --color-purple-border: rgba(167, 139, 250, 0.28);
+
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-floating: 0 12px 32px rgba(0, 0, 0, 0.6);
 }
 
 /* ── Global Reset ── */

@@ -2303,7 +2303,7 @@ watch(scrollToFundCode, async (code) => {
                   <span
                     v-if="d.verify_7d_change_pct != null"
                     class="mb-verify-change"
-                    :style="{ color: d.verify_7d_change_pct >= 0 ? '#4caf50' : '#f44336' }"
+                    :style="{ color: d.verify_7d_change_pct >= 0 ? 'var(--color-profit)' : 'var(--color-loss)' }"
                   >
                     {{ d.verify_7d_change_pct >= 0 ? '+' : '' }}{{ Number(d.verify_7d_change_pct).toFixed(2) }}%
                   </span>

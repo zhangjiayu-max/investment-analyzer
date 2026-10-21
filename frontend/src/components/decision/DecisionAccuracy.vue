@@ -329,7 +329,7 @@ onMounted(loadAll)
       <div class="adoption-grid">
         <!-- 左：采纳率 -->
         <div class="adoption-block">
-          <div class="adoption-ring" :style="{ '--ring-pct': adoptionRatePct + '%' }">
+          <div class="adoption-ring" :style="{ '--ring-pct': Number(adoptionRatePct) || 0 }">
             <div class="ring-track"></div>
             <div class="ring-fill"></div>
             <div class="ring-center">

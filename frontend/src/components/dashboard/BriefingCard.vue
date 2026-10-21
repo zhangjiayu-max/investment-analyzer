@@ -1,7 +1,6 @@
 <script setup>
 import MarkdownActions from '../ui/MarkdownActions.vue'
 import { ref } from 'vue'
-import DOMPurify from 'dompurify'
 import { formatBriefingTime, renderBriefing } from '../../composables/useDashboardHelpers'
 import AIActionButton from '../ui/AIActionButton.vue'
 
@@ -14,9 +13,9 @@ const props = defineProps({
 
 const emit = defineEmits(['regenerate', 'toggle', 'submit-feedback'])
 
+// renderBriefing 内部已走 marked + DOMPurify 统一管线，无需二次清洗
 function safeRenderBriefing(text) {
-  const html = renderBriefing(text)
-  return DOMPurify.sanitize(html)
+  return renderBriefing(text)
 }
 
 function toggleFeedback(rating) {
@@ -190,12 +189,114 @@ function submitFeedbackWithComment() {
   margin: 0.3rem 0;
   padding-left: 1.2rem;
 }
+.briefing-body :deep(ol) {
+  margin: 0.3rem 0;
+  padding-left: 1.4rem;
+}
 .briefing-body :deep(li) {
   margin-bottom: 0.2rem;
 }
 .briefing-body :deep(strong) {
   color: var(--color-text-primary);
   font-weight: 600;
+}
+/* ── Markdown 层级：标题 / 段落 / 引用 / 代码 / 表格 ── */
+.briefing-body :deep(h1),
+.briefing-body :deep(h2) {
+  margin: 1.1rem 0 0.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.45;
+  color: var(--color-text-primary);
+  letter-spacing: -0.01em;
+}
+.briefing-body :deep(h3) {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+.briefing-body :deep(h4),
+.briefing-body :deep(h5),
+.briefing-body :deep(h6) {
+  margin: 0.75rem 0 0.3rem;
+  font-size: 0.86rem;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+.briefing-body :deep(h1:first-child),
+.briefing-body :deep(h2:first-child),
+.briefing-body :deep(h3:first-child) {
+  margin-top: 0.15rem;
+}
+.briefing-body :deep(p) {
+  margin: 0 0 0.6rem;
+  line-height: 1.75;
+}
+.briefing-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.briefing-body :deep(blockquote) {
+  margin: 0.6rem 0;
+  padding: 0.45rem 0.75rem;
+  border-left: 3px solid var(--color-primary-300);
+  background: var(--color-primary-glow);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--color-text-secondary);
+}
+.briefing-body :deep(blockquote p) {
+  margin: 0;
+}
+.briefing-body :deep(hr) {
+  margin: 1rem 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+.briefing-body :deep(code) {
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  background: var(--color-bg-tertiary);
+  font-family: var(--font-num-mono);
+  font-size: 0.8rem;
+  color: var(--color-text-primary);
+}
+.briefing-body :deep(pre) {
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-tertiary);
+}
+.briefing-body :deep(pre code) {
+  padding: 0;
+  background: none;
+}
+.briefing-body :deep(table) {
+  width: 100%;
+  margin: 0.6rem 0;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.briefing-body :deep(th),
+.briefing-body :deep(td) {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--color-border-light);
+  text-align: left;
+}
+.briefing-body :deep(th) {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: var(--color-bg-secondary);
+}
+.briefing-body :deep(a) {
+  color: var(--color-link);
+  text-decoration: none;
+}
+.briefing-body :deep(a:hover) {
+  text-decoration: underline;
 }
 .briefing-footer {
   display: flex;
