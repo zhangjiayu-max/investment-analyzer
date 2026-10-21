@@ -17,7 +17,8 @@ import os
 
 # 日志持久化：按天轮转，保留7天
 LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+if not LOG_DIR.exists():
+    LOG_DIR.mkdir()
 log_fmt = "%(asctime)s [%(name)s] %(message)s"
 # P2 修复 conv_190：先清除 root logger 已有 handler，避免 uvicorn/basicConfig 重复添加
 _root_logger = logging.getLogger()
