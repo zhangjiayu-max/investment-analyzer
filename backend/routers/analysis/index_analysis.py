@@ -477,6 +477,11 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
         full_prompt += f"\n\n<knowledge_base>\n知识库检索结果（与{index_label}相关的历史分析和文章）：{rag_context}\n</knowledge_base>"
     if portfolio_context:
         full_prompt += f"\n\n<user_portfolio>\n用户持仓情况（与{index_label}相关）：\n{portfolio_context}\n</user_portfolio>"
+    else:
+        # 显式声明"未取到"而不是"不存在"：缺失标签不等于用户未持有
+        full_prompt += ("\n\n<user_portfolio>\n本次未获取到与该指数直接相关的持仓明细。"
+                        "这不代表用户未持有，禁止据此断言“未持有”；"
+                        "如需持仓结论，应写明“未获取到相关持仓数据，无法判断”。\n</user_portfolio>")
     if news_context:
         full_prompt += f"\n\n<latest_news>\n{index_label}相关新闻与政策：\n{news_context}\n</latest_news>"
 
@@ -557,12 +562,14 @@ async def _execute_index_analysis(history_id: int, req_data: dict, agent: dict, 
     async def _auto_evaluate():
         try:
             from agent.eval_scorer import evaluate_llm_output
+            from db.agent_analysis_log import resolve_eval_target
+            _ttype, _tid = resolve_eval_target("analysis_history", history_id, "analysis")
             await evaluate_llm_output(
                 query=f"分析 {req.index_name}({req.index_code}) 的估值",
                 output=result_text,
                 context=f"新闻: {news_context[:300]}\n估值: {valuation_context[:300]}",
-                target_type="analysis",
-                target_id=history_id,
+                target_type=_ttype,
+                target_id=_tid,
                 analysis_type="index_analysis",
             )
         except Exception as e:

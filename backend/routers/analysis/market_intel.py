@@ -782,6 +782,20 @@ async def _do_market_intelligence():
             policy_text += f"CPI: {cpi.get('latest', '?')}% "
 
     sector_perf_text = ""
+    # 统一行情快照：全系统同一交易日唯一口径，避免与板块数据各自表述
+    snapshot_text = "（未获取到行情快照，禁止描述今日大盘涨跌）"
+    try:
+        from services.market.snapshot_service import (
+            get_trading_day_snapshot, format_snapshot_text,
+        )
+        _snap = await asyncio.to_thread(get_trading_day_snapshot)
+        snapshot_text = format_snapshot_text(_snap)
+        # 板块/涨跌家数也走同一份快照，避免同一 prompt 内出现两套行情数字
+        if _snap.get("payload"):
+            market_overview = _snap["payload"]
+    except Exception as e:
+        logger.warning(f"行情快照获取失败: {e}")
+
     if market_overview:
         sectors_top = market_overview.get("sectors_top", [])
         sectors_bottom = market_overview.get("sectors_bottom", [])
@@ -803,6 +817,9 @@ async def _do_market_intelligence():
     prompt = f"""{base_prompt}
 
 ---
+
+【统一行情快照（唯一大盘口径）】
+{snapshot_text}
 
 【央视新闻联播（政策风向标）】
 {cctv_text}
@@ -844,7 +861,9 @@ async def _do_market_intelligence():
 2. 如果某板块新闻利好但今日实际下跌，需说明「短期承压但中长期有逻辑」，不要标为"今日热门"
 3. 结合板块涨跌和新闻，区分「已兑现」（已大涨）和「待兑现」（有逻辑但还没涨）的机会
 4. 结合事件雷达验证结果，给出未来 1-2 周偏多/偏空的短期判断
-5. 结合关注基金信号，提示哪些基金更接近可上车区间"""
+5. 结合关注基金信号，提示哪些基金更接近可上车区间
+6. 大盘涨跌、涨跌家数、成交额只能引用【统一行情快照】，并沿用其数据截止日；
+   若截止日不是今天，summary 中不得写"今日大涨/大跌"，应写明"截至 YYYY-MM-DD 收盘"""
 
     sectors = []
     summary = ""
@@ -918,10 +937,21 @@ async def _do_market_intelligence():
     _mi_history_id = None
     try:
         conn = _get_conn()
+        # 结构化字段全量落库：fetch_source_result 会转成可读 markdown 展示，
+        # 只存 summary+sectors 会让详情页丢掉政策信号/周度判断/风险提示。
+        _mi_payload = {
+            "summary": summary,
+            "sectors": sector_names,
+            "cctv_signal": cctv_signal,
+            "forecast_1w": forecast_1w,
+            "forecast_2w": forecast_2w,
+            "risk_warning": risk_warning,
+            "watchlist_takeaway": watchlist_takeaway,
+        }
         _mi_cur = conn.execute(
             "INSERT INTO analysis_history (agent_id, agent_name, prompt_used, news_context, result, token_usage, status, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (agent_id or 0, "市场情报分析师", base_prompt[:500], news_text[:500],
-             json.dumps({"summary": summary, "sectors": sector_names}, ensure_ascii=False),
+             json.dumps(_mi_payload, ensure_ascii=False),
              (response.usage.total_tokens if llm_status == "success" and hasattr(response, 'usage') and response.usage else 0),
              llm_status, llm_error_msg[:500] if llm_status == "error" else "")
         )

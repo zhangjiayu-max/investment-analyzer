@@ -1601,6 +1601,10 @@ def init_db():
     # ── 知识图谱表 ──────────────────────────────────────
     init_knowledge_graph(conn)
 
+    # ── 交易日行情快照（2026-10-21：全系统统一行情口径）──
+    from db.market_snapshot import init_table as _init_market_snapshot
+    _init_market_snapshot(conn)
+
     # ── 跨系统桥接层 ──────────────────────────────────────
     init_conclusions_tables(conn)
 

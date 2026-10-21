@@ -245,6 +245,73 @@ def update_eval_result(log_id: int, eval_score: float) -> bool:
     return updated
 
 
+def resolve_eval_target(source_table: str, source_id: int, analysis_type: str = "") -> tuple:
+    """把（源表, 源表主键）解析成 llm_feedback 的 target 键。
+
+    统一契约为 ("analysis_log", agent_analysis_log.id)，与
+    get_analysis_log_detail 的读取方式一致。
+
+    历史问题：daily_report / app.py / index_analysis 三个自动评估调用方
+    直接写 (analysis_type, source_id)，例如 ("daily_report", 221)，而详情
+    接口读 ("analysis_log", 139)，两边键不同 → 列表已有分数，详情页却永远
+    显示"暂无评估数据"。这里统一收敛到 log_id，并保留旧键作为兜底。
+    """
+    if source_id:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT id FROM agent_analysis_log WHERE source_table = ? AND source_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (source_table, source_id),
+            ).fetchone()
+            if row:
+                return ("analysis_log", row[0])
+        except Exception as e:
+            logger.warning(f"解析评估目标失败 {source_table}:{source_id}: {e}")
+        finally:
+            conn.close()
+    # 兜底：保持旧行为，至少不丢评估结果
+    if analysis_type and source_id:
+        return (analysis_type, source_id)
+    return ("analysis_log", source_id)
+
+
+def render_structured_result(text: str) -> str:
+    """把结构化 JSON 结果转成可读 markdown。
+
+    市场情报（market_intel）的 result 存的是
+    {"summary": "...", "sectors": [...]} 原文，前端按 markdown 渲染会直接
+    露出花括号。这里在展示与评分入口统一转写，不动存量数据格式。
+    """
+    s = (text or "").strip()
+    if not s.startswith("{"):
+        return text
+    try:
+        data = json.loads(s)
+    except (ValueError, TypeError):
+        return text
+    if not isinstance(data, dict) or not data.get("summary"):
+        return text
+
+    parts = ["## 市场情报摘要", "", str(data["summary"]).strip()]
+    names = []
+    for item in data.get("sectors") or []:
+        name = item.get("name") if isinstance(item, dict) else str(item)
+        if name:
+            names.append(str(name))
+    if names:
+        parts += ["", "**热门板块**：" + "、".join(names)]
+    for key, label in (("cctv_signal", "政策信号"),
+                       ("forecast_1w", "未来 1 周"),
+                       ("forecast_2w", "未来 2 周"),
+                       ("risk_warning", "风险提示"),
+                       ("watchlist_takeaway", "关注基金")):
+        value = data.get(key)
+        if value:
+            parts += ["", f"**{label}**：{str(value).strip()}"]
+    return "\n".join(parts)
+
+
 def fetch_source_result(source_table: str, source_id: int, trace_id: str = None) -> str:
     """按 source_table + source_id 查回原始记录的完整 result。
 
@@ -277,7 +344,7 @@ def fetch_source_result(source_table: str, source_id: int, trace_id: str = None)
                 result = row[0] or ""
 
         conn.close()
-        return result
+        return render_structured_result(result)
     except Exception as e:
         conn.close()
         logger.warning(f"查回原始记录失败 {source_table}:{source_id} trace={trace_id}: {e}")

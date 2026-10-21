@@ -1608,7 +1608,22 @@ def _yingmi_hot_topics(arguments):
 
 
 def _yingmi_latest_quotations(arguments):
-    return _call_yingmi("get_latest_quotations")
+    """盈米最新行情（基金净值口径）。
+
+    追加全系统统一的大盘快照（只读，不触发抓取），让专家拿到的大盘涨跌
+    与其他分析共用同一口径与数据截止日，避免"基金净值口径"被当成大盘涨跌。
+    """
+    raw = _call_yingmi("get_latest_quotations")
+    try:
+        from services.market.snapshot_service import (
+            get_trading_day_snapshot, format_snapshot_text,
+        )
+        snapshot = get_trading_day_snapshot(peek=True)
+        if snapshot.get("payload"):
+            return f"{raw}\n\n{format_snapshot_text(snapshot, with_sectors=False)}"
+    except Exception as exc:
+        logger.warning(f"[yingmi_latest_quotations] 追加统一行情快照失败: {exc}")
+    return raw
 
 
 def _yingmi_diagnose_portfolio(arguments):

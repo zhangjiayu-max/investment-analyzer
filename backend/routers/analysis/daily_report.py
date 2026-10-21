@@ -193,31 +193,15 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         except Exception as e:
             logging.warning(f"盈米 MCP 数据获取失败: {e}")
 
-        # 市场全景
+        # 市场全景 — 统一快照口径（同一交易日全系统共用一份，带数据截止日）
         market_context = "暂无行情数据"
         try:
-            from services.market_data import get_market_overview
-            overview = get_market_overview()
-            market_lines = []
-            if overview.get("indices"):
-                market_lines.append("【主要指数】")
-                for idx in overview["indices"]:
-                    sign = "+" if idx["change_pct"] >= 0 else ""
-                    market_lines.append(f"- {idx['name']}: {idx['price']}（{sign}{idx['change_pct']}%）成交{idx.get('volume_yi',0):.0f}亿")
-            b = overview.get("breadth", {})
-            if b.get("up"):
-                market_lines.append(f"\n【涨跌统计】上涨{b['up']} / 下跌{b['down']} / 成交{b.get('total_volume_yi',0):.0f}亿")
-            if overview.get("sectors_top"):
-                market_lines.append("\n【领涨板块】")
-                for s in overview["sectors_top"]:
-                    market_lines.append(f"- {s['name']}: +{s['change_pct']}%")
-            if overview.get("sectors_bottom"):
-                market_lines.append("\n【领跌板块】")
-                for s in overview["sectors_bottom"]:
-                    market_lines.append(f"- {s['name']}: {s['change_pct']}%")
-            market_context = "\n".join(market_lines) if market_lines else "暂无行情数据"
+            from services.market.snapshot_service import (
+                get_trading_day_snapshot, format_snapshot_text,
+            )
+            market_context = format_snapshot_text(get_trading_day_snapshot())
         except Exception as e:
-            logging.warning(f"行情数据获取失败: {e}")
+            logging.warning(f"行情快照获取失败: {e}")
 
         val_context = "暂无估值数据"
         try:
@@ -326,7 +310,9 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
 【债券市场】
 {bond_text}
 
-请按照报告结构要求，基于以上真实数据撰写今日市场简报。"""
+请按照报告结构要求，基于以上真实数据撰写市场简报。
+行情部分必须沿用【市场行情】标注的数据截止日：若截止日不是今天，正文不得写"今日涨跌/今日收涨"，
+应写明"截至 YYYY-MM-DD 收盘"；不得引入其他来源的大盘涨跌数字，也不得凭新闻描述反推指数涨跌幅。"""
 
         response = await asyncio.to_thread(lambda: _call_llm(
             caller="daily_report",
@@ -341,6 +327,24 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         ))
         result_text = response.choices[0].message.content or ""
         token_usage = response.usage.total_tokens if response.usage else 0
+
+        # P0 持仓约束冲突守卫：日报最容易在"已超权益目标"的同时给出加仓金额
+        try:
+            from agent.safety.position_constraint_guard import enforce_position_constraint_guard
+            result_text, _constraint_warnings = enforce_position_constraint_guard(result_text)
+            if _constraint_warnings:
+                logging.info(f"日报持仓约束冲突守卫触发: {_constraint_warnings}")
+        except Exception as _constraint_err:
+            logging.warning(f"日报持仓约束冲突守卫失败: {_constraint_err}")
+
+        # 行情日期守卫：库内最新交易日落后于今天时，声明数据截止日
+        try:
+            from agent.safety.market_date_guard import enforce_market_date_guard
+            result_text, _date_warnings = enforce_market_date_guard(result_text)
+            if _date_warnings:
+                logging.info(f"日报行情日期守卫触发: {_date_warnings}")
+        except Exception as _date_err:
+            logging.warning(f"日报行情日期守卫失败: {_date_err}")
 
         new_id = create_analysis_history(
             index_code="", index_name="",
@@ -398,12 +402,14 @@ async def _run_regenerate_daily_report_async(task_id: int, agent: dict):
         async def _auto_eval():
             try:
                 from agent.eval_scorer import evaluate_llm_output
+                from db.agent_analysis_log import resolve_eval_target
+                _ttype, _tid = resolve_eval_target("analysis_history", new_id, "daily_report")
                 await evaluate_llm_output(
                     query="生成今日市场简报",
                     output=result_text,
                     context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
-                    target_type="daily_report",
-                    target_id=new_id,
+                    target_type=_ttype,
+                    target_id=_tid,
                     analysis_type="daily_report",
                 )
             except Exception as e:

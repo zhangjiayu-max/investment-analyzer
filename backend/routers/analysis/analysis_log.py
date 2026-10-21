@@ -113,6 +113,15 @@ async def get_analysis_log_detail_api(log_id: int):
     try:
         from db import get_llm_feedback_by_target
         fb = get_llm_feedback_by_target("analysis_log", log_id)
+        if not fb:
+            # 兼容历史数据：旧自动评估把键写成 (analysis_type, source_id)，
+            # 例如 ("daily_report", 221)。新写入已统一为 analysis_log/log_id。
+            legacy_type = log.get("analysis_type") or ""
+            legacy_id = log.get("source_id")
+            if legacy_type and legacy_id:
+                fb = get_llm_feedback_by_target(legacy_type, legacy_id)
+                if not fb and legacy_type == "index_analysis":
+                    fb = get_llm_feedback_by_target("analysis", legacy_id)
         if fb:
             comment = fb.get("comment") or ""
             reasons = {}

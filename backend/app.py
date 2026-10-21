@@ -1703,12 +1703,14 @@ async def _auto_daily_report():
             async def _auto_eval_report():
                 try:
                     from agent.eval_scorer import evaluate_llm_output
+                    from db.agent_analysis_log import resolve_eval_target
+                    _ttype, _tid = resolve_eval_target("analysis_history", report_id, "daily_report")
                     await evaluate_llm_output(
                         query="生成今日市场简报",
                         output=result_text,
                         context=f"新闻: {news_context[:300]}\n估值: {val_context[:300]}",
-                        target_type="daily_report",
-                        target_id=report_id,
+                        target_type=_ttype,
+                        target_id=_tid,
                         analysis_type="daily_report",
                     )
                 except Exception as e:
