@@ -2012,9 +2012,8 @@ async def fund_holdings_api(code: str, year: str = None):
 
 @app.post("/api/valuations/fetch-recent")
 async def fetch_recent_valuations():
-    """自动抓取近期估值数据（从乐咕乐股）。"""
-    from services.market_data import get_index_valuation
-    from db import save_valuation
+    """自动抓取近期估值数据（宽基 PE 分位，中证指数官方口径）。"""
+    from db import fetch_recent_wide_base_valuations
     from datetime import datetime
 
     # 常用指数列表（代码 -> 名称）
@@ -2027,35 +2026,13 @@ async def fetch_recent_valuations():
         ("399303", "国证2000"),
     ]
 
-    fetched = 0
-    errors = []
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    for code, name in indexes_to_fetch:
-        try:
-            val = get_index_valuation(code)
-            if val and val.get("pe_percentile") is not None:
-                # 确定指数代码后缀
-                full_code = code
-                if code.startswith("399"):
-                    full_code = f"{code}.SZ"
-                elif code.startswith("000"):
-                    full_code = f"{code}.SH"
-
-                save_valuation({
-                    "index_code": full_code,
-                    "index_name": val.get("index_name", name),
-                    "metric_type": "市盈率",
-                    "current_value": val.get("pe"),
-                    "percentile": val.get("pe_percentile"),
-                    "snapshot_date": today,
-                })
-                fetched += 1
-        except Exception as e:
-            errors.append(f"{name}: {str(e)}")
-
+    # 抓取与落库的单位换算统一在 db 层（pe_percentile 是 0-1 比例）
+    result = fetch_recent_wide_base_valuations(
+        indexes_to_fetch, snapshot_date=datetime.now().strftime("%Y-%m-%d")
+    )
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return {"ok": True, "fetched": fetched, "errors": errors, "checked_at": checked_at}
+    return {"ok": True, "fetched": result["fetched"], "errors": result["errors"],
+            "checked_at": checked_at}
 
 
 # ── Shadow Mode API ──────────────────────────────────

@@ -18,6 +18,7 @@ from db._utils import (
 from db.valuations import (
     save_valuation, get_valuation_history, get_latest_valuation,
     get_best_valuation, get_valuation_query_stats,
+    fetch_recent_wide_base_valuations,
     list_valuation_indexes, list_index_freshness, search_indexes_by_keyword,
     get_index_info, save_index_info, get_valuation_by_image,
     save_dd_valuation, list_dd_valuations, get_dd_valuation, get_dd_parsed_image_paths,

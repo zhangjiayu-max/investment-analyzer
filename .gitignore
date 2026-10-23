@@ -49,6 +49,7 @@ logs/
 # Temporary
 *.tmp
 *.bak
+.workbuddy/tmp-pytest/
 .worktrees/
 .superpowers/
 

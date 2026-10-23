@@ -152,6 +152,53 @@ def save_valuation(data: dict, source_image: str = None, source_url: str = None,
     return valuation_id
 
 
+def fetch_recent_wide_base_valuations(indexes: list[tuple[str, str]],
+                                     snapshot_date: str | None = None) -> dict:
+    """抓取宽基指数 PE 估值并落库，返回 {"fetched": int, "errors": list[str]}。
+
+    单位契约：get_index_valuation().pe_percentile 约定为 0-1 比例
+    （见 services/market/market_data.py 文档，与 _fetch_online_sources 一致），
+    这里显式声明 percentile_unit='ratio'，交由 save_valuation 统一换算成百分制。
+    历史上该路径漏声明单位，导致「47% 分位」被存成 0.47，宽基分位缩小 100 倍。
+
+    越界值视为源端口径变更：跳过并记录错误，不按数值猜尺度。
+    """
+    from services.market_data import get_index_valuation
+
+    today = snapshot_date or date.today().isoformat()
+    fetched = 0
+    errors: list[str] = []
+    for code, name in indexes:
+        try:
+            result = get_index_valuation(code)
+            raw_pct = result.get("pe_percentile") if result else None
+            if raw_pct is None:
+                continue
+            if (isinstance(raw_pct, bool) or not isinstance(raw_pct, (int, float))
+                    or not 0 <= raw_pct <= 1):
+                errors.append(f"{name}: pe_percentile 越界 {raw_pct!r}（契约 0-1），已跳过该指数")
+                continue
+            if code.startswith("399"):
+                full_code = f"{code}.SZ"
+            elif code.startswith("000"):
+                full_code = f"{code}.SH"
+            else:
+                full_code = code
+            save_valuation({
+                "index_code": full_code,
+                "index_name": result.get("index_name") or name,
+                "metric_type": "市盈率",
+                "current_value": result.get("pe"),
+                "percentile": raw_pct,
+                "percentile_unit": "ratio",
+                "percentile_window": "近3年",
+            }, snapshot_date=today)
+            fetched += 1
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    return {"fetched": fetched, "errors": errors}
+
+
 def _apply_percentile_normalize(row: dict) -> dict:
     """P2-4.1: 读取容错——把 row['percentile'] 统一为 float 或 None。"""
     if row is None:
