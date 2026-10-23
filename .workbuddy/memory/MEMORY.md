@@ -16,6 +16,26 @@
 - routers/profile.py：/api/profile/kyc、/api/profile/kyc/submit、/api/profile[GET|PUT]
 - 前端 KycWizard.vue + Sidebar 自动引导
 
+## 熊市/回撤分析方法（2026-10-23 建立，可复用）
+- 判断「还要跌多少」不看单点跌幅，用 **触及某回撤阈值 → 该轮真底部** 的条件分布。创业板 −35% 共 6 次（3 轮独立熊市）5 次继续跌，中位再跌 −40.7%
+- 判断「还要多久」区分 **急跌段(3-6月)** 与 **磨底段(以年计)**；创业板到真底中位 20-50 个月
+- 必报**不对称性**：深度回撤(<−25%)后 120 日反弹中位 +23.6%；三次大底后 12 个月 +40%~+112%
+- 区分**杀估值 / 杀业绩**：沪深300 跌 20.2% 而 PE 分位仍 42.6% → 分母下修快于价格，属杀业绩，估值底未到
+- 回撤口径陷阱：`cummax` 是历史最高（沪深300 含 2007 年 5877），做"本轮熊市"必须用**滚动 3 年高点**，否则会得出 −31% 的错误结论
+
+## 用户画像（行为 vs 问卷背离，2026-10-23）
+- 问卷：loss_tolerance=high、horizon=long、risk=balanced；**行为推断：low / medium**（权重 0.6，置信 0.8，样本 45 笔）
+- 行为指标：avg_holding 29.5 天、月交易 6.33 次、止损执行率 0%、亏损处置纪律 40 分 → 倾向"扛到受不了再一次性砍"
+- 做投资建议时必须按 **low 亏损承受度 + medium 期限** 口径设定仓位，不能用问卷口径
+- 权益仓集中：消费/白酒 44.9% + 港股科技 15.8% + 医药 12.8% = 73.5%；现金 42%、债券 35% → 组合本身已防御，压力测试（beta 1.15）再跌 40% 总资产仅 −9.2%
+
+## 估值数据链路（2026-10-23 补）
+- `/api/valuations/fetch-recent` 只覆盖 6 个 A 股宽基（000300/000905/000852/399006/000016/399303），**港股与行业主题指数不会自动刷新估值**
+- `/api/valuation/online-query/{code}` 能在线查（akshare→天天基金），但**结果不入库**（仅写 valuations_online L2 缓存，7天TTL）
+- `buy-score` 的 valuation 维度走 `get_latest_valuation()`，**只读 index_valuations，不 fallback 到 valuations_online** → 未落库的指数分位恒为 None，评分退化为中性 50
+- 补链路脚本：`backend/scripts/refresh_watchlist_index_valuation.py`（默认预演 / `--apply` 写入），遍历 watchlist 中 index_code 非空项 → `_online_fallback` → `save_valuation` → 回写 `current_percentile`
+- 排查同一指数分位要注意**窗口口径**：930792 近10年分位 95.78% vs 近5年 97.25%，两条都对但不可混用
+
 ## 重要断层（已修复/待修复）
 - ✅ F1 记忆读写断层：memory.py build_user_memory_context 已补 get_memories（2026-06-19）
 - ✅ reasoning_content 流式给前端（阶段二，2026-06-19）：_call_llm_stream + reasoning_chunk/answer_chunk + ReasoningPanel + ChatView 增量拼接
@@ -36,6 +56,18 @@
 - ⏳ 阶段3（核心页深化）：Dashboard/PortfolioManagement/ValuationHistory/ChatMessage/MarketIntelligence 接入金融组件 + 散落 emoji 清理 + 硬编码色走 token
 - ⏳ 阶段4（移动端统一+收尾）：MobileApp 去 emoji/去重 + 硬编码色清扫 + UI_DESIGN_SPEC.md 同步
 - 关键：Icon.vue 必须显式 import（勿用 import *，bundle 暴增600KB）；亮色深海蓝/暗色金色双主题不统一主色
+
+## 知识库治理层（2026-10-23 建立，P0→P3）
+- 文档 `docs/KNOWLEDGE_GOVERNANCE.md`；CLI `backend/scripts/kb_governance.py`（默认预演，`--apply` 落库）
+- 核心模块 `services/knowledge_governance.py`（判定规则+schema+运行时元数据缓存+框架路由+实体消歧）、`services/user_lessons.py`（从真实交易生成教训）
+- `knowledge_base` 新增 5 列：domain / school / temporal_type / retrieval_count / last_retrieved_at
+- **流派按「书」映射**（37 本手工表），不按原子 —— 一本书方法论自洽，按原子分类会自相矛盾
+- `build_rag_context_with_details(query, content_types, limit, domains, framework)`：domains 默认 ["investment"]，framework 默认取 `rag.default_framework`=value
+- 上下文每条证据带 `[流派:xx]`，召回到对立流派时最前面插 `[知识库流派披露]` 要求标明出处
+- 关键顺序：治理加权必须在 `[:limit]` 截断**之前**，否则改变不了入选集合
+- 新增条目必须显式索引（`--index-lessons`），且 `content_type` 必须等于 `knowledge_base.category`（两处 KNOWLEDGE_TYPES 都要加）
+- ⚠️ `scripts/sync_knowledge_to_rag.py` 会重复索引（写 content_type='knowledge'），**不要运行**
+- 未做：ChromaDB 历史向量未重建（domain/school 元数据只进新建索引）；流派只影响排序不影响候选池
 
 ## 开发惯例
 - 加表字段用 _add_column_if_not_exists（db/_utils），幂等安全

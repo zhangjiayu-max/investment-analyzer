@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>010365 鹏华中证香港银行指数(LOF)C — 基金研究笔记</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: #f7f6f3;
+    color: #1f2328;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 15px; line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 48px 28px 80px; }
+  header { border-bottom: 2px solid #14375c; padding-bottom: 24px; margin-bottom: 32px; }
+  .eyebrow { font-size: 12px; letter-spacing: 1.5px; color: #8a8578; text-transform: uppercase; margin-bottom: 10px; }
+  h1 { font-size: 30px; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.3px; line-height: 1.3; }
+  .sub { font-size: 14px; color: #5f6368; margin: 0; }
+  .meta { font-size: 12.5px; color: #8a8578; margin-top: 14px; }
+  h2 { font-size: 20px; font-weight: 600; margin: 48px 0 16px; padding-left: 12px; border-left: 3px solid #14375c; line-height: 1.4; }
+  h3 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; color: #14375c; }
+  p { margin: 0 0 14px; }
+  .verdict {
+    background: #fff; border: 1px solid #e3e1dc; border-left: 4px solid #b7791f;
+    border-radius: 4px; padding: 24px 26px; margin-bottom: 32px;
+  }
+  .verdict-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 18px; }
+  .vg-item {}
+  .vg-label { font-size: 12px; color: #8a8578; margin-bottom: 4px; letter-spacing: 0.5px; }
+  .vg-value { font-size: 19px; font-weight: 600; }
+  .vg-value.good { color: #067647; }
+  .vg-value.warn { color: #b7791f; }
+  .verdict p { font-size: 14.5px; color: #3d4249; margin: 0; }
+  .kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0 8px; }
+  .kpi-cell { background: #fff; border: 1px solid #e3e1dc; border-radius: 4px; padding: 16px 18px; }
+  .kpi-label { font-size: 12px; color: #8a8578; margin-bottom: 6px; }
+  .kpi-num { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; font-variant-numeric: tabular-nums; }
+  .kpi-num.pos { color: #b42318; }
+  .kpi-num.neg { color: #067647; }
+  .kpi-note { font-size: 11.5px; color: #9c968a; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0 20px; font-size: 14px; }
+  th { text-align: left; font-weight: 600; font-size: 12.5px; color: #6b6659; padding: 10px 12px; border-bottom: 1.5px solid #d5d1c6; background: #f0eee8; }
+  td { padding: 10px 12px; border-bottom: 1px solid #e8e5dd; font-variant-numeric: tabular-nums; }
+  td.r, th.r { text-align: right; }
+  tr:last-child td { border-bottom: 1px solid #d5d1c6; }
+  .chart-box { background: #fff; border: 1px solid #e3e1dc; border-radius: 4px; padding: 22px 20px 14px; margin: 20px 0 10px; }
+  .chart-title { font-size: 13.5px; font-weight: 600; margin-bottom: 4px; }
+  .chart-sub { font-size: 12px; color: #8a8578; margin-bottom: 14px; }
+  .chart { width: 100%; }
+  .src { font-size: 11.5px; color: #9c968a; margin: 6px 0 20px; }
+  .callout { background: #fdf8ed; border: 1px solid #ecdcb4; border-radius: 4px; padding: 18px 20px; margin: 20px 0; font-size: 14.5px; }
+  .callout strong { color: #7a5210; }
+  .danger { background: #fdf2f0; border: 1px solid #f0cfc9; }
+  .danger strong { color: #96261a; }
+  ul { margin: 0 0 16px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 3px; margin-left: 6px; vertical-align: 1px; font-weight: 500; }
+  .tag-warn { background: #fdf1dc; color: #8a5a0b; }
+  .tag-ok { background: #eaf6ee; color: #08663f; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 20px 0; }
+  .col-card { background: #fff; border: 1px solid #e3e1dc; border-radius: 4px; padding: 18px 20px; }
+  .col-card h4 { font-size: 14px; font-weight: 600; margin: 0 0 10px; color: #14375c; }
+  .col-card ul { margin: 0; padding-left: 18px; font-size: 13.5px; }
+  .col-card li { margin-bottom: 6px; }
+  footer { margin-top: 56px; padding-top: 22px; border-top: 1px solid #d5d1c6; font-size: 12px; color: #8a8578; line-height: 1.7; }
+  .hl { background: linear-gradient(transparent 62%, #f7e6b8 62%); font-weight: 500; }
+  @media (max-width: 720px) {
+    .wrap { padding: 32px 18px 60px; }
+    h1 { font-size: 23px; }
+    .kpi { grid-template-columns: repeat(2, 1fr); }
+    .verdict-grid, .two-col { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Fund Research Note</div>
+  <h1>鹏华中证香港银行指数(LOF)C</h1>
+  <p class="sub">基金代码 010365 &nbsp;|&nbsp; 跟踪中证香港银行投资指数（930792）&nbsp;|&nbsp; 被动指数型</p>
+  <div class="meta">数据截至 2026-10-22 收盘（10-23 尚未开盘）&nbsp;·&nbsp; 编制：研股股</div>
+</header>
+
+<div class="verdict">
+  <div class="verdict-grid">
+    <div class="vg-item">
+      <div class="vg-label">基金质量</div>
+      <div class="vg-value good">A — 优秀工具</div>
+    </div>
+    <div class="vg-item">
+      <div class="vg-label">当前买点</div>
+      <div class="vg-value warn">C — 不是好赔率</div>
+    </div>
+  </div>
+  <p><strong>一句话结论：好基金，烂买点。</strong>跟踪误差 2.29% 说明它是个合格的被动工具，近 5 年同类排名 17/1245 说明它确实赚到了钱。但估值已处于近 5 年 <span class="hl">97% 分位</span>——过去五年几乎所有人都比你买得便宜。此刻买入，你赚的是 4.42% 的股息和盈利小幅上修，不是估值扩张的钱。</p>
+</div>
+
+<div class="kpi">
+  <div class="kpi-cell">
+    <div class="kpi-label">近 250 交易日</div>
+    <div class="kpi-num pos">+20.32%</div>
+    <div class="kpi-note">累计净值口径</div>
+  </div>
+  <div class="kpi-cell">
+    <div class="kpi-label">今年以来</div>
+    <div class="kpi-num pos">+10.98%</div>
+    <div class="kpi-note">同期创业板指 -15.8%</div>
+  </div>
+  <div class="kpi-cell">
+    <div class="kpi-label">PE 分位（近5年）</div>
+    <div class="kpi-num neg">97.25%</div>
+    <div class="kpi-note">7.09 倍估值偏高区</div>
+  </div>
+  <div class="kpi-cell">
+    <div class="kpi-label">股息率分位（近5年）</div>
+    <div class="kpi-num neg">9.14%</div>
+    <div class="kpi-note">4.42%，五年最低区间</div>
+  </div>
+</div>
+<div class="src">数据来源：东方财富基金净值接口（累计净值，截至 2026-10-22）；中证指数估值数据（930792，截至 2026-10-21）；净值收益已含 2025 年三次分红。</div>
+
+<h2>一、这是什么产品</h2>
+
+<table>
+  <tr><th style="width:28%">项目</th><th>内容</th></tr>
+  <tr><td>基金全称</td><td>鹏华港股通中证香港银行投资指数证券投资基金(LOF)</td></tr>
+  <tr><td>跟踪标的</td><td>中证香港银行投资人民币指数（930792），合同年跟踪误差上限 6%</td></tr>
+  <tr><td>实际年化跟踪误差</td><td><strong>2.29%</strong> <span class="tag tag-ok">控制良好</span></td></tr>
+  <tr><td>成立日期</td><td>2020-10-27（约 6 年）</td></tr>
+  <tr><td>C 类规模</td><td>25.89 亿元（2026-06-30）</td></tr>
+  <tr><td>基金经理</td><td>张羽翔</td></tr>
+  <tr class="r"><td>费率（C 类）</td><td>管理 0.75% + 托管 0.15% + 销售服务 0.10% = <strong>1.00%/年</strong>；无申购费</td></tr>
+  <tr><td>赎回费</td><td>持有 &lt; 7 天 1.50%；≥ 7 天 <strong>0</strong></td></tr>
+  <tr><td>分红记录</td><td>2025 年内三次，每 10 份派现金 0.745–0.761 元</td></tr>
+  <tr><td>2026H1 换手率</td><td>133.27%</td></tr>
+</table>
+
+<h3>底层不是纯内地银行，这点常被误判</h3>
+<p>很多人把它当"内银 H 股指数"买，实际指数 21 只成分股里，<strong>三家香港发钞行合计占 31.65%</strong>——汇丰 14.92%、渣打 8.77%、中银香港 7.96%。它们做的是财富管理、跨境金融这类轻资本业务，ROE 和估值逻辑跟内地银行完全不同。这是它长期跑赢中证银行指数的结构性原因。</p>
+
+<div class="chart-box">
+  <div class="chart-title">前十大成分股权重</div>
+  <div class="chart-sub">合计约 93%，集中度高；深色为香港发钞行</div>
+  <div id="chartWeight" class="chart" style="height:330px;"></div>
+</div>
+<div class="src">数据来源：中证指数成分股权重（930792.CS），成分日期 2026-10-21。</div>
+
+<h2>二、业绩：确实跑赢了，而且是长跑赢</h2>
+
+<table>
+  <tr><th>周期</th><th class="r">收益</th><th class="r">同类排名</th><th class="r">分位</th></tr>
+  <tr><td>成立以来</td><td class="r">+138.50%</td><td class="r">119 / 4560</td><td class="r">前 2.6%</td></tr>
+  <tr><td>近 5 年</td><td class="r">+108.68%</td><td class="r">17 / 1245</td><td class="r"><strong>前 1.4%</strong></td></tr>
+  <tr><td>近 3 年</td><td class="r">+99.24%</td><td class="r">46 / 1866</td><td class="r">前 2.5%</td></tr>
+  <tr><td>近 1 年</td><td class="r">+20.54%</td><td class="r">75 / 3636</td><td class="r">前 2.1%</td></tr>
+  <tr><td>今年以来</td><td class="r">+10.98%</td><td class="r">92 / 4560</td><td class="r">前 2.0%</td></tr>
+  <tr><td>2025 年</td><td class="r">+34.04%</td><td class="r">1029 / 3860</td><td class="r">前 26.7%</td></tr>
+  <tr><td>2024 年</td><td class="r">+33.75%</td><td class="r">117 / 2661</td><td class="r">前 4.4%</td></tr>
+  <tr><td>2022 年</td><td class="r">+5.41%</td><td class="r">32 / 1722</td><td class="r"><strong>前 1.9%</strong></td></tr>
+</table>
+<div class="src">数据来源：天天基金 / 雪球基金业绩接口；收益为累计净值口径。2022 年权益市场普跌，该基金仍录得正收益，最大回撤 22.54%。</div>
+
+<p>注意 <strong>2025 年排名掉到前 26.7%</strong>——那年是成长股牛市，它跑输了。这不是缺点，是风格特征：它是防守资产，牛市会落后。你若指望它跟上牛市，会失望。</p>
+
+<div class="chart-box">
+  <div class="chart-title">近一年走势 vs 创业板指</div>
+  <div class="chart-sub">起点归一为 100（2025-10-22 至 2026-10-22），基金用累计净值口径</div>
+  <div id="chartCmp" class="chart" style="height:320px;"></div>
+</div>
+<div class="src">数据来源：东方财富基金累计净值 + 新浪创业板指日线。一年内基金 +16.8%，创业板指 -15.8%，差距约 32.6 个百分点。</div>
+
+<h2>三、核心矛盾：PB 看着便宜，但已是五年最贵</h2>
+
+<p>这是整篇分析里最需要看清的一处。指数 PB 只有 <strong>0.693 倍</strong>，绝对水平深度破净，一眼看过去像"白菜价"。但把时间轴拉长到五年，这个 PB 处于 <strong>97.49% 分位</strong>——比过去五年 97% 的时间都贵。</p>
+
+<table>
+  <tr><th>指标</th><th class="r">当前值</th><th class="r">近 5 年分位</th><th>解读</th></tr>
+  <tr><td>PE (TTM)</td><td class="r">7.09 倍</td><td class="r"><strong>97.25%</strong></td><td>历史高位区</td></tr>
+  <tr><td>PB (LF)</td><td class="r">0.693 倍</td><td class="r"><strong>97.49%</strong></td><td>绝对破净，但相对最贵</td></tr>
+  <tr><td>PS (TTM)</td><td class="r">2.66 倍</td><td class="r">96.69%</td><td>同上</td></tr>
+  <tr><td>股息率 (TTM)</td><td class="r">4.42%</td><td class="r"><strong>9.14%</strong></td><td>五年最低区间</td></tr>
+  <tr><td>静态股息率</td><td class="r">5.40%</td><td class="r">—</td><td>按上年度分红计算</td></tr>
+</table>
+<div class="src">数据来源：中证指数 / 统一估值数据（930792.CS），2026-10-21。分位为近 5 年历史分位。</div>
+
+<div class="chart-box">
+  <div class="chart-title">估值指标的历史分位（近 5 年）</div>
+  <div class="chart-sub">红色 = 处于历史高位；绿色 = 处于历史低位。股息率分位低是价格涨上去摊薄的结果，不是分红变差</div>
+  <div id="chartPct" class="chart" style="height:250px;"></div>
+</div>
+<div class="src">数据来源：中证指数估值数据，2026-10-21。</div>
+
+<div class="callout danger">
+  <strong>最反直觉的一点：股息率分位只有 9.14%。</strong>意思是——你现在买入拿到的 4.42% 股息率，是过去五年里最低的一档。过去五年绝大多数时间，买这个指数的股息率都比现在高。这就是"贵"最直接的体现：不是分红变少了，是价格已经把未来的息涨掉了。
+</div>
+
+<h2>四、为什么还能看：股息率与国债的利差是真实存在的</h2>
+
+<p>把估值放到无风险利率旁边看，逻辑才完整。中国 10 年期国债收益率目前只有 <strong>1.64%</strong>，港股银行 4.42% 的股息率意味着 <strong>2.78 个百分点</strong>的利差。这是"资产荒"下保险、社保、南向长线资金持续买入港股银行的根本原因——不是因为它们看多股价，是因为没别的地方放钱。</p>
+
+<table>
+  <tr><th>资产</th><th class="r">收益率</th><th>性质</th></tr>
+  <tr><td>中证香港银行指数股息率</td><td class="r">4.42%</td><td>股权分红，有波动</td></tr>
+  <tr><td>扣除 20% 港股通红利税后</td><td class="r">约 3.54%</td><td>实际到手（税已在基金层面扣除）</td></tr>
+  <tr><td>中国 10 年期国债</td><td class="r">1.64%</td><td>无风险</td></tr>
+  <tr><td>美国 10 年期国债</td><td class="r">5.13%</td><td>无风险（对全球资金形成竞争）</td></tr>
+</table>
+<div class="src">数据来源：中美国债收益率曲线，2026-10-22（美债为 10-21 值）。</div>
+
+<p><strong>但美债 5.13% 是个不能忽略的对照。</strong>对全球机构资金来说，无风险拿 5.13% 比持有港股银行承担波动换 4.42% 更有吸引力。这是压制港股红利资产估值上限的外部约束——除非美联储转向降息。</p>
+
+<h3>基本面为什么强：三家发钞行的中报确实好</h3>
+<div class="two-col">
+  <div class="col-card">
+    <h4>盈利与股东回报（2026H1）</h4>
+    <ul>
+      <li>汇丰：收入 377.4 亿美元 +11%，税前利润 195.2 亿美元 +23%，RoTE 从 14.7% 升至 <strong>18.2%</strong>，维持 50% 派息率 + 10 亿美元回购</li>
+      <li>渣打：税前溢利 47.84 亿美元 +9% 创历史新高，中期股息 <strong>+66%</strong> 至 20.4 美分，加码 10 亿美元回购</li>
+      <li>中银香港：股东应占溢利 237.39 亿港元 +7.1%，减值贷款比率降至 0.89%，三年股东回报计划额外增加不少于 <strong>105 亿港元</strong></li>
+    </ul>
+  </div>
+  <div class="col-card">
+    <h4>行业与资金面</h4>
+    <ul>
+      <li>香港银行业 26Q2 不良率 <strong>1.82%</strong>，环比降 5bp，创九个季度新低</li>
+      <li>六大行现金分红比例由 30% 提升至 <strong>31%</strong>，中期分红合计超 2200 亿元</li>
+      <li>险资在新会计准则下将高股息资产计入 FVOCI，分红进投资收益、股价波动不进利润表——形成长期刚性需求</li>
+      <li>沪深300 指数基金持股银行比例仅 1.5%–2.0%，存在增配空间</li>
+    </ul>
+  </div>
+</div>
+<div class="src">数据来源：各公司 2026 年中期业绩公告；香港金管局行业数据；中信证券《银行业投资观察》2026-09-13（非一手来源，需核实原文）。</div>
+
+<h2>五、风险清单</h2>
+<ul>
+  <li><strong>估值分位高企（首要风险）</strong>：PE、PB 均在近 5 年 97% 分位。若估值回归中位数，仅估值一项就有明显下行空间。过去五年任何时点买入的人，成本几乎都优于你。</li>
+  <li><strong>交易拥挤</strong>：10 月内工行、建行、中行 H 股先后创历史新高，Wind 香港银行指数单日曾涨 2.05%。涨幅积累后短期性价比削弱。</li>
+  <li><strong>南向资金转向</strong>：上周南向净流出约 66 亿港元，中断连续 7 周净流入。若资金回流成长，红利板块会阶段性跑输。</li>
+  <li><strong>美债 5.13% 的竞争</strong>：全球无风险利率高企，压制红利资产估值上限。</li>
+  <li><strong>汇率</strong>：人民币计价、港元资产，人民币升值直接侵蚀折算收益。</li>
+  <li><strong>红利税</strong>：经港股通持有 H 股红利需缴 20%，已在基金层面扣除、反映在净值里，不是另外收费。</li>
+  <li><strong>它不是债券</strong>：最大回撤 22.54%（2022 年）。当债券买会受伤。</li>
+  <li><strong>净息差未真正反转</strong>：下行周期尚未结束，多家银行拨备覆盖率较长周期高点震荡下行，风险缓冲变薄，分红大幅再提升的空间受资本充足率约束。</li>
+</ul>
+
+<h2>六、C 类还是 A 类</h2>
+<table>
+  <tr><th>项目</th><th>C 类 (010365)</th><th>A 类 (501025)</th></tr>
+  <tr><td>管理 + 托管</td><td>0.90%/年</td><td>0.90%/年</td></tr>
+  <tr><td>销售服务费</td><td>0.10%/年</td><td>0</td></tr>
+  <tr><td>申购费</td><td>0</td><td>约 0.12%（第三方平台一折）</td></tr>
+  <tr><td>赎回费</td><td>≥7 天免费</td><td>7 天–1 年 0.5%；1–2 年 0.25%；≥2 年 0</td></tr>
+  <tr><td>规模</td><td>25.89 亿</td><td>7.65 亿</td></tr>
+</table>
+<p><strong>持有 2 年内选 C（010365），2 年以上选 A（501025）。</strong>临界点算给你：C 类每年多付 0.10%，A 类一次性申购费约 0.12%，约 1.2 年打平；把 A 类逐年递减的赎回费算进去，持满 2 年后 A 类总成本 0.12%、C 类 0.20%，A 类反超。</p>
+
+<h2>七、放进你的组合里看</h2>
+
+<p>你当前的总资产 99.09 万，结构是：现金 41.60 万（42%）、债券 34.61 万（35%）、权益 22.88 万（23%），整体浮亏 -9.93%。</p>
+
+<div class="two-col">
+  <div class="col-card">
+    <h4>它适合扮演什么角色</h4>
+    <ul>
+      <li><strong>类固收替代</strong>，不是权益进攻仓。股息率税后约 3.54%，明显高于你现有债券基金的实际回报（博时恒乐债A +0.17%、南方中债7-10国开债 +1.38%）</li>
+      <li><strong>与你的港股科技形成对冲</strong>。你持有恒生科技 -35.45%、港股通互联网 -14.01%，都是港股成长风格；港股银行是价值风格，两者负相关，能降组合波动</li>
+      <li>你的权益仓已重压在白酒(-33.98%)、消费红利(-17.59%)、医疗(-17.91%)、光伏(-10.76%)，再加成长只会加剧同类风险</li>
+    </ul>
+  </div>
+  <div class="col-card">
+    <h4>但要接受三个前提</h4>
+    <ul>
+      <li><strong>券商/平台可能限购或暂停申购</strong>，LOF 品种需先确认可申购</li>
+      <li><strong>别把它算进权益仓位</strong>，否则会低估组合真实风险——它回撤能到 22%</li>
+      <li><strong>期限至少 2 年</strong>。97 分位买入，短期没有估值保护垫，1 年内要用的钱不该进</li>
+    </ul>
+  </div>
+</div>
+
+<h2>八、结论与操作框架</h2>
+
+<p><strong>评级：观察 / 小额定投（HOLD，非 BUY）。</strong>基金本身没问题，问题在于你问的时点。</p>
+
+<table>
+  <tr><th style="width:22%">情形</th><th>建议动作</th></tr>
+  <tr><td>想配长期现金流（3 年以上）</td><td>可开始小额定投，单月不超过总资产 0.5%，把它当红利底仓的一部分，优先 A 类</td></tr>
+  <tr><td>想赚估值修复的钱</td><td><strong>不建议现在进</strong>。97 分位已经把重估故事定价，赔率不够</td></tr>
+  <tr><td>1 年内要用的钱</td><td>不要买。它最大回撤 22.54%，不是货币替代</td></tr>
+  <tr><td>想对冲现有港股成长敞口</td><td>可以小仓位配置，但先用你现有 41.6 万现金的一部分，别卖掉浮亏的成长仓去换</td></tr>
+</table>
+
+<h3>需要跟踪的三个高频变量</h3>
+<ul>
+  <li><strong>南向资金</strong>：连续两周净流入 = 风险偏好修复，对红利板块反而是减持信号；持续净流出则银行相对占优</li>
+  <li><strong>美债 10 年期收益率</strong>：目前在 5.13%。上行压制高股息相对吸引力，回落至 4.5% 以下才是估值扩张的顺风</li>
+  <li><strong>银行三季报</strong>：净息差是否真企稳、资产质量是否继续改善；以及汇丰三季报回购规模、中银香港特别股息派发节奏</li>
+</ul>
+
+<div class="callout">
+  <strong>如果一定要给个买点条件</strong>：等 PE 分位从 97% 回落至 70% 以下（对应约 8.5%–10% 的价格回调），或股息率回升至 5% 以上。在此之前，它更适合放在观察名单，而不是买入清单。
+</div>
+
+<footer>
+  <p><strong>数据来源汇总</strong>：基金净值与业绩 — 东方财富基金数据接口（2026-10-22，累计净值口径）；指数估值与成分股权重 — 中证指数 / 统一估值数据（930792.CS，2026-10-21）；国债收益率 — 中美国债收益率曲线（2026-10-22）；底层银行财务 — 各公司 2026 年中期业绩公告；行业与资金面 — 中信证券《银行业投资观察 20260913》、香港金管局数据（研报类为非一手来源，需核实原文）；组合数据 — 本地 investment-analyzer 接口（2026-10-23）。</p>
+  <p><strong>数据缺口</strong>：你的 KYC 问卷为空（风险承受度、亏损耐受、投资期限均缺失），因此上述仓位建议按现有 23% 权益占比倒推，未经你的真实承受力校准。</p>
+  <p style="margin-top:14px;"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</p>
+</footer>
+
+</div>
+
+<script>
+var chartWeight = echarts.init(document.getElementById('chartWeight'));
+var wData = [
+  { name: '建设银行 00939', value: 15.06, hk: false },
+  { name: '汇丰控股 00005', value: 14.92, hk: true },
+  { name: '工商银行 01398', value: 13.65, hk: false },
+  { name: '渣打集团 02888', value: 8.77, hk: true },
+  { name: '中国银行 03988', value: 8.30, hk: false },
+  { name: '农业银行 01288', value: 8.30, hk: false },
+  { name: '中银香港 02388', value: 7.96, hk: true },
+  { name: '招商银行 03968', value: 7.79, hk: false },
+  { name: '交通银行 03328', value: 6.28, hk: false },
+  { name: '中信银行 00998', value: 3.29, hk: false }
+];
+chartWeight.setOption({
+  grid: { left: 130, right: 60, top: 10, bottom: 20 },
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function(p) { return p[0].name + '<br/>权重 ' + p[0].value + '%'; } },
+  xAxis: { type: 'value', max: 18, axisLabel: { formatter: '{value}%', color: '#8a8578', fontSize: 11 }, splitLine: { lineStyle: { color: '#eeebe4' } } },
+  yAxis: {
+    type: 'category',
+    inverse: true,
+    data: wData.map(function(d) { return d.name; }),
+    axisLabel: { color: '#4a4a44', fontSize: 12 },
+    axisLine: { lineStyle: { color: '#d5d1c6' } },
+    axisTick: { show: false }
+  },
+  series: [{
+    type: 'bar',
+    data: wData.map(function(d) {
+      return { value: d.value, itemStyle: { color: d.hk ? '#14375c' : '#78909c', borderRadius: [0, 2, 2, 0] } };
+    }),
+    barWidth: 16,
+    label: { show: true, position: 'right', formatter: '{c}%', color: '#6b6659', fontSize: 11 }
+  }]
+});
+
+var chartCmp = echarts.init(document.getElementById('chartCmp'));
+chartCmp.setOption({
+  grid: { left: 48, right: 30, top: 30, bottom: 46 },
+  legend: { data: ['010365 累计净值', '创业板指'], top: 0, textStyle: { color: '#6b6659', fontSize: 12 }, itemWidth: 16, itemHeight: 8 },
+  tooltip: { trigger: 'axis' },
+  xAxis: {
+    type: 'category',
+    data: ['10-22','11-12','12-03','12-24','01-16','02-06','03-09','03-30','04-21','05-15','06-05','06-29','07-20','08-10','08-31','09-21','10-20','10-22'],
+    axisLabel: { color: '#8a8578', fontSize: 10, interval: 1, rotate: 35 },
+    axisLine: { lineStyle: { color: '#d5d1c6' } },
+    axisTick: { show: false }
+  },
+  yAxis: {
+    type: 'value', min: 78, max: 145,
+    axisLabel: { color: '#8a8578', fontSize: 11 },
+    splitLine: { lineStyle: { color: '#eeebe4' } }
+  },
+  series: [
+    {
+      name: '010365 累计净值', type: 'line', smooth: true, symbol: 'none',
+      data: [100,107,103.9,104.8,105.4,107.1,102.9,104.4,112.4,110.5,110.4,106.7,113.2,114.9,119.2,120.9,118,116.8],
+      lineStyle: { color: '#14375c', width: 2.2 }, itemStyle: { color: '#14375c' }
+    },
+    {
+      name: '创业板指', type: 'line', smooth: true, symbol: 'none',
+      data: [100,102,99.3,105.6,109.9,105.8,104.9,107,120.6,128.4,129.4,137.8,112.5,115.6,112.4,111.1,89.5,84.2],
+      lineStyle: { color: '#b42318', width: 1.6, type: 'dashed' }, itemStyle: { color: '#b42318' }
+    }
+  ]
+});
+
+var chartPct = echarts.init(document.getElementById('chartPct'));
+var pData = [
+  { name: 'PE 分位', value: 97.25 },
+  { name: 'PB 分位', value: 97.49 },
+  { name: 'PS 分位', value: 96.69 },
+  { name: '股息率分位', value: 9.14 }
+];
+chartPct.setOption({
+  grid: { left: 100, right: 70, top: 10, bottom: 26 },
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function(p) { return p[0].name + '：' + p[0].value + '%'; } },
+  xAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%', color: '#8a8578', fontSize: 11 }, splitLine: { lineStyle: { color: '#eeebe4' } } },
+  yAxis: {
+    type: 'category', inverse: true,
+    data: pData.map(function(d) { return d.name; }),
+    axisLabel: { color: '#4a4a44', fontSize: 12.5 },
+    axisLine: { lineStyle: { color: '#d5d1c6' } },
+    axisTick: { show: false }
+  },
+  series: [{
+    type: 'bar',
+    data: pData.map(function(d) {
+      var col = d.value > 50 ? '#b42318' : '#067647';
+      return { value: d.value, itemStyle: { color: col, borderRadius: [0, 2, 2, 0] } };
+    }),
+    barWidth: 22,
+    label: { show: true, position: 'right', formatter: '{c}%', color: '#4a4a44', fontSize: 12, fontWeight: 500 },
+    markLine: {
+      silent: true, symbol: 'none',
+      lineStyle: { color: '#c9c2b0', type: 'dashed', width: 1 },
+      label: { formatter: '50% 中位', color: '#9c968a', fontSize: 10, position: 'insideEndTop' },
+      data: [{ xAxis: 50 }]
+    }
+  }]
+});
+
+window.addEventListener('resize', function() {
+  chartWeight.resize();
+  chartCmp.resize();
+  chartPct.resize();
+});
+</script>
+</body>
+</html>
