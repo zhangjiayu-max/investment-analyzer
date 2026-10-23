@@ -30,6 +30,8 @@ export const navItems = [
     children: [
       { key: 'portfolio', label: '持仓管理', icon: 'portfolio', hot: true,
         desc: '基金持仓CRUD、交易记录、盈亏分析、AI诊断' },
+      { key: 'theme-analysis', label: '主题集中度', icon: 'pie-chart',
+        desc: '跨账户主题聚合去重、同指数合并、集中度HHI、碎片仓位诊断' },
       { key: 'smart-add', label: '智能补仓', icon: 'trending-down',
         desc: '估值z-score加权定投 + 金字塔补仓计划' },
       { key: 'alert-center', label: '风险与提示', icon: 'warning', hot: true,

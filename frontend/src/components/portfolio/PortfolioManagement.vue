@@ -7532,8 +7532,9 @@ function txDisplayAmount(tx) {
 }
 .sell-preview-card.loading { color: #888; }
 .preview-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
-.preview-row .profit { color: #16a34a; }
-.preview-row .loss { color: #dc2626; }
+/* 盈亏配色：盈利红、亏损绿（A 股习惯） */
+.preview-row .profit { color: var(--color-profit); }
+.preview-row .loss { color: var(--color-loss); }
 .preview-warning { margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; }
 .preview-warning.warning { background: #fef3c7; color: #92400e; }
 .preview-warning.info { background: #dbeafe; color: #1e40af; }
@@ -7640,8 +7641,8 @@ function txDisplayAmount(tx) {
 .dca-suggestion-card.pause { background: #fef2f2; border-color: #fecaca; }
 .dca-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .dca-label { font-weight: 600; font-size: 13px; }
-.dca-profit { font-size: 13px; color: #16a34a; }
-.dca-profit.loss { color: #dc2626; }
+.dca-profit { font-size: 13px; color: var(--color-profit); }
+.dca-profit.loss { color: var(--color-loss); }
 .dca-rule { font-size: 12px; color: #666; margin: 4px 0; line-height: 1.5; }
 .dca-action { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
 .dca-amount { font-weight: 600; color: #2563eb; }

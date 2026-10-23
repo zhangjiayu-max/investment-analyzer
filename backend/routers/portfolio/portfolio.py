@@ -894,6 +894,13 @@ async def concentration_analysis_api():
     return get_concentration_analysis()
 
 
+@router.get("/api/portfolio/analysis/theme")
+async def theme_analysis_api():
+    """主题聚合分析：跨账户去重、同指数合并、主题集中度（HHI/Top3）、碎片仓位。"""
+    from services.portfolio.theme_analysis import analyze_theme_concentration
+    return analyze_theme_concentration()
+
+
 @router.get("/api/portfolio/analysis/profit-trend")
 async def profit_trend_api(days: int = 30):
     """盈亏趋势（基于持仓快照，按日期正序返回）。"""

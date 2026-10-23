@@ -21,6 +21,7 @@ const BondMarket = defineAsyncComponent(() => import('../components/valuation/Bo
 const RagAnalysis = defineAsyncComponent(() => import('../components/agent/RagAnalysis.vue'))
 const RagTestPage = defineAsyncComponent(() => import('../components/agent/RagTestPage.vue'))
 const PortfolioManagement = defineAsyncComponent(() => import('../components/portfolio/PortfolioManagement.vue'))
+const ThemeAnalysis = defineAsyncComponent(() => import('../components/portfolio/ThemeAnalysis.vue'))
 const AlertCenter = defineAsyncComponent(() => import('../components/task/AlertCenter.vue'))
 const GoalBucketsPage = defineAsyncComponent(() => import('../components/decision/GoalBucketsPage.vue'))
 const AllocationDashboard = defineAsyncComponent(() => import('../components/portfolio/AllocationDashboard.vue'))
@@ -73,6 +74,7 @@ const pageComponents = {
   'rag-test': RagTestPage,
   bond: BondMarket,
   portfolio: PortfolioManagement,
+  'theme-analysis': ThemeAnalysis,
   'alert-center': AlertCenter,
   'goal-buckets': GoalBucketsPage,
   'allocation-dashboard': AllocationDashboard,

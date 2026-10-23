@@ -45,6 +45,7 @@ const KnowledgeBase = defineAsyncComponent(() => import('./knowledge/KnowledgeBa
 const SystemConfigPage = defineAsyncComponent(() => import('./quality/SystemConfigPage.vue'))
 const CapabilityCenter = defineAsyncComponent(() => import('./agent/CapabilityCenter.vue'))
 const SmartAddPlan = defineAsyncComponent(() => import('./finance/SmartAddPlan.vue'))
+const ThemeAnalysis = defineAsyncComponent(() => import('./portfolio/ThemeAnalysis.vue'))
 const AllocationDashboard = defineAsyncComponent(() => import('./portfolio/AllocationDashboard.vue'))
 const AttributionReport = defineAsyncComponent(() => import('./market/AttributionReport.vue'))
 const DecisionAccuracy = defineAsyncComponent(() => import('./decision/DecisionAccuracy.vue'))
@@ -114,6 +115,7 @@ const pageComponents = {
   'system-config': SystemConfigPage,
   'capability-center': CapabilityCenter,
   'smart-add': SmartAddPlan,
+  'theme-analysis': ThemeAnalysis,
   'allocation-dashboard': AllocationDashboard,
   'attribution': AttributionReport,
   'accuracy': DecisionAccuracy,
@@ -226,9 +228,15 @@ function toggleDevMode() {
       </template>
 
       <!-- 常规页面 -->
-      <KeepAlive v-else>
-        <component :is="pageComponent" v-bind="pageProps" />
-      </KeepAlive>
+      <template v-else>
+        <KeepAlive v-if="pageComponent">
+          <component :is="pageComponent" v-bind="pageProps" />
+        </KeepAlive>
+        <div v-else class="mobile-page-missing">
+          <Icon name="warning" size="20" />
+          <p>「{{ currentPageLabel || '该功能' }}」尚未适配移动端，敬请期待</p>
+        </div>
+      </template>
     </div>
 
     <!-- 更多菜单弹层 -->
@@ -655,6 +663,23 @@ function toggleDevMode() {
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+/* ── 未适配页面占位 ── */
+.mobile-page-missing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 40vh;
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+.mobile-page-missing p {
+  font-size: 0.8125rem;
+  line-height: 1.6;
 }
 
 /* ── 动画 ── */

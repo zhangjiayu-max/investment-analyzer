@@ -1449,6 +1449,11 @@ export function getConcentrationAnalysis() {
   return api.get('/portfolio/analysis/concentration')
 }
 
+/** 主题聚合分析（跨账户去重、同指数合并、主题集中度、碎片仓位） */
+export function getThemeAnalysis() {
+  return api.get('/portfolio/analysis/theme')
+}
+
 /** 盈亏趋势（基于持仓快照） */
 export function getProfitTrend(days = 30) {
   return api.get('/portfolio/analysis/profit-trend', { params: { days } })
