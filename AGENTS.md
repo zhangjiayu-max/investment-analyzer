@@ -102,6 +102,19 @@ investment-analyzer/
 - 所有 prompt 通过 `analysis_agents` 表配置管理（反对硬编码）
 - SSE 流式用 generator `yield {"type": ..., ...}` + fetch ReadableStream
 
+## WorkBuddy 数据桥（本地数据接入）
+
+当在 WorkBuddy 中提问涉及**持仓/组合、指数估值/分位、告警雷达、关注列表、市场温度、KYC 画像、
+健康分、每日建议、决策记录、机会扫描、交易计划、家庭财务现金流、理财目标**时，
+加载项目 skill `investment-data`（`.workbuddy/skills/investment-data/SKILL.md`）获取查询配方：
+
+- 首选 HTTP 接口（`127.0.0.1:8000`，统一响应 `{"code", "message", "data"}`）；后端未启动时用 SQLite 只读兜底（`data/valuations.db`）
+- 核心入口：`/api/portfolio/summary`（组合总览）、`/api/valuation/indexes`（估值分位）、`/api/portfolio/alerts`（告警雷达）、`/api/watchlist`、`/api/kyc/enhanced-profile`（画像）、`/api/daily-advice/today`（每日建议）、`/api/decisions`、`/api/expense/cashflow`（现金流）
+- 决策支持流程（skill 第 3 节）：画像承受力 × 现金流弹药 × 持仓结构 × 估值位置 × 在途风险 × 系统已有结论，缺域须声明
+- 分位口径 0–100（percent），阈值：<20 低估 / >80 高估；金额 ¥，涨红跌绿
+- 坑位：`/api/valuation/unified` 会超时挂起勿用；`health-v2/dashboard` 返回异步句柄而非健康分；KYC 部分字段有已知缺口（见 skill 第 5 节）
+- 涉及投资判断时衔接 `workbuddy-finance-skill` 的合规红线（不给指令式买卖建议）
+
 ## 开发流程
 
 | 任务 | 步骤 |
