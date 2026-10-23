@@ -37,12 +37,70 @@ async def knowledge_list(category: str = None, subcategory: str = None,
 
 
 @router.get("/search")
-async def knowledge_search(q: str, category: str = None, limit: int = 20):
-    """搜索知识库。"""
+async def knowledge_search(q: str, category: str = None, limit: int = 20,
+                           domain: str = None, school: str = None):
+    """搜索知识库（按标题命中优先排序，可按领域/流派过滤）。"""
     if not q or len(q) < 2:
         raise HTTPException(400, "搜索词至少 2 个字符")
-    results = search_knowledge(q, category=category, limit=limit)
+    results = search_knowledge(q, category=category, limit=limit,
+                               domain=domain, school=school)
     return {"results": results, "total": len(results)}
+
+
+# ── 知识库治理 ──
+
+@router.get("/governance/report")
+async def governance_report():
+    """治理覆盖率报告：领域/流派/时序/有用度的填写率与分布。"""
+    from db._conn import _get_conn
+    from services.knowledge_governance import governance_report as _report
+    conn = _get_conn()
+    try:
+        _report_safe = _report(conn)
+    except Exception as exc:  # 未迁移时给出可执行的指引，而不是 500
+        raise HTTPException(503, f"治理字段尚未初始化，请先执行 scripts/kb_governance.py --apply：{exc}")
+    finally:
+        conn.close()
+    return _report_safe
+
+
+class GovernanceRunRequest(BaseModel):
+    classify: bool = False
+    temporal: bool = False
+    lessons: bool = False
+    usefulness: bool = False
+    dry_run: bool = True
+
+
+@router.post("/governance/run")
+async def governance_run(req: GovernanceRunRequest):
+    """执行知识库治理。
+
+    默认 dry_run=True：只返回将要发生的变更，不落库。
+    落库需要显式传 dry_run=false —— 治理会批量改写元数据，误操作代价高。
+    """
+    from db._conn import _get_conn
+    from services import knowledge_governance as gov
+    from services import user_lessons
+
+    conn = _get_conn()
+    try:
+        gov.migrate_schema(conn)
+        out = {"dry_run": req.dry_run}
+        if req.classify:
+            out["classify"] = gov.classify_entries(conn, dry_run=req.dry_run)
+            gov.invalidate_meta_cache()
+        if req.temporal:
+            out["temporal"] = gov.annotate_temporal(conn, dry_run=req.dry_run)
+        if req.lessons:
+            out["lessons"] = user_lessons.sync_lessons(conn, dry_run=req.dry_run)
+        if req.usefulness:
+            out["usefulness"] = gov.refresh_usefulness(conn, dry_run=req.dry_run)
+        if not req.dry_run:
+            gov.invalidate_meta_cache()
+        return out
+    finally:
+        conn.close()
 
 
 @router.delete("/{knowledge_id}")

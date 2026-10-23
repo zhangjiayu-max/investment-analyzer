@@ -56,6 +56,13 @@ _RAG_CONFIG_DEFAULTS = {
     "rrf_top_n": ("5", "每个来源参与 RRF 融合的最大候选数"),
     "rrf_cross_bonus": ("0.01", "跨来源（FTS+Chroma）命中加成"),
     "rerank_min_score": ("0.1", "CrossEncoder 相关性最低分，个性化加权前验收；不是事实正确率"),
+    # 领域边界：默认只检索投资域，剔除 AI 工程笔记等非本域内容。
+    # 设为 "*" 取消过滤（前端笔记 Tab 等显式 content_types 的入口不受此影响）
+    "default_domains": ("investment", "默认检索领域，逗号分隔；* 表示不过滤"),
+    # 审查框架：value/trading/quant/macro/neutral。
+    # 只影响流派偏置与冲突披露，不改变召回范围；上下文会显式声明所用框架。
+    # 本项目以价值审查为主（芒格清单），故默认 value；改成 neutral 即只标注不偏置。
+    "default_framework": ("value", "默认审查框架：value/trading/quant/macro/neutral"),
 }
 
 _rag_config_cache: dict[str, str] = {}
@@ -1107,6 +1114,7 @@ def _is_history_intent_query(query: str) -> bool:
 # 数值越小优先级越高，用于结果排序时的加权
 _CONTENT_TYPE_PRIORITY = {
     "valuation": 1,       # 估值数据优先
+    "user_lesson": 2,     # 用户亲历教训（只有本系统有的证据）
     "author_article": 2,  # 作者文章（时效性强）
     "article": 3,         # 一般文章
     "analysis": 4,        # 分析记录
@@ -1219,9 +1227,11 @@ def search_knowledge(query: str, content_type: str = None, limit: int = 5) -> tu
     return results[:limit], dropped
 
 
-def build_rag_context(query: str, content_types: list[str] = None, limit: int = 8) -> str:
+def build_rag_context(query: str, content_types: list[str] = None, limit: int = 8,
+                      domains: list[str] = None, framework: str = None) -> str:
     """检索知识库并格式化为 LLM 上下文文本。"""
-    result = build_rag_context_with_details(query, content_types, limit)
+    result = build_rag_context_with_details(query, content_types, limit,
+                                            domains=domains, framework=framework)
     return result["context"]
 
 
@@ -1641,6 +1651,41 @@ def index_book_knowledge(knowledge_id: int, title: str, content: str, source: st
                            atom_type, evidence_level, importance)
 
 
+def index_knowledge_entry_by_id(knowledge_id: int) -> bool:
+    """按 knowledge_base 记录自身的 category 建立索引（幂等）。
+
+    用于新增或修改知识条目后的增量索引。content_type 取 category 值，
+    与 db.index_sources 的归属校验口径保持一致 —— 若此处传了别的类型名，
+    search_knowledge 会把它当成孤儿记录剔除，索引白建。
+
+    关键词（keywords 字段）会被拼到正文尾部一起索引：
+    它是人工/蒸馏阶段提炼的高信噪比检索标签，不索引等于白存。
+    """
+    from db.knowledge import get_knowledge
+
+    item = get_knowledge(knowledge_id)
+    if not item:
+        logger.warning(f"索引失败: knowledge_base 无 id={knowledge_id}")
+        return False
+    category = item.get("category") or ""
+    if not category:
+        return False
+
+    body = item.get("content") or ""
+    keywords = item.get("keywords") or []
+    if isinstance(keywords, list) and keywords:
+        body = f"{body}\n\n关键词: {' '.join(str(k) for k in keywords if k)}"
+
+    _index_knowledge_entry(
+        category, knowledge_id,
+        item.get("title") or "", body,
+        item.get("source") or "",
+        item.get("atom_type") or "", item.get("evidence_level") or "",
+        int(item.get("importance") or 0),
+    )
+    return True
+
+
 def index_note_knowledge(knowledge_id: int, title: str, content: str, source: str,
                          atom_type: str = "", evidence_level: str = "",
                          importance: int = 0):
@@ -1656,7 +1701,9 @@ def _index_knowledge_entry(content_type: str, knowledge_id: int, title: str,
     """通用的知识条目索引函数（FTS + ChromaDB）。
 
     Args:
-        content_type: 内容类型（book/note/concept/strategy）
+        content_type: 内容类型（book/note/concept/strategy/user_lesson），
+                      必须与 knowledge_base.category 取值一致，
+                      否则 db.index_sources.source_exists() 会判定为孤儿并剔除结果
         knowledge_id: knowledge_base.id
         atom_type: 知识原子类型
         evidence_level: 证据等级
@@ -1672,6 +1719,17 @@ def _index_knowledge_entry(content_type: str, knowledge_id: int, title: str,
         extra["evidence_level"] = evidence_level
     if importance:
         extra["importance"] = int(importance)
+    # 领域/流派一并写入向量元数据：让 ChromaDB 侧也能按域过滤，
+    # 而不必只依赖 Python 后置过滤（后者在候选稀少时会损失召回）
+    try:
+        from services.knowledge_governance import get_entry_meta_map
+        info = get_entry_meta_map().get(f"{content_type}:{knowledge_id}") or {}
+        if info.get("domain"):
+            extra["domain"] = info["domain"]
+        if info.get("school"):
+            extra["school"] = info["school"]
+    except Exception:
+        pass
     index_to_chroma(content_type, str(knowledge_id), title, content, extra_metadata=extra)
 
 
@@ -2214,6 +2272,11 @@ def _relevance_score(query: str, result: dict) -> tuple[float, dict]:
     3. 命中率 = 命中词数 / 核心 query 词数
     4. 标题命中加权 1.5x，正文命中加权 1.0x
 
+    实体消歧（2026-10-23）：
+    金融词常被当形容词用（「黄金法则」的黄金不是资产、「水龙头」的龙头不是行业龙头）。
+    匹配时若该词在文本中**只以固定搭配形式出现**，则不计为命中。
+    见 knowledge_governance.IDIOM_GUARD。
+
     Args:
         query: 用户原始查询
         result: 检索结果 dict（需含 title, body 字段）
@@ -2237,14 +2300,23 @@ def _relevance_score(query: str, result: dict) -> tuple[float, dict]:
     title_text = (result.get("title") or "").lower()
     body_text = (result.get("body") or "").lower()
 
+    from services.knowledge_governance import term_is_entity_only
+
     title_hits = []
     body_hits = []
+    idiom_only = []
     for tok in core_tokens:
         tok_lower = tok.lower()
         if tok_lower in title_text:
-            title_hits.append(tok)
+            if term_is_entity_only(title_text, tok_lower):
+                idiom_only.append(tok)
+            else:
+                title_hits.append(tok)
         elif tok_lower in body_text:
-            body_hits.append(tok)
+            if term_is_entity_only(body_text, tok_lower):
+                idiom_only.append(tok)
+            else:
+                body_hits.append(tok)
 
     # 命中率：标题命中 * 1.5 + 正文命中 * 1.0，除以核心词数
     hit_score = (len(title_hits) * 1.5 + len(body_hits) * 1.0) / len(core_tokens)
@@ -2253,13 +2325,101 @@ def _relevance_score(query: str, result: dict) -> tuple[float, dict]:
         "query_tokens": core_tokens,
         "title_hits": title_hits,
         "body_hits": body_hits,
+        "idiom_only_hits": idiom_only,
         "hit_ratio": hit_score,
     }
     return hit_score, debug_info
 
 
-def build_rag_context_with_details(query: str, content_types: list[str] = None, limit: int = 8) -> dict:
+def _resolve_domains(content_types: list[str], domains: list[str] = None) -> list[str]:
+    """确定本次检索的领域范围。
+
+    默认只检索 investment：知识库 8852 条里有 578 条是 AI 工程书籍笔记，
+    它们与投资检索共享同一向量空间，按相似度竞争召回，是纯噪音。
+
+    显式指定 content_types 时（前端笔记 Tab、按类型搜索）不做领域过滤 ——
+    那些入口的用户意图就是「翻某一类内容」，不该被领域规则挡住。
+
+    注意：get_rag_config 的 `default` 参数优先级高于 _RAG_CONFIG_DEFAULTS，
+    因此这里**不传** default，否则 rag_config 表与代码默认值都会被静默覆盖。
+    """
+    if domains:
+        return [] if domains == ["*"] else domains
+    if content_types:
+        return []
+    configured = get_rag_config("default_domains")
+    if not configured or configured == "*":
+        return []
+    return [d.strip() for d in configured.split(",") if d.strip()]
+
+
+def _filter_by_domain(results: list[dict], domains: list[str]) -> tuple[list[dict], int]:
+    """按领域过滤检索结果。返回 (保留结果, 剔除条数)。
+
+    在 Python 侧做后置过滤而非 Chroma metadata `where`，原因：
+    1. 历史索引没有 domain 元数据，where 过滤会把旧向量全部漏掉
+    2. 只有 knowledge_base 系列（book/note/concept/strategy）需要过滤，
+       占比 6.5%，后置过滤的召回损耗可接受
+    3. 元数据已缓存 2 分钟，逐条查字典的开销可忽略
+    """
+    if not domains or not results:
+        return results, 0
+
+    from services.knowledge_governance import (
+        DOMAIN_INVESTMENT, get_entry_meta_map,
+    )
+    meta = get_entry_meta_map()
+    allowed = set(domains)
+    keep, dropped = [], 0
+    for r in results:
+        ct = r.get("content_type", "")
+        if ct not in ("book", "note", "concept", "strategy", "user_lesson"):
+            keep.append(r)          # 结构化数据不做领域判定
+            continue
+        info = meta.get(f"{ct}:{r.get('reference_id')}")
+        domain = (info or {}).get("domain") or DOMAIN_INVESTMENT
+        if domain in allowed:
+            keep.append(r)
+        else:
+            dropped += 1
+    return keep, dropped
+
+
+def _apply_governance_metadata(results: list[dict]) -> dict:
+    """把 domain/school/temporal_type/usefulness 挂到检索结果上，供排序与标注使用。
+
+    返回流派分布 {school: count}。
+    """
+    if not results:
+        return {}
+    from services.knowledge_governance import get_entry_meta_map
+
+    meta = get_entry_meta_map()
+    school_counts: dict = {}
+    for r in results:
+        ct = r.get("content_type", "")
+        info = meta.get(f"{ct}:{r.get('reference_id')}") or {}
+        school = info.get("school") or ""
+        r["_school"] = school
+        r["_temporal_type"] = info.get("temporal_type") or ""
+        r["_as_of_date"] = info.get("as_of_date") or ""
+        if school:
+            school_counts[school] = school_counts.get(school, 0) + 1
+    return school_counts
+
+
+def build_rag_context_with_details(query: str, content_types: list[str] = None,
+                                   limit: int = 8, domains: list[str] = None,
+                                   framework: str = None) -> dict:
     """检索知识库（FTS5 + 向量混合），返回上下文文本和详细检索结果。
+
+    Args:
+        query: 检索问题
+        content_types: 限定内容类型（显式指定时不做领域过滤，供笔记 Tab 等入口使用）
+        limit: 返回条数
+        domains: 限定领域，默认只取 investment。传 ["*"] 表示不过滤
+        framework: 审查框架（value/trading/quant/macro/neutral）。
+                   影响流派偏置与冲突披露，不影响召回范围。
 
     返回:
         {
@@ -2270,6 +2430,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "fts_count": int,           # FTS5 原始命中数
             "chroma_count": int,         # ChromaDB 原始命中数
             "freshness_filtered": int,   # 被时效性策略过滤的条数
+            "schools": {流派: 条数},     # 本次召回的方法论分布
+            "framework": str,            # 实际使用的框架
+            "school_conflict": bool,     # 是否召回了结论可能相反的流派
+            "domain_filtered": int,      # 被领域过滤剔除的条数
         }
     """
     quality_reasons = set()
@@ -2306,6 +2470,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     # 仅当调用方未显式指定 content_types 时生效（保留前端笔记 Tab搜索的入口）
     _exclude_note = (get_rag_config("rag.exclude_note_from_investment_search", "true") == "true"
                      and not content_types)
+
+    # 领域边界与框架路由（2026-10-23）
+    # 领域：默认只检索 investment，剔除 AI 工程笔记等非本域内容
+    # 框架：声明审查框架后按流派做温和偏置，并披露流派分歧
+    _domains = _resolve_domains(content_types, domains)
+    _framework = framework or get_rag_config("default_framework") or "neutral"
+    _domain_filtered = 0
 
     # 选择性 LLM Query Rewrite：长查询（>15 字）且非纯指数名时启用
     # 受 `rag.long_query_rewrite_enabled` 开关控制（默认关闭）
@@ -2352,6 +2523,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         if _note_dropped:
             total_freshness_filtered += _note_dropped
             logger.info(f"R-5 FTS 排除 note: {_note_dropped} 条")
+
+    # 领域过滤：剔除 ai_engineering / other 领域内容
+    if _domains and fts_results:
+        fts_results, _dd = _filter_by_domain(fts_results, _domains)
+        _domain_filtered += _dd
+        if _dd:
+            logger.info(f"领域过滤 FTS: 剔除 {_dd} 条（保留领域={_domains}）")
 
     fts_count = len(fts_results)
 
@@ -2416,6 +2594,13 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             total_freshness_filtered += _note_dropped
             logger.info(f"R-5 Chroma 排除 note: {_note_dropped} 条")
 
+    # 领域过滤：与 FTS 侧同一口径
+    if _domains and chroma_results:
+        chroma_results, _dd = _filter_by_domain(chroma_results, _domains)
+        _domain_filtered += _dd
+        if _dd:
+            logger.info(f"领域过滤 Chroma: 剔除 {_dd} 条（保留领域={_domains}）")
+
     logger.info(f"RAG 搜索: query='{query}', FTS5={fts_count}条, 向量={chroma_count}条, 过滤={total_freshness_filtered}条")
 
     # RRF (Reciprocal Rank Fusion) 合并排序 — 比独立归一化更可靠
@@ -2466,7 +2651,36 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         if key not in seen or r["_score"] > seen[key]["_score"]:
             seen[key] = r
 
-    all_results = sorted(seen.values(), key=lambda x: x["_score"], reverse=True)[:limit]
+    # ── 候选筛选前先做治理加权（2026-10-23 顺序修正）──
+    # 原实现的 `[:limit]` 截断发生在本函数最开头，而有用度/流派等加权都在其后，
+    # 结果就是：加权只能在已入选的 N 条里重新排序，改变不了「谁能入选」。
+    # 知识库治理的意义恰恰在于改变入选集合（把 22 条价值派跟 5 条技术派
+    # 放在一起竞争时，不该让技术派占满名额），因此加权必须前移。
+    _candidates = list(seen.values())
+    _apply_governance_metadata(_candidates)
+    try:
+        from services.knowledge_governance import get_entry_meta_map, school_bias
+        _umeta = get_entry_meta_map()
+        for r in _candidates:
+            ref_id = r.get("reference_id")
+            if ref_id:
+                info = _umeta.get(f"{r.get('content_type', '')}:{ref_id}") or {}
+                uscore = info.get("usefulness_score")
+                if uscore is not None:
+                    r["usefulness_score"] = uscore
+                    # usefulness 是 0-10 分，以 5 为中位、斜率 0.003 →
+                    # 最大影响 ±0.015，与 RRF 总分（0.01~0.03）同量级。
+                    # 旧代码 score*0.05 会给 +0.5，直接压过相关性，是缺陷。
+                    r["_score"] += (float(uscore) - 5.0) * 0.003
+            if _framework and _framework != "neutral":
+                bias = school_bias(r.get("_school") or "", _framework)
+                if bias:
+                    r["_score"] += bias * 0.01
+                    r["_school_bias"] = bias
+    except Exception as exc:
+        logger.debug(f"治理加权跳过: {exc}")
+
+    all_results = sorted(_candidates, key=lambda x: x["_score"], reverse=True)[:limit]
     try:
         # 原文先于场景、算术和模型验收，FTS 分词片段不能替代原始条件。
         hydrate_evidence(all_results, _get_conn)
@@ -2517,17 +2731,10 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             elif r.get("content_type") == "analysis":
                 r["_score"] *= 1.2  # 分析记录加权 20%
 
-    # 知识反馈加权：用户标记有用/无用的条目加权
-    try:
-        from db.knowledge import get_knowledge_usefulness
-        for r in all_results:
-            ref_id = r.get("reference_id")
-            if ref_id:
-                score = get_knowledge_usefulness(int(ref_id))
-                if score != 0:
-                    r["_score"] += score * 0.05  # 每次+/-1 影响 0.05 分
-    except Exception:
-        pass
+    # 知识治理元数据：流派 + 时序 + 有用度
+    # 加权已在候选筛选前完成（见上方 _candidates 段），此处仅确保
+    # 后续新增的结果（如直接注入的估值数据）也带上流派元数据，不再重复加分。
+    _apply_governance_metadata(all_results)
 
     all_results.sort(key=lambda x: x["_score"], reverse=True)
 
@@ -2766,6 +2973,7 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "note": "个人笔记",
         "concept": "投资概念",
         "strategy": "投资策略",
+        "user_lesson": "用户教训",
     }
     for r in all_results:
         r["label"] = label_map.get(r["content_type"], r["content_type"])
@@ -2792,6 +3000,9 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
             "rag_low_quality": True,
             "quality_filtered": quality_filtered,
             "quality_reasons": sorted(quality_reasons or {"no_usable_evidence"}),
+            "schools": {}, "framework": _framework, "school_conflict": False,
+            "conflict_pairs": [], "domain_filtered": _domain_filtered,
+            "domains": _domains,
         }
 
     # 构建上下文：以完整结果为单位，避免截断丢失来源标注
@@ -2799,6 +3010,17 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
     total_chars = 0
     max_context_chars = get_rag_config_int("max_context_chars", 3000)
     body_preview_chars = get_rag_config_int("body_preview_chars", 600)
+
+    from services.knowledge_governance import (
+        SCHOOL_LABELS, detect_school_conflict, framework_header,
+    )
+    # 披露口径以「真正进入上下文的结果」为准，而不是召回阶段的全量候选
+    _school_counts: dict = {}
+    for r in all_results:
+        _s = r.get("_school") or ""
+        if _s:
+            _school_counts[_s] = _school_counts.get(_s, 0) + 1
+    _conflicts = detect_school_conflict(list((r.get("_school") or "") for r in all_results))
 
     for r in all_results:
         # 融合分、语义分与事实可信度不是同一量，不能共用“高”标签。
@@ -2811,6 +3033,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         part = f"[{r['label']}] [引用: {r.get('evidence_id', '')}] [{relevance_tag}] {r['title']}"
         if r.get("time"):
             part += f" ({r['time']})"
+        # 流派标注：让每条证据自带方法论出处，防止两派观点在 LLM 内部无声融合
+        _school = r.get("_school") or ""
+        if _school:
+            part += f" [流派:{SCHOOL_LABELS.get(_school, _school)}]"
+        else:
+            part += " [流派:未标注]"
         if r.get("usage_scope"):
             part += f" [usage_scope:{r['usage_scope']}; date_verified:{r.get('date_verified', False)}]"
         if r.get("source"):
@@ -2858,8 +3086,15 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         reordered.append(parts[worst_idx])  # 次相关的放最后面
         parts = reordered
 
+    # 流派披露块放在最前面：先告诉 LLM「这批证据来自哪些互相对立的方法论」，
+    # 再让它读具体条目。顺序很关键 —— 放在末尾等同于事后声明。
+    _header = framework_header(_school_counts, _framework, _conflicts)
+    _context = "\n\n---\n\n".join(parts)
+    if _header:
+        _context = _header + "\n\n---\n\n" + _context
+
     return {
-        "context": "\n\n---\n\n".join(parts),
+        "context": _context,
         "results": all_results,
         "keywords": keywords,
         "query": query,
@@ -2871,6 +3106,12 @@ def build_rag_context_with_details(query: str, content_types: list[str] = None, 
         "rag_low_quality": bool(quality_reasons) or any(r.get("quality_status") != "usable" for r in all_results),
         "quality_filtered": quality_filtered,
         "quality_reasons": sorted(quality_reasons),
+        "schools": _school_counts,
+        "framework": _framework,
+        "school_conflict": bool(_conflicts),
+        "conflict_pairs": [list(p) for p in _conflicts],
+        "domain_filtered": _domain_filtered,
+        "domains": _domains,
     }
 
 

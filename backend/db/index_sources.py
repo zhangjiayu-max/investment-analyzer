@@ -10,7 +10,7 @@ _SOURCE_QUERIES = {
     # skill 同时用于技能文档与蒸馏结果，不能仅对照其中一张表。
     'skill': 'SELECT 1 FROM skill_documents WHERE id=? UNION ALL SELECT 1 FROM author_articles WHERE id=?',
 }
-_KNOWLEDGE_TYPES = {'book','note','concept','strategy','bond','knowledge'}
+_KNOWLEDGE_TYPES = {'book','note','concept','strategy','bond','knowledge','user_lesson'}
 
 
 def source_exists(conn, content_type, reference_id):

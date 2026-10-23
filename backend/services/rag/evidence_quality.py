@@ -7,7 +7,7 @@ import json
 import re
 from datetime import date
 
-KNOWLEDGE_TYPES = {"book", "note", "concept", "strategy", "bond", "knowledge"}
+KNOWLEDGE_TYPES = {"book", "note", "concept", "strategy", "bond", "knowledge", "user_lesson"}
 _RETURN = re.compile(r"(下跌|下降|亏损|上涨|上升|增长)\s*([+-]?\d+(?:\.\d+)?)\s*%")
 _COMBINED = re.compile(
     r"组合(?:回报率?|收益率?|结果)(?:约)?(?:为|是|达到|等于)?\s*"

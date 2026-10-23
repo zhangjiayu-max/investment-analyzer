@@ -1748,6 +1748,11 @@ _GENERIC_INDEX_CHARS = set(
 # 通用前缀词（匹配时允许剥离）
 _INDEX_PREFIX_TOKENS = ("中证", "国证", "上证", "深证", "沪", "深", "恒生", "香港", "中华")
 
+# 市场前缀：语义上互斥的交易所/市场归属前缀。同属"指数/综指/全指"等通用后缀前，
+# 前缀不同即代表不同标的（如"上证指数" vs "恒生指数"），剥离通用后缀后不应互相匹配。
+# 修复 P0：query="上证指数" 误匹配 name="恒生指数"（剥离前缀后都剩"指数"）。
+_INDEX_MARKET_PREFIXES = ("上证", "深证", "中证", "国证", "恒生", "香港", "中华")
+
 # 通用后缀词（匹配时允许剥离）
 _INDEX_SUFFIX_TOKENS = ("指数", "ETF", "LOF", "全指", "综指", "港股通", "A股", "B股", "港股", "人民币")
 
@@ -1762,6 +1767,11 @@ _INDEX_NAME_ALIASES = {
     "军工": ["中证军工", "国防军工"],
     "半导体": ["中证半导体", "芯片"],
     "食品饮料": ["中证食品饮料", "主要消费"],
+    # 上证综指：用户口语"上证指数/大盘/上证综指"都指 000001，非"上证50"。
+    # 估值目录无上证综指 PE/PB（数据源为中证/深证系），但价格历史可由 akshare 补。
+    "上证指数": ["上证综指", "上证综合指数"],
+    "上证综指": ["上证指数", "上证综合指数"],
+    "大盘": ["上证综指", "上证指数"],
 }
 
 
@@ -1788,6 +1798,19 @@ def _has_meaningful_mismatch(query: str, name: str) -> bool:
     return False
 
 
+def _extract_market_prefix(name: str) -> str:
+    """提取指数名称的市场前缀（上证/深证/中证/国证/恒生/香港/中华）。
+
+    用于跨市场错配判断：不同市场前缀的指数（如上证 vs 恒生）不应互相匹配。
+    """
+    if not name:
+        return ""
+    for p in _INDEX_MARKET_PREFIXES:
+        if name.startswith(p):
+            return p
+    return ""
+
+
 def _is_index_name_match(query: str, name: str) -> bool:
     """判断用户查询 query 是否匹配指数名称 name。
 
@@ -1809,6 +1832,13 @@ def _is_index_name_match(query: str, name: str) -> bool:
     # 2. 双向子串匹配
     if q in n or n in q:
         return True
+    # 2.5 市场前缀一致性检查（P0 修复：上证/恒生等跨市场错配）
+    # "上证指数" 与 "恒生指数" 剥离前缀后都剩"指数"，会误判相等。
+    # 市场前缀互斥：双方都带不同的市场前缀时，直接判不匹配。
+    q_market = _extract_market_prefix(q)
+    n_market = _extract_market_prefix(n)
+    if q_market and n_market and q_market != n_market:
+        return False
     # 3. 剥离通用前缀后子串匹配
     q_stripped = q
     for p in _INDEX_PREFIX_TOKENS:
@@ -1984,10 +2014,21 @@ def _search_knowledge(args: dict) -> str:
             "as_of_date", "valid_until", "quality_status", "quality_reason", "validation_status",
             "validation_issues", "content_origin", "rerank_score", "usage_scope", "date_verified",
         )}
+        # 流派与时序：Agent 侧必须能看到「这条证据属于哪个方法论」
+        item["school"] = r.get("_school") or ""
+        item["temporal_type"] = r.get("_temporal_type") or ""
         body = r.get("body", "") or ""
         item.update({"content": body, "body_preview": body[:600],
                      "preview_truncated": len(body) > 600, "score": round(r.get("_score", 0), 3)})
         slim_results.append(item)
+
+    # 流派披露块：不传给 Agent，等于知识库治理在 Agent 链路上完全失效。
+    # 这里同时给结构化字段（供程序判断）和可直接拼进 prompt 的文本（供模型阅读）。
+    from services.knowledge_governance import framework_header as _fw_header
+    _schools = result.get("schools", {}) or {}
+    _framework = result.get("framework", "neutral")
+    _pairs = [tuple(p) for p in (result.get("conflict_pairs") or [])]
+    _disclosure = _fw_header(_schools, _framework, _pairs)
 
     return json.dumps({
         "results": slim_results,
@@ -1996,6 +2037,11 @@ def _search_knowledge(args: dict) -> str:
         "rag_low_quality": result.get("rag_low_quality", True),
         "quality_reasons": result.get("quality_reasons", []),
         "quality_filtered": result.get("quality_filtered", 0),
+        "schools": _schools,
+        "framework": _framework,
+        "school_conflict": bool(result.get("school_conflict")),
+        "school_disclosure": _disclosure,
+        "domain_filtered": result.get("domain_filtered", 0),
         "validation_scope": "仅相关性、适用场景和部分明确加权收益示例；未全面核验事实",
     }, ensure_ascii=False)
 
@@ -2180,6 +2226,22 @@ def _get_author_opinions(args: dict) -> str:
     }, ensure_ascii=False)
 
 
+def _is_shanghai_composite(index_name: str) -> bool:
+    """判断是否为上证综指（000001）的口语表达。
+
+    用户说"上证指数已经 3600 多点"，指数值是上证综指口径（上证50/沪深300 数值不同）。
+    口语化别名：上证指数 / 上证综指 / 上证综合指数 / 大盘 / 沪指。
+    """
+    if not index_name:
+        return False
+    n = index_name.strip()
+    if n in ("000001", "000001.SH", "1A0001", "sh000001", "SH000001"):
+        return True
+    if n in ("上证指数", "上证综指", "上证综合指数", "沪指", "大盘", "上证"):
+        return True
+    return False
+
+
 def _calculate_metrics(args: dict) -> str:
     """基于真实指数收盘价计算价格收益指标，禁止以 PE/PB 代替行情。"""
     import math
@@ -2206,10 +2268,14 @@ def _calculate_metrics(args: dict) -> str:
                 break
         if matched_code:
             break
+    # 上证综指兜底：估值目录（中证/深证系）无 000001，但 akshare 可拉价格历史。
+    # 用户口语"上证指数/上证综指/大盘"→ 000001，用于计算近10年跌幅趋势。
+    if not matched_code and _is_shanghai_composite(index_name):
+        matched_code, matched_name = "000001", "上证综指"
     if not matched_code:
         return json.dumps({"error": f"未找到'{index_name}'相关指数"}, ensure_ascii=False)
 
-    days = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825}.get(period, 1095)
+    days = {"1年": 365, "2年": 730, "3年": 1095, "5年": 1825, "10年": 3650}.get(period, 1095)
     result = {"index_code": matched_code, "index_name": matched_name, "period": period,
               "data_source": "index_price_history", "series_type": "index_close_price",
               "return_basis": "指数价格收益，不含分红、费用和跟踪误差", "unit": "%"}
@@ -2218,6 +2284,16 @@ def _calculate_metrics(args: dict) -> str:
     except Exception as exc:
         logger.warning("指数价格序列不可用 %s: %s", matched_code, exc)
         history = []
+    # 本地序列不足时，尝试从 akshare 自动拉取（上证综指等非估值目录指数依赖此路径）。
+    if len(history) < 2:
+        try:
+            from services.index.index_history_fetcher import fetch_index_history
+            years = max(1, days // 365)
+            fetched = fetch_index_history(matched_code, years=years)
+            if fetched.get("saved", 0) > 0:
+                history = get_index_price_history(matched_code, days=days)
+        except Exception as exc:
+            logger.warning("自动拉取指数历史失败 %s: %s", matched_code, exc)
     # 不依赖上游排序；拒绝未来、重复日期和无效数值。
     pairs = {}
     for row in history:

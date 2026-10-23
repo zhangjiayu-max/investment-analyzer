@@ -13,23 +13,53 @@ def add_knowledge(category: str, title: str, content: str,
                   atom_type: str = "", evidence_level: str = "",
                   as_of_date: str = "", valid_until: str = "",
                   limitations: list = None, counterpoints: list = None,
-                  source_decision_id: int = None) -> int:
-    """添加知识条目，返回 ID。"""
+                  source_decision_id: int = None,
+                  domain: str = "", school: str = "",
+                  temporal_type: str = "") -> int:
+    """添加知识条目，返回 ID。
+
+    domain / school / temporal_type 为空时按治理规则自动推断，
+    保证新入库内容不会成为「治理盲区」。
+    """
+    if not domain or not school or not temporal_type:
+        try:
+            from services.knowledge_governance import (
+                infer_domain, infer_temporal, SCHOOL_BY_BOOK,
+            )
+            if not domain:
+                domain = infer_domain(category, source or "", title, content)
+            if not school:
+                school = SCHOOL_BY_BOOK.get(source or "", "")
+                if not school and domain == "investment" and category in ("concept", "strategy", "fund"):
+                    school = "general"
+            if not temporal_type:
+                temporal_type, inferred_as_of = infer_temporal(atom_type, content)
+                if not as_of_date and inferred_as_of:
+                    as_of_date = inferred_as_of
+        except Exception as e:
+            logger.debug(f"知识治理字段自动推断失败，使用空值: {e}")
+
     conn = _get_conn()
     try:
         cur = conn.execute("""
             INSERT OR REPLACE INTO knowledge_base
             (category, subcategory, title, content, source, keywords, importance,
              atom_type, evidence_level, as_of_date, valid_until, limitations, counterpoints,
-             source_decision_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             source_decision_id, domain, school, temporal_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (category, subcategory, title, content, source,
               json.dumps(keywords or [], ensure_ascii=False), importance,
               atom_type or "", evidence_level or "", as_of_date or "", valid_until or "",
               json.dumps(limitations or [], ensure_ascii=False),
               json.dumps(counterpoints or [], ensure_ascii=False),
-              source_decision_id))
+              source_decision_id,
+              domain or "", school or "", temporal_type or ""))
         conn.commit()
+        try:
+            from services.knowledge_governance import invalidate_meta_cache
+            invalidate_meta_cache()
+        except Exception:
+            pass
         return cur.lastrowid
     finally:
         conn.close()
@@ -58,36 +88,53 @@ def get_knowledge(knowledge_id: int) -> dict | None:
     return None
 
 
-def search_knowledge(query: str, category: str = None, limit: int = 10) -> list[dict]:
-    """搜索知识库（FTS5 + 关键词匹配）。"""
+def search_knowledge(query: str, category: str = None, limit: int = 10,
+                     domain: str = None, school: str = None) -> list[dict]:
+    """搜索知识库（LIKE 子串匹配，按相关度优先排序）。
+
+    2026-10-23 修复：原实现 `ORDER BY importance DESC`，等于**完全忽略匹配质量**。
+    症状：查「黄金」时，importance 高的《金融炼金术》条目排在
+    《黄金投资新时代》之前，即使后者标题里就有「黄金」。
+    现在的排序优先级：标题命中 > 关键词命中 > 正文命中 > importance。
+
+    局限（已知，未在本轮处理）：LIKE 无法做相关性打分，也无法区分
+    「黄金法则」与「黄金资产」的语义差别。检索主链路走
+    services.rag.search_knowledge（FTS5 + 实体消歧），本函数仅供
+    /api/knowledge/search 这类轻量接口使用。
+    """
     conn = _get_conn()
+    like = f"%{query}%"
 
-    # 先尝试 FTS5 搜索
+    base_where = "(title LIKE ? OR content LIKE ? OR keywords LIKE ?)"
+    params: list = [like, like, like]
+    if category:
+        base_where += " AND category = ?"
+        params.append(category)
+    if domain:
+        base_where += " AND COALESCE(NULLIF(domain,''),'investment') = ?"
+        params.append(domain)
+    if school:
+        base_where += " AND school = ?"
+        params.append(school)
+
     try:
-        if category:
-            rows = conn.execute("""
-                SELECT kb.* FROM knowledge_base kb
-                WHERE kb.category = ?
-                AND (kb.title LIKE ? OR kb.content LIKE ? OR kb.keywords LIKE ?)
-                ORDER BY kb.importance DESC
-                LIMIT ?
-            """, (category, f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT * FROM knowledge_base
-                WHERE title LIKE ? OR content LIKE ? OR keywords LIKE ?
-                ORDER BY importance DESC
-                LIMIT ?
-            """, (f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
-    except Exception:
+        rows = conn.execute(f"""
+            SELECT * FROM knowledge_base
+            WHERE {base_where}
+            ORDER BY
+                CASE WHEN title LIKE ? THEN 0 ELSE 1 END,
+                CASE WHEN keywords LIKE ? THEN 0 ELSE 1 END,
+                importance DESC,
+                id ASC
+            LIMIT ?
+        """, params + [like, like, limit]).fetchall()
+    except Exception as e:
+        logger.warning(f"知识库搜索失败: {e}")
         rows = []
+    finally:
+        conn.close()
 
-    conn.close()
-
-    results = []
-    for row in rows:
-        results.append(_parse_knowledge_row(row))
-    return results
+    return [_parse_knowledge_row(row) for row in rows]
 
 
 def list_knowledge(category: str = None, subcategory: str = None,
